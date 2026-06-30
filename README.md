@@ -194,6 +194,30 @@ A responder may call `send` several times to emit multiple messages for one
 update (the rich agent facade — text, code, attachments, "think and send more"
 — is preserved).
 
+### Dispatcher-side delivery (drain)
+
+The dispatcher runs one **drain** per bound outbox: it watches the directory
+(fsnotify) and, on each drop, sends the descriptors to Telegram **in drop order**
+(filenames sort by drop time), deleting each only after a successful send. The
+route (`chat_id`/`reply_to`) is the dispatcher's, bound to the outbox — never
+taken from the descriptor.
+
+- **Catch-up on start.** Before watching, the drain sends whatever is already in
+  the directory, so drops that landed while it was down are delivered (the spool
+  is durable). A periodic tick retries after a transient failure.
+- **Rendering lives here.** `text` goes out as `sendMessage` (plain, or
+  `parse_mode=HTML`); `code` is wrapped in `<pre><code class="language-…">` with
+  the body HTML-escaped; a message over Telegram's 4096-char limit **spills to a
+  document** (the raw, unwrapped payload). `document` is a `sendDocument` upload.
+- **Ordering and failures.** Sends are sequential per outbox. A transient send
+  failure stops the pass — leaving that descriptor and everything after it — so a
+  retry preserves order (head-of-line). An unparseable descriptor is moved to
+  `<outbox>/bad/` and skipped, so junk never blocks the queue.
+
+Each send returns the Telegram `message_id`, which the dispatcher will later map
+back to the responder's session for **reply-resurrection** (replying to an old
+bot message revives its `--resume` session).
+
 ## Install & deploy
 
 The binary is distributed the normal Go way (`go install`), so by the time you run
@@ -215,6 +239,9 @@ main.go            command dispatch (skeleton)
 config.go          Config: TOML + CLI-flag resolution
 outbox.go          outbound descriptor model + atomic spool drop
 send.go            `send` subcommand (text / code / document)
+render.go          descriptor -> Telegram text/parse_mode, code wrapping, spill
+telegram.go        Telegram Bot API client (sendMessage / sendDocument)
+drain.go           dispatcher-side outbox drain (fsnotify watch -> send -> ack)
 bot.toml.example   example config
 go.mod / go.sum
 README.md          this design
