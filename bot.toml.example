@@ -1,0 +1,37 @@
+# ak-tgclaude — example bot configuration (TOML).
+#
+# Copy to bot.toml and fill in. Every field can also be passed on the command
+# line (flags override the file); the CLI exists for a quick "just try it" run:
+#
+#   ak-tgclaude dispatch --bot-token 123:ABC --profile qa --project ~/code
+#
+# In production prefer this file over --bot-token: a token in a file is
+# protected by sandbox.credentials.files (deny-read inside the responder's
+# sandbox), whereas a token on the command line is visible in the host's
+# process list (ps) to other local processes.
+
+# Telegram bot token (secret). Kept only in the dispatcher's memory; never
+# exported to the environment. Required.
+bot_token = "123456789:AA...replace-me..."
+
+# Access profile: "qa" (read-only, default) | "dev" | "ops".
+# Only "qa" is implemented for now; dev/ops are reserved for a future
+# remote-development pivot. The profile drives the responder's permissions and
+# what its PreToolUse hook allows.
+profile = "qa"
+
+# The project the bot consults on. Read-only under the qa profile; the sandbox
+# and PreToolUse confine the responder's reads here. Required.
+project = "~/code/example-project"
+
+# --- optional overrides (defaults shown) ---
+
+# Base directory under which the ephemeral responder cwd is created (a
+# pseudo-random subdir is made inside it). Default: $XDG_RUNTIME_DIR, else a
+# temp dir. The cwd holds only a generated settings.json + skills; it is
+# disposable.
+# runtime_base = ""
+
+# Durable dispatcher state (chat->session and message->session maps), which must
+# survive restarts. Default: $XDG_STATE_HOME/ak-tgclaude (~/.local/state/ak-tgclaude).
+# state_dir = ""

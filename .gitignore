@@ -1,6 +1,9 @@
 # Local dev deploy script — machine-specific, not part of the release.
 /deploy.sh
 
+# Real bot config (contains the token). Only bot.toml.example is committed.
+/bot.toml
+
 # Build artifacts.
 /ak-tgclaude
 *.exe
