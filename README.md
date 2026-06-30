@@ -147,6 +147,53 @@ a temp-file-plus-atomic-rename, so the watcher never sees a partial write.
 The **return / private channel** (dispatcher → a specific responder instance) is a
 separate concern from this outbound spool and may use a per-instance channel.
 
+### The descriptor
+
+Each dropped file is one **descriptor** — a single outbound action, JSON. It
+carries the **semantic** message (what to say), never the **route** (where): the
+dispatcher pins `chat_id`/`reply_to` in-process and ignores anything a responder
+might add. A `kind` discriminator plus a `v` schema version keep it extensible —
+a new kind (`photo`, an inline-keyboard for the approval UX) or field is
+non-breaking, since a reader switches on `kind` and ignores fields it does not
+know.
+
+```jsonc
+{ "v": 1, "kind": "text",     "text": "…", "format": "plain|html", "silent": false }
+{ "v": 1, "kind": "code",     "code": "…", "language": "go", "caption": "…" }
+{ "v": 1, "kind": "document", "path": "/abs/file.pdf", "filename": "report.pdf", "caption": "…" }
+```
+
+- **`text`** — a message. `format: "plain"` (default, shown verbatim) or `"html"`
+  (Telegram `parse_mode=HTML`; the responder supplies valid, escaped HTML — its
+  full inline-formatting escape hatch).
+- **`code`** — a preformatted block with an optional `language`. The dispatcher
+  renders it as `<pre><code class="language-LANG">…</code></pre>` (escaping the
+  body for you) and **spills to a document** when it exceeds Telegram's size
+  limit.
+- **`document`** — a file attachment. `path` is **absolute** so it survives the
+  responder's ephemeral cwd; the dispatcher uploads it before that cwd is torn
+  down.
+
+Rendering to Telegram HTML and the oversize-spill policy live in the
+**dispatcher**, so `send` only serializes intent.
+
+### The `send` surface
+
+`send` runs inside the responder sandbox and drops one descriptor per call into
+`$AK_TGCLAUDE_OUTBOX` (the dispatcher sets this to the directory bound to the
+invocation's route). The body is a positional argument, or stdin (`-`/omitted)
+for large content:
+
+```sh
+ak-tgclaude send text [--html] [--silent] [body|-]
+ak-tgclaude send code [--lang go] [--caption main.go] [--silent] [body|-]
+ak-tgclaude send doc  [--filename report.pdf] [--caption "…"] [--silent] <path>
+```
+
+A responder may call `send` several times to emit multiple messages for one
+update (the rich agent facade — text, code, attachments, "think and send more"
+— is preserved).
+
 ## Install & deploy
 
 The binary is distributed the normal Go way (`go install`), so by the time you run
@@ -166,6 +213,8 @@ inline-keyboard **yes/no approval buttons** in Telegram for gated actions.
 ```
 main.go            command dispatch (skeleton)
 config.go          Config: TOML + CLI-flag resolution
+outbox.go          outbound descriptor model + atomic spool drop
+send.go            `send` subcommand (text / code / document)
 bot.toml.example   example config
 go.mod / go.sum
 README.md          this design

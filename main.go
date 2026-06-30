@@ -33,7 +33,9 @@ func main() {
 	switch cmd := os.Args[1]; cmd {
 	case "dispatch":
 		runDispatch(os.Args[2:])
-	case "send", "hook", "deploy":
+	case "send":
+		runSend(os.Args[2:])
+	case "hook", "deploy":
 		todo(cmd)
 	case "version":
 		fmt.Println("ak-tgclaude (dev)")
