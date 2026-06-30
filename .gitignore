@@ -1,0 +1,9 @@
+# Local dev deploy script — machine-specific, not part of the release.
+/deploy.sh
+
+# Build artifacts.
+/ak-tgclaude
+*.exe
+
+# Editor / OS cruft.
+.DS_Store
