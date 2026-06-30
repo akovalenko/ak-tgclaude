@@ -51,16 +51,3 @@ func todo(cmd string) {
 	fmt.Fprintf(os.Stderr, "ak-tgclaude: %s: not implemented yet\n", cmd)
 	os.Exit(1)
 }
-
-// runDispatch loads configuration and (eventually) runs the dispatcher loop.
-func runDispatch(args []string) {
-	cfg, err := loadConfig(args)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "ak-tgclaude: dispatch: %v\n", err)
-		os.Exit(2)
-	}
-	fmt.Printf("config loaded: profile=%s project=%s state_dir=%s bot_token=%s\n",
-		cfg.Profile, cfg.Project, cfg.StateDir, redact(cfg.BotToken))
-	fmt.Fprintln(os.Stderr, "ak-tgclaude: dispatch: dispatcher loop not implemented yet")
-	os.Exit(1)
-}

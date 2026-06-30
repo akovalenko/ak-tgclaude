@@ -31,6 +31,10 @@ type Config struct {
 	// Profile is the responder access profile (default "qa", read-only).
 	Profile Profile `toml:"profile"`
 
+	// Agent is the responder agent name passed to `claude -p --agent`. Empty
+	// uses the cwd's configured default agent.
+	Agent string `toml:"agent"`
+
 	// Project is the codebase the responder consults on (read-only under "qa").
 	// The sandbox and PreToolUse confine the responder's reads here.
 	Project string `toml:"project"`
@@ -52,6 +56,7 @@ func loadConfig(args []string) (*Config, error) {
 	botToken := fs.String("bot-token", "", "Telegram bot token (overrides config; visible in host ps — prefer the config file in production)")
 	profile := fs.String("profile", "", "access profile: qa|dev|ops (default qa, read-only)")
 	project := fs.String("project", "", "path to the project the responder consults on (read-only)")
+	agent := fs.String("agent", "", "responder agent name for `claude -p --agent` (default: cwd's default agent)")
 	if err := fs.Parse(args); err != nil {
 		return nil, err
 	}
@@ -71,6 +76,9 @@ func loadConfig(args []string) (*Config, error) {
 	}
 	if *project != "" {
 		c.Project = *project
+	}
+	if *agent != "" {
+		c.Agent = *agent
 	}
 
 	c.applyDefaults()

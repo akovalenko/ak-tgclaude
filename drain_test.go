@@ -156,12 +156,14 @@ func TestDrainStopsOnSendErrorPreservingOrder(t *testing.T) {
 	}
 }
 
-func TestDrainOutboxWatchDelivers(t *testing.T) {
+func TestServeOutboxWatchDelivers(t *testing.T) {
 	dir := t.TempDir()
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	f := &fakeSender{}
-	go DrainOutbox(ctx, dir, Route{ChatID: 1}, f)
+	stop := make(chan struct{})
+	done := make(chan struct{})
+	go func() { defer close(done); serveOutbox(ctx, dir, Route{ChatID: 1}, f, stop) }()
 
 	// Give the watcher a moment to register, then drop a descriptor.
 	time.Sleep(100 * time.Millisecond)
@@ -172,10 +174,29 @@ func TestDrainOutboxWatchDelivers(t *testing.T) {
 	deadline := time.Now().Add(3 * time.Second)
 	for time.Now().Before(deadline) {
 		if len(f.snapshot()) == 1 {
-			cancel()
+			close(stop)
+			<-done
 			return
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
 	t.Fatalf("watched drop was not delivered within deadline")
+}
+
+func TestServeOutboxFinalFlush(t *testing.T) {
+	dir := t.TempDir()
+	f := &fakeSender{}
+	stop := make(chan struct{})
+	done := make(chan struct{})
+	// Drop BEFORE starting, then stop immediately: the final flush (or catch-up)
+	// must still deliver it.
+	if _, err := (&Descriptor{Kind: KindText, Text: "queued"}).Drop(dir); err != nil {
+		t.Fatal(err)
+	}
+	go func() { defer close(done); serveOutbox(context.Background(), dir, Route{ChatID: 1}, f, stop) }()
+	close(stop)
+	<-done
+	if calls := f.snapshot(); len(calls) != 1 || calls[0].text != "queued" {
+		t.Errorf("queued descriptor not flushed: %+v", calls)
+	}
 }

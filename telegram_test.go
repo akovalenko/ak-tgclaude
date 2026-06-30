@@ -98,6 +98,36 @@ func TestClientSendDocument(t *testing.T) {
 	}
 }
 
+func TestClientGetUpdates(t *testing.T) {
+	var body map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		io.WriteString(w, `{"ok":true,"result":[
+			{"update_id":10,"message":{"message_id":5,"text":"hi","chat":{"id":99}}},
+			{"update_id":11,"message":{"message_id":6,"text":"yo","chat":{"id":99},"reply_to_message":{"message_id":5}}}
+		]}`)
+	}))
+	defer srv.Close()
+
+	c := &Client{Token: "T", BaseURL: srv.URL, HTTP: srv.Client()}
+	ups, err := c.GetUpdates(context.Background(), 10, 30)
+	if err != nil {
+		t.Fatalf("GetUpdates: %v", err)
+	}
+	if body["offset"].(float64) != 10 || body["timeout"].(float64) != 30 {
+		t.Errorf("request body wrong: %v", body)
+	}
+	if len(ups) != 2 {
+		t.Fatalf("got %d updates, want 2", len(ups))
+	}
+	if ups[0].UpdateID != 10 || ups[0].Message.Text != "hi" || ups[0].Message.Chat.ID != 99 {
+		t.Errorf("update 0 wrong: %+v", ups[0])
+	}
+	if ups[1].Message.ReplyTo == nil || ups[1].Message.ReplyTo.MessageID != 5 {
+		t.Errorf("reply_to not parsed: %+v", ups[1].Message)
+	}
+}
+
 func TestClientAPIError(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusBadRequest)

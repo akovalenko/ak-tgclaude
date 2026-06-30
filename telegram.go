@@ -29,6 +29,25 @@ type Sender interface {
 	SendDocument(ctx context.Context, r Route, path, filename, caption, parseMode string, silent bool) (messageID int64, err error)
 }
 
+// Update is a single Telegram update (only message updates are requested).
+type Update struct {
+	UpdateID int64    `json:"update_id"`
+	Message  *Message `json:"message"`
+}
+
+// Message is a Telegram message (the fields the dispatcher needs).
+type Message struct {
+	MessageID int64    `json:"message_id"`
+	Text      string   `json:"text"`
+	Chat      Chat     `json:"chat"`
+	ReplyTo   *Message `json:"reply_to_message"`
+}
+
+// Chat identifies the conversation an update belongs to.
+type Chat struct {
+	ID int64 `json:"id"`
+}
+
 // Client talks to the Telegram Bot API. It holds the bot token — the dispatcher
 // is the only component that does.
 type Client struct {
@@ -64,13 +83,30 @@ func (c *Client) methodURL(method string) string {
 	return fmt.Sprintf("%s/bot%s/%s", c.baseURL(), c.Token, method)
 }
 
-// apiResponse is the envelope Telegram wraps every result in.
-type apiResponse struct {
-	OK          bool   `json:"ok"`
-	Description string `json:"description"`
-	Result      struct {
-		MessageID int64 `json:"message_id"`
-	} `json:"result"`
+// GetUpdates long-polls for new updates starting at offset (last seen
+// update_id + 1), waiting up to timeoutSec for one to arrive.
+func (c *Client) GetUpdates(ctx context.Context, offset int64, timeoutSec int) ([]Update, error) {
+	payload := map[string]any{
+		"offset":          offset,
+		"timeout":         timeoutSec,
+		"allowed_updates": []string{"message"},
+	}
+	status, body, err := c.postJSON(ctx, "getUpdates", payload)
+	if err != nil {
+		return nil, err
+	}
+	var r struct {
+		OK          bool     `json:"ok"`
+		Description string   `json:"description"`
+		Result      []Update `json:"result"`
+	}
+	if err := json.Unmarshal(body, &r); err != nil {
+		return nil, fmt.Errorf("decoding getUpdates (HTTP %d): %w", status, err)
+	}
+	if !r.OK {
+		return nil, fmt.Errorf("getUpdates error (HTTP %d): %s", status, r.Description)
+	}
+	return r.Result, nil
 }
 
 // SendMessage delivers a text message (sendMessage).
@@ -88,16 +124,11 @@ func (c *Client) SendMessage(ctx context.Context, r Route, text, parseMode strin
 	if silent {
 		payload["disable_notification"] = true
 	}
-	body, err := json.Marshal(payload)
+	status, body, err := c.postJSON(ctx, "sendMessage", payload)
 	if err != nil {
 		return 0, err
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.methodURL("sendMessage"), bytes.NewReader(body))
-	if err != nil {
-		return 0, err
-	}
-	req.Header.Set("Content-Type", "application/json")
-	return c.do(req)
+	return decodeMessageID(status, body)
 }
 
 // SendDocument uploads a file as an attachment (sendDocument, multipart).
@@ -142,26 +173,57 @@ func (c *Client) SendDocument(ctx context.Context, r Route, path, filename, capt
 		return 0, err
 	}
 	req.Header.Set("Content-Type", mw.FormDataContentType())
+	status, body, err := c.do(req)
+	if err != nil {
+		return 0, err
+	}
+	return decodeMessageID(status, body)
+}
+
+// postJSON POSTs a JSON payload to a Bot API method and returns the raw body.
+func (c *Client) postJSON(ctx context.Context, method string, payload any) (int, []byte, error) {
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return 0, nil, err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.methodURL(method), bytes.NewReader(body))
+	if err != nil {
+		return 0, nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
 	return c.do(req)
 }
 
-// do executes a prepared request and unwraps the Telegram envelope.
-func (c *Client) do(req *http.Request) (int64, error) {
+// do executes a prepared request and returns its status and body. Transport
+// errors are returned; HTTP/API status is left to the caller (the Telegram
+// envelope carries ok/description).
+func (c *Client) do(req *http.Request) (int, []byte, error) {
 	resp, err := c.httpClient().Do(req)
 	if err != nil {
-		return 0, err
+		return 0, nil, err
 	}
 	defer resp.Body.Close()
-	data, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if err != nil {
-		return 0, err
+		return resp.StatusCode, nil, err
 	}
-	var ar apiResponse
-	if err := json.Unmarshal(data, &ar); err != nil {
-		return 0, fmt.Errorf("decoding Telegram response (HTTP %d): %w", resp.StatusCode, err)
+	return resp.StatusCode, body, nil
+}
+
+// decodeMessageID unwraps the {ok, result:{message_id}} envelope.
+func decodeMessageID(status int, body []byte) (int64, error) {
+	var ar struct {
+		OK          bool   `json:"ok"`
+		Description string `json:"description"`
+		Result      struct {
+			MessageID int64 `json:"message_id"`
+		} `json:"result"`
+	}
+	if err := json.Unmarshal(body, &ar); err != nil {
+		return 0, fmt.Errorf("decoding Telegram response (HTTP %d): %w", status, err)
 	}
 	if !ar.OK {
-		return 0, fmt.Errorf("Telegram API error (HTTP %d): %s", resp.StatusCode, ar.Description)
+		return 0, fmt.Errorf("Telegram API error (HTTP %d): %s", status, ar.Description)
 	}
 	return ar.Result.MessageID, nil
 }

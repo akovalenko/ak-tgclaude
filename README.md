@@ -74,6 +74,39 @@ Three distinct locations, following the XDG split:
   lives here, **not** in the launch cwd (state location must not depend on where
   the process was started from) nor in the ephemeral cwd (which is wiped).
 
+## Dispatch loop & sessions
+
+The dispatcher long-polls `getUpdates` and processes updates **sequentially**
+(per-chat concurrency is a later optimization). For each message:
+
+1. **`/clear`** drops the chat's session and acks — the next message starts fresh.
+   This is the explicit "break the user↔session association" lever.
+2. Otherwise it looks up the chat's session, creates a **per-invocation outbox
+   directory**, and spawns the responder (`claude -p --agent … [--resume <id>]`)
+   with `$AK_TGCLAUDE_OUTBOX` pointing at that directory and the message text on
+   stdin. A drain bound to `Route{chat_id, reply_to=incoming message_id}` runs
+   for the lifetime of that responder and delivers its messages (replying to the
+   incoming one).
+3. When the responder finishes, the session id it used (parsed from
+   `--output-format json`) is bound to the chat, so the next message
+   `--resume`s it.
+
+**The per-invocation outbox dir is the route capability.** The dispatcher pins
+the route in memory and binds it to the directory it handed this one responder;
+the responder only writes its message, never names a chat — a confused-deputy is
+closed by construction, no separate uid needed. (This is the route-binding
+decision the spool transport deliberately left open: a private dir per
+invocation, rather than a shared spool plus a per-message token.)
+
+Session ids are **not** derived from the chat id — Claude Code mints a fresh one
+per new conversation and the dispatcher captures it, so `/clear` can truly sever
+the association. The `chat→session` map and the poll offset are the dispatcher's
+durable state (`$XDG_STATE_HOME/ak-tgclaude/sessions.json`).
+
+> Replying to an old bot message to **resurrect** its (since-cleared) session —
+> a `message→session` map keyed by the sent `message_id` — is a planned follow-up
+> (each send already returns its `message_id`).
+
 ## Token isolation
 
 The Telegram **bot token** is the asset to protect: whoever holds it controls the
@@ -196,15 +229,16 @@ update (the rich agent facade — text, code, attachments, "think and send more"
 
 ### Dispatcher-side delivery (drain)
 
-The dispatcher runs one **drain** per bound outbox: it watches the directory
-(fsnotify) and, on each drop, sends the descriptors to Telegram **in drop order**
-(filenames sort by drop time), deleting each only after a successful send. The
-route (`chat_id`/`reply_to`) is the dispatcher's, bound to the outbox — never
-taken from the descriptor.
+The dispatcher runs one **drain** per invocation's outbox: it watches the
+directory (fsnotify) and, on each drop, sends the descriptors to Telegram **in
+drop order** (filenames sort by drop time), deleting each only after a successful
+send. It is the sole drainer of that directory, so there is no concurrent
+send/remove race. The route (`chat_id`/`reply_to`) is the dispatcher's, bound to
+the outbox — never taken from the descriptor.
 
-- **Catch-up on start.** Before watching, the drain sends whatever is already in
-  the directory, so drops that landed while it was down are delivered (the spool
-  is durable). A periodic tick retries after a transient failure.
+- **Catch-up + final flush.** It first sends whatever is already present (the
+  responder may write before the watcher registers), then streams new drops; when
+  the responder exits it does a final flush so nothing is left behind.
 - **Rendering lives here.** `text` goes out as `sendMessage` (plain, or
   `parse_mode=HTML`); `code` is wrapped in `<pre><code class="language-…">` with
   the body HTML-escaped; a message over Telegram's 4096-char limit **spills to a
@@ -240,8 +274,11 @@ config.go          Config: TOML + CLI-flag resolution
 outbox.go          outbound descriptor model + atomic spool drop
 send.go            `send` subcommand (text / code / document)
 render.go          descriptor -> Telegram text/parse_mode, code wrapping, spill
-telegram.go        Telegram Bot API client (sendMessage / sendDocument)
-drain.go           dispatcher-side outbox drain (fsnotify watch -> send -> ack)
+telegram.go        Telegram Bot API client (getUpdates / sendMessage / sendDocument)
+drain.go           per-invocation outbox drain (fsnotify watch -> send -> ack)
+session.go         durable state: poll offset + chat->session map
+responder.go       Responder interface + `claude -p` spawn
+dispatch.go        the dispatch loop: poll -> route -> respond -> deliver
 bot.toml.example   example config
 go.mod / go.sum
 README.md          this design

@@ -14,39 +14,50 @@ import (
 	"github.com/fsnotify/fsnotify"
 )
 
-// DrainOutbox delivers descriptors from a single outbox directory to Telegram,
-// in drop order, until ctx is cancelled. The directory is bound to one Route:
-// the dispatcher spawns a responder, gives it a private outbox, and runs a
-// drain for it. (A future topology could resolve the route per descriptor; the
-// seam is this Route parameter.)
+// serveOutbox delivers descriptors from one invocation's outbox to Telegram,
+// in drop order, for the lifetime of that responder. The directory is bound to
+// one Route (the dispatcher pins chat/reply per invocation).
 //
-// It first drains whatever is already present (catch-up after a restart — the
-// spool is durable), then watches for new drops (fsnotify) and re-drains, with
-// a periodic retry tick so a transient send failure eventually recovers.
-func DrainOutbox(ctx context.Context, dir string, r Route, s Sender) error {
-	w, err := fsnotify.NewWatcher()
-	if err != nil {
-		return fmt.Errorf("creating watcher: %w", err)
-	}
-	defer w.Close()
-	if err := w.Add(dir); err != nil {
-		return fmt.Errorf("watching %s: %w", dir, err)
+// It is the SOLE drainer of dir, so there is never a concurrent send/remove
+// race: it drains what is already present (catch-up — the responder may write
+// before the watcher registers), streams new drops via fsnotify, and on close
+// of stop does a final flush so nothing the responder left is lost. On parent
+// ctx cancellation (shutdown) it returns without flushing; the spool is durable
+// and undelivered descriptors are picked up on the next run.
+func serveOutbox(ctx context.Context, dir string, r Route, s Sender, stop <-chan struct{}) {
+	var events chan fsnotify.Event
+	var errs chan error
+	if w, err := fsnotify.NewWatcher(); err != nil {
+		log.Printf("ak-tgclaude: watch %s: %v (falling back to flush-on-stop)", dir, err)
+	} else {
+		defer w.Close()
+		if err := w.Add(dir); err != nil {
+			log.Printf("ak-tgclaude: watch %s: %v", dir, err)
+		} else {
+			events, errs = w.Events, w.Errors
+		}
 	}
 
-	// Catch-up before watching, so drops that landed while we were down are sent.
 	if err := drainExisting(ctx, dir, r, s); err != nil {
 		log.Printf("ak-tgclaude: drain %s: %v", dir, err)
 	}
-
-	tick := time.NewTicker(30 * time.Second)
-	defer tick.Stop()
 	for {
 		select {
 		case <-ctx.Done():
-			return ctx.Err()
-		case ev, ok := <-w.Events:
+			return
+		case <-stop:
+			// Responder finished: flush with a fresh, bounded context (the
+			// parent ctx may still be live, but we want a definite deadline).
+			flushCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			if err := drainExisting(flushCtx, dir, r, s); err != nil {
+				log.Printf("ak-tgclaude: final flush %s: %v", dir, err)
+			}
+			cancel()
+			return
+		case ev, ok := <-events:
 			if !ok {
-				return nil
+				events = nil
+				continue
 			}
 			if ev.Op&(fsnotify.Create|fsnotify.Rename) == 0 || !isDescriptor(ev.Name) {
 				continue
@@ -54,13 +65,10 @@ func DrainOutbox(ctx context.Context, dir string, r Route, s Sender) error {
 			if err := drainExisting(ctx, dir, r, s); err != nil {
 				log.Printf("ak-tgclaude: drain %s: %v", dir, err)
 			}
-		case <-tick.C:
-			if err := drainExisting(ctx, dir, r, s); err != nil {
-				log.Printf("ak-tgclaude: drain %s: %v", dir, err)
-			}
-		case err, ok := <-w.Errors:
+		case err, ok := <-errs:
 			if !ok {
-				return nil
+				errs = nil
+				continue
 			}
 			log.Printf("ak-tgclaude: watch %s: %v", dir, err)
 		}
