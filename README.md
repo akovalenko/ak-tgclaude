@@ -107,6 +107,21 @@ durable state (`$XDG_STATE_HOME/ak-tgclaude/sessions.json`).
 > a `message→session` map keyed by the sent `message_id` — is a planned follow-up
 > (each send already returns its `message_id`).
 
+### Smoke-testing the Telegram path (`--responder stub`)
+
+`dispatch --responder stub` swaps the model for a stub that replies a fixed line
+("i am here") to every message, dropped through the **real** outbox — so the full
+Telegram I/O path runs (getUpdates → route → outbox → drain → `sendMessage` with
+reply threading) without `claude` or a provisioned scaffold. It needs only a
+token:
+
+```sh
+ak-tgclaude dispatch --responder stub --bot-token 123:ABC
+```
+
+Use it to verify connectivity, the bot token, long-polling, and reply routing
+end to end before wiring the real responder.
+
 ## Token isolation
 
 The Telegram **bot token** is the asset to protect: whoever holds it controls the

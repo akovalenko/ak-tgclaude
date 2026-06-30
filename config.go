@@ -21,6 +21,12 @@ const (
 	ProfileOps Profile = "ops"
 )
 
+// Responder implementations.
+const (
+	ResponderClaude = "claude" // spawn `claude -p` (production)
+	ResponderStub   = "stub"   // fixed-reply stub for Telegram I/O smoke tests
+)
+
 // Config is the resolved dispatcher configuration, populated from a TOML file
 // and/or CLI flags. Precedence: flags > file > defaults.
 type Config struct {
@@ -34,6 +40,11 @@ type Config struct {
 	// Agent is the responder agent name passed to `claude -p --agent`. Empty
 	// uses the cwd's configured default agent.
 	Agent string `toml:"agent"`
+
+	// Responder selects the responder implementation: "claude" (default) spawns
+	// `claude -p`; "stub" replies with a fixed line, for smoke-testing the
+	// Telegram I/O path without a model or scaffold.
+	Responder string `toml:"responder"`
 
 	// Project is the codebase the responder consults on (read-only under "qa").
 	// The sandbox and PreToolUse confine the responder's reads here.
@@ -57,6 +68,7 @@ func loadConfig(args []string) (*Config, error) {
 	profile := fs.String("profile", "", "access profile: qa|dev|ops (default qa, read-only)")
 	project := fs.String("project", "", "path to the project the responder consults on (read-only)")
 	agent := fs.String("agent", "", "responder agent name for `claude -p --agent` (default: cwd's default agent)")
+	responder := fs.String("responder", "", "responder implementation: claude|stub (default claude; stub replies a fixed line for Telegram I/O tests)")
 	if err := fs.Parse(args); err != nil {
 		return nil, err
 	}
@@ -80,6 +92,9 @@ func loadConfig(args []string) (*Config, error) {
 	if *agent != "" {
 		c.Agent = *agent
 	}
+	if *responder != "" {
+		c.Responder = *responder
+	}
 
 	c.applyDefaults()
 	c.Project = expandTilde(c.Project)
@@ -95,6 +110,9 @@ func loadConfig(args []string) (*Config, error) {
 func (c *Config) applyDefaults() {
 	if c.Profile == "" {
 		c.Profile = ProfileQA
+	}
+	if c.Responder == "" {
+		c.Responder = ResponderClaude
 	}
 	if c.StateDir == "" {
 		c.StateDir = defaultStateDir()
@@ -115,8 +133,16 @@ func (c *Config) validate() error {
 	default:
 		return fmt.Errorf("unknown profile %q (want qa|dev|ops)", c.Profile)
 	}
-	if c.Project == "" {
-		return fmt.Errorf("project is required (project in config or --project)")
+	switch c.Responder {
+	case ResponderClaude:
+		// The claude responder consults a project; the stub does not need one.
+		if c.Project == "" {
+			return fmt.Errorf("project is required (project in config or --project)")
+		}
+	case ResponderStub:
+		// ok — no project needed
+	default:
+		return fmt.Errorf("unknown responder %q (want claude|stub)", c.Responder)
 	}
 	return nil
 }

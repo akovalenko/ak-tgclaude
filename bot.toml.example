@@ -20,6 +20,11 @@ bot_token = "123456789:AA...replace-me..."
 # what its PreToolUse hook allows.
 profile = "qa"
 
+# Responder implementation: "claude" (default) spawns `claude -p`; "stub"
+# replies a fixed line ("i am here") for smoke-testing the Telegram I/O path
+# without a model or scaffold (needs only bot_token, no project).
+# responder = "claude"
+
 # The project the bot consults on. Read-only under the qa profile; the sandbox
 # and PreToolUse confine the responder's reads here. Required.
 project = "~/code/example-project"

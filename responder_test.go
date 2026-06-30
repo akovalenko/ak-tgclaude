@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"strings"
 	"testing"
 )
@@ -14,6 +15,21 @@ func TestBuildClaudeArgs(t *testing.T) {
 	want := "-p --output-format json --agent eputs-telegram-guide --resume sess-7"
 	if got != want {
 		t.Errorf("full args = %q, want %q", got, want)
+	}
+}
+
+func TestStubResponderRepliesFixed(t *testing.T) {
+	dir := t.TempDir()
+	res, err := (&stubResponder{}).Respond(context.Background(), RespondRequest{OutboxDir: dir, Prompt: "any question"})
+	if err != nil {
+		t.Fatalf("Respond: %v", err)
+	}
+	if res.SessionID != "" {
+		t.Errorf("stub should not bind a session, got %q", res.SessionID)
+	}
+	d, _ := readOnlyDescriptor(t, dir) // helper from outbox_test.go
+	if d.Kind != KindText || d.Text != "i am here" {
+		t.Errorf("stub descriptor wrong: %+v", d)
 	}
 }
 

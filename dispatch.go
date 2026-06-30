@@ -161,15 +161,24 @@ func runDispatch(args []string) {
 	}
 
 	client := NewClient(cfg.BotToken)
-	// NOTE: the responder cwd (scaffold: generated settings.json + skills) is
-	// provisioned by the `deploy` subcommand / go:embed, which is not wired yet.
-	// Until then a live run needs a hand-provisioned cwd at this path.
-	cwd := filepath.Join(cfg.StateDir, "responder-cwd")
+
+	var resp Responder
+	switch cfg.Responder {
+	case ResponderStub:
+		resp = &stubResponder{}
+	default:
+		// NOTE: the responder cwd (scaffold: generated settings.json + skills) is
+		// provisioned by the `deploy` subcommand / go:embed, which is not wired
+		// yet. Until then a live `claude` run needs a hand-provisioned cwd here.
+		cwd := filepath.Join(cfg.StateDir, "responder-cwd")
+		resp = &claudeResponder{agent: cfg.Agent, cwd: cwd}
+	}
+
 	d := &Dispatcher{
 		client:      client,
 		sender:      client,
 		store:       store,
-		resp:        &claudeResponder{agent: cfg.Agent, cwd: cwd},
+		resp:        resp,
 		runtimeBase: resolveRuntimeBase(cfg.RuntimeBase),
 		pollTimeout: defaultPollTimeout,
 	}
@@ -177,8 +186,8 @@ func runDispatch(args []string) {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	log.Printf("ak-tgclaude: dispatch: profile=%s project=%s state=%s token=%s",
-		cfg.Profile, cfg.Project, cfg.StateDir, redact(cfg.BotToken))
+	log.Printf("ak-tgclaude: dispatch: responder=%s profile=%s project=%s state=%s token=%s",
+		cfg.Responder, cfg.Profile, cfg.Project, cfg.StateDir, redact(cfg.BotToken))
 	if err := d.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
 		fmt.Fprintf(os.Stderr, "ak-tgclaude: dispatch: %v\n", err)
 		os.Exit(1)

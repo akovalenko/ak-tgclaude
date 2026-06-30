@@ -67,6 +67,27 @@ func buildClaudeArgs(agent, sessionID string) []string {
 	return args
 }
 
+// stubResponder is a no-model responder for smoke-testing the Telegram I/O path
+// (getUpdates -> route -> outbox -> drain -> sendMessage) without spawning
+// Claude Code or provisioning a scaffold. It answers every message with a fixed
+// line, dropped through the real outbox so the whole delivery path runs.
+type stubResponder struct {
+	reply string // default "i am here"
+}
+
+const defaultStubReply = "i am here"
+
+func (s *stubResponder) Respond(_ context.Context, req RespondRequest) (RespondResult, error) {
+	reply := s.reply
+	if reply == "" {
+		reply = defaultStubReply
+	}
+	if _, err := (&Descriptor{Kind: KindText, Text: reply}).Drop(req.OutboxDir); err != nil {
+		return RespondResult{}, err
+	}
+	return RespondResult{}, nil
+}
+
 // parseSessionID extracts session_id from `claude --output-format json` output.
 func parseSessionID(jsonOut []byte) string {
 	var r struct {
