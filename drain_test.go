@@ -96,7 +96,7 @@ func TestDrainExistingOrderAndRemoval(t *testing.T) {
 	}
 
 	f := &fakeSender{}
-	if err := drainExisting(context.Background(), dir, Route{ChatID: 9}, f); err != nil {
+	if _, err := drainExisting(context.Background(), dir, Route{ChatID: 9}, f, map[string]int{}); err != nil {
 		t.Fatalf("drainExisting: %v", err)
 	}
 	calls := f.snapshot()
@@ -124,7 +124,7 @@ func TestDrainSpillsOversizedCode(t *testing.T) {
 		t.Fatal(err)
 	}
 	f := &fakeSender{}
-	if err := drainExisting(context.Background(), dir, Route{ChatID: 1}, f); err != nil {
+	if _, err := drainExisting(context.Background(), dir, Route{ChatID: 1}, f, map[string]int{}); err != nil {
 		t.Fatalf("drainExisting: %v", err)
 	}
 	calls := f.snapshot()
@@ -144,7 +144,7 @@ func TestDrainQuarantinesBadJSON(t *testing.T) {
 	}
 
 	f := &fakeSender{}
-	if err := drainExisting(context.Background(), dir, Route{ChatID: 1}, f); err != nil {
+	if _, err := drainExisting(context.Background(), dir, Route{ChatID: 1}, f, map[string]int{}); err != nil {
 		t.Fatalf("drainExisting: %v", err)
 	}
 	if calls := f.snapshot(); len(calls) != 1 || calls[0].text != "ok" {
@@ -162,14 +162,184 @@ func TestDrainStopsOnSendErrorPreservingOrder(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	// A network error is transient: the pass stops (head-of-line) and asks for a
+	// retry, but is not itself a fatal drain error.
 	f := &fakeSender{err: errors.New("network down")}
-	err := drainExisting(context.Background(), dir, Route{ChatID: 1}, f)
-	if err == nil {
-		t.Fatalf("expected send error to propagate")
+	retryIn, err := drainExisting(context.Background(), dir, Route{ChatID: 1}, f, map[string]int{})
+	if err != nil {
+		t.Fatalf("transient failure should not be a fatal error: %v", err)
+	}
+	if retryIn <= 0 {
+		t.Errorf("transient failure should schedule a retry, got %v", retryIn)
 	}
 	// Both descriptors must remain (head-of-line: nothing acked).
 	if left := remainingJSON(t, dir); len(left) != 2 {
 		t.Errorf("descriptors should be retained on send failure, have %v", left)
+	}
+}
+
+// scriptedSender returns a preset outcome per successive Send* call (errs[i] for
+// the i-th call, nil = success), letting a test drive a mixed
+// permanent/success/transient sequence through drainExisting.
+type scriptedSender struct {
+	mu    sync.Mutex
+	errs  []error
+	calls int
+}
+
+func (s *scriptedSender) next() (int64, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	i := s.calls
+	s.calls++
+	if i < len(s.errs) && s.errs[i] != nil {
+		return 0, s.errs[i]
+	}
+	return int64(s.calls), nil
+}
+
+func (s *scriptedSender) SendMessage(context.Context, Route, string, string, bool) (int64, error) {
+	return s.next()
+}
+
+func (s *scriptedSender) SendDocument(context.Context, Route, string, string, string, string, bool) (int64, error) {
+	return s.next()
+}
+
+func (s *scriptedSender) SendChatAction(context.Context, int64, string) error { return nil }
+
+func (s *scriptedSender) callCount() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.calls
+}
+
+func badDir(t *testing.T, dir string) []string {
+	t.Helper()
+	ents, err := os.ReadDir(filepath.Join(dir, "bad"))
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		t.Fatal(err)
+	}
+	var out []string
+	for _, e := range ents {
+		if !e.IsDir() {
+			out = append(out, e.Name())
+		}
+	}
+	return out
+}
+
+func TestClassify(t *testing.T) {
+	cases := []struct {
+		name       string
+		err        error
+		permanent  bool
+		retryAfter time.Duration
+	}{
+		{"400 bad request", &APIError{Code: 400}, true, 0},
+		{"403 blocked", &APIError{Code: 403}, true, 0},
+		{"404 chat not found", &APIError{Code: 404}, true, 0},
+		{"429 rate limit", &APIError{Code: 429, RetryAfter: 7}, false, 7 * time.Second},
+		{"500 server error", &APIError{Code: 500}, false, 0},
+		{"network error", errors.New("connection refused"), false, 0},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			perm, ra := classify(c.err)
+			if perm != c.permanent || ra != c.retryAfter {
+				t.Errorf("classify = (%v, %v), want (%v, %v)", perm, ra, c.permanent, c.retryAfter)
+			}
+		})
+	}
+}
+
+func TestBackoff(t *testing.T) {
+	if got := backoff(1); got != baseBackoff {
+		t.Errorf("backoff(1) = %v, want %v", got, baseBackoff)
+	}
+	if got := backoff(0); got != baseBackoff {
+		t.Errorf("backoff(0) should clamp to base, got %v", got)
+	}
+	// Non-decreasing and never above the cap.
+	prev := time.Duration(0)
+	for a := 1; a <= 20; a++ {
+		d := backoff(a)
+		if d < prev {
+			t.Errorf("backoff not monotonic at %d: %v < %v", a, d, prev)
+		}
+		if d > maxBackoff {
+			t.Errorf("backoff(%d) = %v exceeds cap %v", a, d, maxBackoff)
+		}
+		prev = d
+	}
+	if got := backoff(100); got != maxBackoff {
+		t.Errorf("backoff(100) = %v, want cap %v", got, maxBackoff)
+	}
+}
+
+func TestDrainQuarantinesPermanentReject(t *testing.T) {
+	dir := t.TempDir()
+	for i := 0; i < 2; i++ {
+		if _, err := (&Descriptor{Kind: KindText, Text: "m"}).Drop(dir); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// First send is a permanent 400; the second succeeds. The wedge fix means the
+	// pass continues past the bad head and delivers the second in the SAME pass.
+	f := &scriptedSender{errs: []error{&APIError{Code: 400, Description: "bad request"}}}
+	retryIn, err := drainExisting(context.Background(), dir, Route{ChatID: 1}, f, map[string]int{})
+	if err != nil {
+		t.Fatalf("drainExisting: %v", err)
+	}
+	if retryIn != 0 {
+		t.Errorf("permanent reject must not schedule a retry, got %v", retryIn)
+	}
+	if f.callCount() != 2 {
+		t.Fatalf("queue wedged: want 2 send attempts, got %d", f.callCount())
+	}
+	if left := remainingJSON(t, dir); len(left) != 0 {
+		t.Errorf("both descriptors should leave the active spool, have %v", left)
+	}
+	if bad := badDir(t, dir); len(bad) != 1 {
+		t.Errorf("permanent reject should be quarantined in bad/, have %v", bad)
+	}
+}
+
+func TestDrainBacksOffTransient(t *testing.T) {
+	dir := t.TempDir()
+	if _, err := (&Descriptor{Kind: KindText, Text: "m"}).Drop(dir); err != nil {
+		t.Fatal(err)
+	}
+	// Every send fails 500 (transient): retried until maxSendAttempts, then given up.
+	f := &fakeSender{err: &APIError{Code: 500}}
+	attempts := map[string]int{}
+	var lastRetry time.Duration
+	for i := 0; i < maxSendAttempts; i++ {
+		retryIn, err := drainExisting(context.Background(), dir, Route{ChatID: 1}, f, attempts)
+		if err != nil {
+			t.Fatalf("pass %d: %v", i, err)
+		}
+		lastRetry = retryIn
+		if i < maxSendAttempts-1 {
+			if retryIn <= 0 {
+				t.Errorf("pass %d: want a positive back-off, got %v", i, retryIn)
+			}
+			if left := remainingJSON(t, dir); len(left) != 1 {
+				t.Errorf("pass %d: descriptor should be retained, have %v", i, left)
+			}
+		}
+	}
+	if lastRetry != 0 {
+		t.Errorf("give-up should not re-arm the retry timer, got %v", lastRetry)
+	}
+	if left := remainingJSON(t, dir); len(left) != 0 {
+		t.Errorf("given-up descriptor should be quarantined, still present: %v", left)
+	}
+	if bad := badDir(t, dir); len(bad) != 1 {
+		t.Errorf("given-up descriptor should be in bad/, have %v", bad)
 	}
 }
 

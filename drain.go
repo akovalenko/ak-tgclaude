@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -13,6 +14,67 @@ import (
 
 	"github.com/fsnotify/fsnotify"
 )
+
+// Retry/back-off policy for transient send failures. A permanent reject (a 4xx
+// the responder must fix) is quarantined immediately; a transient one (429 /
+// 5xx / network) is retried with exponential back-off from baseBackoff, capped
+// at maxBackoff, and quarantined as a give-up after maxSendAttempts. Per-
+// descriptor attempt counts live in the attempts map serveOutbox threads
+// through each pass — in-memory only, bounded by the invocation's lifetime (the
+// outbox is RemoveAll'd on teardown, so cross-invocation durable retry is out
+// of scope).
+const (
+	maxSendAttempts = 6
+	baseBackoff     = 2 * time.Second
+	maxBackoff      = 1 * time.Minute
+)
+
+// classify decides whether a send error is permanent (quarantine now) or
+// transient (retry with back-off), and surfaces a 429's authoritative
+// retry_after. A non-APIError (network / timeout / decode) is transient.
+func classify(err error) (permanent bool, retryAfter time.Duration) {
+	var ae *APIError
+	if errors.As(err, &ae) {
+		switch {
+		case ae.Code == 429:
+			return false, time.Duration(ae.RetryAfter) * time.Second
+		case ae.Code >= 500:
+			return false, 0
+		case ae.Code >= 400:
+			return true, 0 // 400/403/404: bad request, blocked, chat-not-found — retry won't help
+		}
+		return false, 0 // any other non-OK: be lenient, treat as transient
+	}
+	return false, 0
+}
+
+// backoff is exponential from baseBackoff, doubling per attempt, capped at
+// maxBackoff.
+func backoff(attempt int) time.Duration {
+	if attempt < 1 {
+		attempt = 1
+	}
+	d := baseBackoff << (attempt - 1)
+	if d <= 0 || d > maxBackoff { // <=0 guards the shift overflowing at a high attempt
+		d = maxBackoff
+	}
+	return d
+}
+
+// arm (re)schedules t to fire after d, draining any pending tick first so a
+// stale fire cannot trigger a spurious extra pass. d <= 0 leaves t stopped.
+func arm(t *time.Timer, d time.Duration) {
+	if d <= 0 {
+		return
+	}
+	if !t.Stop() {
+		select {
+		case <-t.C:
+		default:
+		}
+	}
+	t.Reset(d)
+}
 
 // serveOutbox delivers descriptors from one invocation's outbox to Telegram,
 // in drop order, for the lifetime of that responder. The directory is bound to
@@ -38,9 +100,25 @@ func serveOutbox(ctx context.Context, dir string, r Route, s Sender, stop <-chan
 		}
 	}
 
-	if err := drainExisting(ctx, dir, r, s); err != nil {
-		log.Printf("ak-tgclaude: drain %s: %v", dir, err)
+	// attempts carries per-descriptor transient-retry counts across passes; retry
+	// fires a re-drain once a transient back-off elapses (created stopped).
+	attempts := map[string]int{}
+	retry := time.NewTimer(0)
+	if !retry.Stop() {
+		<-retry.C
 	}
+	defer retry.Stop()
+
+	drain := func() {
+		retryIn, err := drainExisting(ctx, dir, r, s, attempts)
+		if err != nil {
+			log.Printf("ak-tgclaude: drain %s: %v", dir, err)
+			return
+		}
+		arm(retry, retryIn)
+	}
+
+	drain()
 	for {
 		select {
 		case <-ctx.Done():
@@ -49,11 +127,13 @@ func serveOutbox(ctx context.Context, dir string, r Route, s Sender, stop <-chan
 			// Responder finished: flush with a fresh, bounded context (the
 			// parent ctx may still be live, but we want a definite deadline).
 			flushCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-			if err := drainExisting(flushCtx, dir, r, s); err != nil {
+			if _, err := drainExisting(flushCtx, dir, r, s, attempts); err != nil {
 				log.Printf("ak-tgclaude: final flush %s: %v", dir, err)
 			}
 			cancel()
 			return
+		case <-retry.C:
+			drain()
 		case ev, ok := <-events:
 			if !ok {
 				events = nil
@@ -62,9 +142,7 @@ func serveOutbox(ctx context.Context, dir string, r Route, s Sender, stop <-chan
 			if ev.Op&(fsnotify.Create|fsnotify.Rename) == 0 || !isDescriptor(ev.Name) {
 				continue
 			}
-			if err := drainExisting(ctx, dir, r, s); err != nil {
-				log.Printf("ak-tgclaude: drain %s: %v", dir, err)
-			}
+			drain()
 		case err, ok := <-errs:
 			if !ok {
 				errs = nil
@@ -82,14 +160,20 @@ func isDescriptor(name string) bool {
 	return strings.HasSuffix(base, ".json") && !strings.HasPrefix(base, ".")
 }
 
-// drainExisting sends every descriptor currently in dir, in name (drop) order,
-// removing each on success. An unparseable descriptor is quarantined in
-// dir/bad/ and skipped; a transient send failure stops the pass — leaving the
-// file and everything after it — so a retry preserves order (head-of-line).
-func drainExisting(ctx context.Context, dir string, r Route, s Sender) error {
+// drainExisting sends every descriptor currently in dir, in name (drop) order.
+// A successful send removes the descriptor and clears its retry state. An
+// unparseable descriptor is quarantined in dir/bad/ and skipped. A permanent
+// reject (a 4xx the responder must fix) is quarantined and the pass CONTINUES,
+// so one bad descriptor can never wedge the queue behind it. A transient
+// failure (429 / 5xx / network) stops the pass — leaving that descriptor and
+// everything after it in place (head-of-line, preserving order) — and returns
+// the back-off after which the caller should retry; after maxSendAttempts the
+// descriptor is quarantined as a give-up and the pass continues. A returned
+// retryIn of 0 means nothing is waiting on a retry timer.
+func drainExisting(ctx context.Context, dir string, r Route, s Sender, attempts map[string]int) (retryIn time.Duration, err error) {
 	ents, err := os.ReadDir(dir)
 	if err != nil {
-		return err
+		return 0, err
 	}
 	var names []string
 	for _, e := range ents {
@@ -101,7 +185,7 @@ func drainExisting(ctx context.Context, dir string, r Route, s Sender) error {
 
 	for _, name := range names {
 		if err := ctx.Err(); err != nil {
-			return err
+			return 0, err
 		}
 		path := filepath.Join(dir, name)
 		d, err := readDescriptor(path)
@@ -109,14 +193,30 @@ func drainExisting(ctx context.Context, dir string, r Route, s Sender) error {
 			quarantine(dir, path, err)
 			continue
 		}
-		if _, err := sendDescriptor(ctx, d, r, s); err != nil {
-			return fmt.Errorf("sending %s: %w", name, err)
+		if _, sendErr := sendDescriptor(ctx, d, r, s); sendErr != nil {
+			permanent, retryAfter := classify(sendErr)
+			if permanent {
+				quarantine(dir, path, sendErr)
+				delete(attempts, name)
+				continue
+			}
+			attempts[name]++
+			if attempts[name] >= maxSendAttempts {
+				quarantine(dir, path, fmt.Errorf("gave up after %d attempts: %w", attempts[name], sendErr))
+				delete(attempts, name)
+				continue
+			}
+			if retryAfter <= 0 {
+				retryAfter = backoff(attempts[name])
+			}
+			return retryAfter, nil // stop: preserve order, retry after back-off
 		}
+		delete(attempts, name)
 		if err := os.Remove(path); err != nil {
-			return fmt.Errorf("removing sent %s: %w", name, err)
+			return 0, fmt.Errorf("removing sent %s: %w", name, err)
 		}
 	}
-	return nil
+	return 0, nil
 }
 
 // readDescriptor loads and validates one descriptor file.
