@@ -48,6 +48,17 @@ func classify(err error) (permanent bool, retryAfter time.Duration) {
 	return false, 0
 }
 
+// apiDescription returns the Telegram description of a send error when it is an
+// *APIError (the clean, human-readable reason the responder can act on), else
+// the full error text.
+func apiDescription(err error) string {
+	var ae *APIError
+	if errors.As(err, &ae) {
+		return ae.Description
+	}
+	return err.Error()
+}
+
 // backoff is exponential from baseBackoff, doubling per attempt, capped at
 // maxBackoff.
 func backoff(attempt int) time.Duration {
@@ -183,6 +194,14 @@ func drainExisting(ctx context.Context, dir string, r Route, s Sender, attempts 
 	}
 	sort.Strings(names)
 
+	// putResult records a terminal delivery outcome for a waiting `send`; it is
+	// best-effort (the drop is authoritative), so a write failure is only logged.
+	putResult := func(name string, res Result) {
+		if err := writeResult(dir, name, res); err != nil {
+			log.Printf("ak-tgclaude: result %s: %v", name, err)
+		}
+	}
+
 	for _, name := range names {
 		if err := ctx.Err(); err != nil {
 			return 0, err
@@ -190,18 +209,25 @@ func drainExisting(ctx context.Context, dir string, r Route, s Sender, attempts 
 		path := filepath.Join(dir, name)
 		d, err := readDescriptor(path)
 		if err != nil {
+			// Malformed: no `send` can be waiting on it (Drop validates before
+			// publishing), so no result is written.
 			quarantine(dir, path, err)
 			continue
 		}
-		if _, sendErr := sendDescriptor(ctx, d, r, s); sendErr != nil {
+		id, sendErr := sendDescriptor(ctx, d, r, s)
+		if sendErr != nil {
 			permanent, retryAfter := classify(sendErr)
 			if permanent {
+				// Write the result BEFORE quarantining, so the feedback survives
+				// even if the quarantine move fails.
+				putResult(name, Result{OK: false, Permanent: true, Error: apiDescription(sendErr)})
 				quarantine(dir, path, sendErr)
 				delete(attempts, name)
 				continue
 			}
 			attempts[name]++
 			if attempts[name] >= maxSendAttempts {
+				putResult(name, Result{OK: false, Permanent: false, Error: sendErr.Error()})
 				quarantine(dir, path, fmt.Errorf("gave up after %d attempts: %w", attempts[name], sendErr))
 				delete(attempts, name)
 				continue
@@ -211,6 +237,7 @@ func drainExisting(ctx context.Context, dir string, r Route, s Sender, attempts 
 			}
 			return retryAfter, nil // stop: preserve order, retry after back-off
 		}
+		putResult(name, Result{OK: true, MessageID: id})
 		delete(attempts, name)
 		if err := os.Remove(path); err != nil {
 			return 0, fmt.Errorf("removing sent %s: %w", name, err)
