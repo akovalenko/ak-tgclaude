@@ -140,24 +140,21 @@ func buildSettings(p scaffoldParams) *claudeSettings {
 		envVars = append(envVars, credEnv{Name: name, Mode: "deny"})
 	}
 
-	// Read is broad, but the outbox area is denied on both layers so a responder
-	// cannot read another chat's pending reply: the Read tool via permissions,
-	// and sandboxed Bash via sandbox.filesystem.denyRead. Each invocation carves
-	// read of just its OWN outbox back (buildInvocationSettings).
-	var denyReadPerms, denyReadFS []string
+	// Sandboxed Bash reads of a sibling outbox are masked by denyRead (the Read
+	// TOOL is instead path-scoped by the PreToolUse hook).
+	var denyReadFS []string
 	if p.OutboxRoot != "" {
-		denyReadPerms = []string{"Read(" + p.OutboxRoot + "/**)"}
 		denyReadFS = []string{p.OutboxRoot}
 	}
 
 	s := &claudeSettings{
 		Env: goCacheEnv(p.CacheDir),
 		Permissions: &permissionsCfg{
-			// Write is NOT granted here: each invocation gets write access to
-			// exactly its own outbox via a per-invocation --settings overlay, so
-			// concurrent responders cannot write into each other's outbox.
-			Allow: []string{"Read"},
-			Deny:  denyReadPerms,
+			// The file tools (Read/Edit/Write/NotebookEdit) are governed by the
+			// PreToolUse hook (path-scoped: read the project, write the outbox/tmp),
+			// so they are NOT listed here. Only the tools the hook defers are
+			// allowed — the search/skill tools; Bash is auto-allowed when sandboxed.
+			Allow: []string{"Grep", "Glob", "Skill"},
 		},
 		Sandbox: &sandboxCfg{
 			Enabled:                  true,
@@ -263,22 +260,19 @@ func materializeAgent(claudeDir string, noRefuse bool) error {
 }
 
 // buildInvocationSettings returns the per-invocation --settings JSON that scopes
-// access to exactly one outbox, merged on top of the static project settings:
-//   - WRITE (Write tool + sandboxed Bash) — so a responder can't write into
-//     another chat's outbox (cp / `send --outbox`);
-//   - READ of just this outbox (sandbox.filesystem.allowRead) — carving it back
-//     out of the static denyRead so `send --file` can read its own body, while
-//     sibling outboxes stay masked.
+// SANDBOXED-BASH access to exactly this invocation's outbox, merged on top of the
+// static project settings:
+//   - allowWrite — so `send`/`cp` can write only this outbox, not a sibling's;
+//   - allowRead — carving this outbox back out of the static denyRead so
+//     `send --file` can read its own body, while sibling outboxes stay masked.
 //
-// Empty outbox => "".
+// The Write TOOL to the outbox is granted by the PreToolUse hook (path-scoped),
+// not here. Empty outbox => "".
 func buildInvocationSettings(outbox string) string {
 	if outbox == "" {
 		return ""
 	}
 	var s struct {
-		Permissions struct {
-			Allow []string `json:"allow"`
-		} `json:"permissions"`
 		Sandbox struct {
 			Filesystem struct {
 				AllowWrite []string `json:"allowWrite"`
@@ -286,7 +280,6 @@ func buildInvocationSettings(outbox string) string {
 			} `json:"filesystem"`
 		} `json:"sandbox"`
 	}
-	s.Permissions.Allow = []string{"Write(" + outbox + "/**)"}
 	s.Sandbox.Filesystem.AllowWrite = []string{outbox}
 	s.Sandbox.Filesystem.AllowRead = []string{outbox}
 	b, _ := json.Marshal(&s)

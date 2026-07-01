@@ -28,7 +28,7 @@ func runHook(args []string) {
 type preToolUseInput struct {
 	ToolName  string `json:"tool_name"`
 	ToolInput struct {
-		FilePath string `json:"file_path"` // Read/Write/Edit
+		FilePath string `json:"file_path"` // Read/Write/Edit/NotebookEdit
 		Command  string `json:"command"`   // Bash
 		// DangerouslyDisableSandbox is set by the model only when it wants a Bash
 		// command to run OUTSIDE the sandbox; absent/false means sandboxed. (This
@@ -46,13 +46,26 @@ type preToolUseDecision struct {
 	} `json:"hookSpecificOutput"`
 }
 
-// runHookPreToolUse gates the responder's tool calls. It DENIES the two things
-// that are out of contract — a file tool (Read/Edit/Write) reading the token
-// file, and an unsandboxed Bash command — and DEFERS everything else to the
-// normal permission + sandbox flow (so the per-invocation Write grant, the
-// static Read allow + outbox deny, and dontAsk decide). It never blanket-"allow"s,
-// which would override those layers. (A Bash read of the token is masked by the
-// sandbox's credentials.files deny-read, not by this hook.)
+// filePolicy is the responder's file-tool access policy. The hook is the single
+// authority for the file tools (permissions carry only the deferred tools):
+//
+//	Read           -> allow under readRoots (the project), else deny
+//	Edit/Write/...  -> allow under writeRoots (the outbox + tmp), else deny
+//	deny (token)    -> deny for any file tool (checked first, wins over the above)
+//
+// readRoots/writeRoots are resolved from the responder's env at hook time
+// ($AK_TGCLAUDE_PROJECT, $AK_TGCLAUDE_OUTBOX) plus the computed sandbox tmp dir.
+type filePolicy struct {
+	deny       []string // protected paths (token); highest priority
+	readRoots  []string // Read allowed under these
+	writeRoots []string // Edit/Write/NotebookEdit allowed under these
+}
+
+// runHookPreToolUse gates the responder's tool calls: it path-scopes the file
+// tools per filePolicy, allows sandboxed Bash / denies unsandboxed Bash, and
+// DEFERS everything else (Grep/Glob/Skill/…) to the permission layer. A Bash
+// read of the token is masked by the sandbox's credentials.files deny-read, not
+// by this hook.
 func runHookPreToolUse(args []string) {
 	fs := flag.NewFlagSet("hook pretooluse", flag.ContinueOnError)
 	var deny multiFlag
@@ -68,7 +81,12 @@ func runHookPreToolUse(args []string) {
 		return
 	}
 
-	switch decision, reason := decidePreToolUse(&in, deny); decision {
+	pol := filePolicy{
+		deny:       deny,
+		readRoots:  envRoots(projectEnv),
+		writeRoots: append(envRoots(outboxEnv), sandboxTmpDir()),
+	}
+	switch decision, reason := decidePreToolUse(&in, pol); decision {
 	case "":
 		os.Exit(0) // defer: no output => normal permission/sandbox flow applies
 	default:
@@ -76,65 +94,86 @@ func runHookPreToolUse(args []string) {
 	}
 }
 
-// decidePreToolUse returns "deny", "allow", or "" (defer). It denies a file tool
-// reading the token and an unsandboxed Bash command; it explicitly allows
-// sandboxed Bash; everything else defers.
-func decidePreToolUse(in *preToolUseInput, deny []string) (decision, reason string) {
-	if path, blocked := denyReason(in, deny); blocked {
-		return "deny", "ak-tgclaude hook: access to a protected path is denied: " + path
+// decidePreToolUse returns "deny", "allow", or "" (defer).
+func decidePreToolUse(in *preToolUseInput, pol filePolicy) (decision, reason string) {
+	// Token guard first: a file tool touching a protected path is denied even if
+	// that path happens to sit under the project (checked before the read allow).
+	if p, ok := underAny(in.ToolInput.FilePath, pol.deny); ok {
+		return "deny", "ak-tgclaude hook: access to a protected path is denied: " + p
 	}
-	if in.ToolName == "Bash" {
+
+	switch in.ToolName {
+	case "Bash":
 		if in.ToolInput.DangerouslyDisableSandbox {
 			return "deny", "ak-tgclaude hook: unsandboxed Bash is not permitted (read-only, sandboxed inspection only)"
 		}
 		return "allow", "ak-tgclaude hook: sandboxed Bash allowed"
+
+	case "Read":
+		if _, ok := underAny(in.ToolInput.FilePath, pol.readRoots); ok {
+			return "allow", "ak-tgclaude hook: read within the project"
+		}
+		return "deny", "ak-tgclaude hook: read is limited to the project " +
+			fmtRoots(pol.readRoots) + " — read other locations with sandboxed Bash"
+
+	case "Edit", "Write", "NotebookEdit":
+		if _, ok := underAny(in.ToolInput.FilePath, pol.writeRoots); ok {
+			return "allow", "ak-tgclaude hook: write within the outbox/tmp"
+		}
+		return "deny", "ak-tgclaude hook: write is limited to the outbox and tmp " + fmtRoots(pol.writeRoots)
 	}
-	return "", ""
+
+	return "", "" // defer (Grep/Glob/Skill/…)
 }
 
-// denyReason reports whether a file-touching tool call reads a protected path.
-// Only the file tools are gated: a Bash read of the token is masked by the
-// sandbox's credentials.files deny-read (authoritative and obfuscation-proof),
-// which the hook does not — and should not — reimplement by string-matching the
-// command.
-func denyReason(in *preToolUseInput, deny []string) (string, bool) {
-	if len(deny) == 0 {
+// underAny returns the first root that file (resolved to an absolute, cleaned
+// path) equals or sits under, and whether one matched.
+func underAny(file string, roots []string) (string, bool) {
+	if file == "" {
 		return "", false
 	}
-	switch in.ToolName {
-	case "Read", "Edit", "Write", "NotebookEdit":
-		if p := matchDenied(in.ToolInput.FilePath, deny); p != "" {
-			return p, true
+	abs := absClean(file)
+	for _, r := range roots {
+		if r == "" {
+			continue
+		}
+		rc := absClean(r)
+		if abs == rc || strings.HasPrefix(abs, rc+string(os.PathSeparator)) {
+			return r, true
 		}
 	}
 	return "", false
 }
 
-// matchDenied returns the protected path if file (resolved) equals or sits under
-// one of the deny paths.
-func matchDenied(file string, deny []string) string {
-	if file == "" {
-		return ""
+// absClean resolves p to an absolute, cleaned path (best-effort).
+func absClean(p string) string {
+	if a, err := filepath.Abs(p); err == nil {
+		p = a
 	}
-	abs := file
-	if a, err := filepath.Abs(file); err == nil {
-		abs = a
+	return filepath.Clean(p)
+}
+
+// envRoots returns the value of env var name as a one-element root list, or nil
+// if it is unset/empty.
+func envRoots(name string) []string {
+	if v := os.Getenv(name); v != "" {
+		return []string{v}
 	}
-	abs = filepath.Clean(abs)
-	for _, d := range deny {
-		if d == "" {
-			continue
-		}
-		dc := d
-		if a, err := filepath.Abs(d); err == nil {
-			dc = a
-		}
-		dc = filepath.Clean(dc)
-		if abs == dc || strings.HasPrefix(abs, dc+string(os.PathSeparator)) {
-			return d
-		}
+	return nil
+}
+
+// sandboxTmpDir is the per-uid temp the command sandbox makes writable by
+// default (/tmp/claude-<uid>) — the responder's scratch area.
+func sandboxTmpDir() string {
+	return fmt.Sprintf("/tmp/claude-%d", os.Getuid())
+}
+
+// fmtRoots renders roots for a deny reason.
+func fmtRoots(roots []string) string {
+	if len(roots) == 0 {
+		return "(none configured)"
 	}
-	return ""
+	return "[" + strings.Join(roots, " ") + "]"
 }
 
 // emitDecision prints the PreToolUse decision JSON and exits 0.

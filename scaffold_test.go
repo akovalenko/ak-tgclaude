@@ -26,24 +26,20 @@ func TestBuildSettingsShape(t *testing.T) {
 	if got := s.Sandbox.Filesystem.AllowWrite; len(got) != 1 || got[0] != "/state/cache" {
 		t.Errorf("allowWrite should be just the cache, got %v", got)
 	}
+	// File tools are governed by the PreToolUse hook, so the static permissions
+	// grant only the deferred tools (no Read/Write) and deny nothing.
 	for _, a := range s.Permissions.Allow {
-		if strings.HasPrefix(a, "Write(") {
-			t.Errorf("static settings must not grant Write, got %v", s.Permissions.Allow)
+		if strings.HasPrefix(a, "Write(") || a == "Read" {
+			t.Errorf("static settings must not grant Read/Write (the hook does), got %v", s.Permissions.Allow)
 		}
 	}
-	// The outbox area is deny-read on both layers (a responder can't read another
-	// chat's pending reply); own outbox is carved back per invocation.
+	if len(s.Permissions.Deny) != 0 {
+		t.Errorf("static settings should carry no permissions.deny, got %v", s.Permissions.Deny)
+	}
+	// Sandboxed Bash reads of a sibling outbox are still masked (Bash isn't
+	// hook-scoped); own outbox is carved back per invocation.
 	if got := s.Sandbox.Filesystem.DenyRead; len(got) != 1 || got[0] != "/run/out" {
 		t.Errorf("sandbox denyRead should be the outbox root, got %v", got)
-	}
-	foundDeny := false
-	for _, d := range s.Permissions.Deny {
-		if d == "Read(/run/out/**)" {
-			foundDeny = true
-		}
-	}
-	if !foundDeny {
-		t.Errorf("permissions.deny should block Read of the outbox root, got %v", s.Permissions.Deny)
 	}
 	if len(s.Sandbox.Credentials.Files) != 1 || s.Sandbox.Credentials.Files[0].Path != "/cfg/bot.toml" ||
 		s.Sandbox.Credentials.Files[0].Mode != "deny" {

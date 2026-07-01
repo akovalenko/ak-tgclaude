@@ -230,46 +230,54 @@ deployment, the generated file:
   PreToolUse hook `ak-tgclaude hook pretooluse --deny-read <token file>` (bare
   PATH name).
 
-The **PreToolUse hook** denies exactly two things and defers the rest: a **file
-tool** (Read/Edit/Write) reading the token file (→ deny), and an **unsandboxed
-Bash command** (`tool_input.dangerouslyDisableSandbox` → deny; the responder is
-read-only, sandboxed-inspection-only). Sandboxed Bash is **allowed**; every other
-tool call is **deferred** (the hook emits nothing) so the permission layer
-decides — the hook never blanket-allows, which would override the per-invocation
-`Write(outbox)` grant. A Bash read of the token is not the hook's job: the
-sandbox's `credentials.files` deny-read masks the file (authoritative and
-obfuscation-proof), so the hook does not string-match commands.
+The **PreToolUse hook** is the single authority for the **file tools**,
+path-scoped from the responder's env:
+
+- **Read** → allowed under the project (`$AK_TGCLAUDE_PROJECT`), else denied (read
+  elsewhere with sandboxed Bash);
+- **Edit/Write/NotebookEdit** → allowed under this invocation's outbox
+  (`$AK_TGCLAUDE_OUTBOX`) or the sandbox tmp (`/tmp/claude-<uid>`), else denied;
+- a **token-file** touch (`--deny-read`) is denied first — it wins even if the
+  token happens to sit under the project.
+
+It also **allows sandboxed** Bash / **denies unsandboxed** Bash, and **defers**
+everything else (Grep/Glob/Skill/…) to the permission layer. Because the hook is
+the file-tool authority, the static `permissions.allow` lists only those deferred
+tools (no Read/Write). A Bash read of the token is masked by the sandbox's
+`credentials.files` deny-read, not the hook (obfuscation-proof; no command
+string-matching). The hook reads the project/outbox from env, which the
+dispatcher sets on the responder process and the (unsandboxed) hook inherits.
 
 ### Per-invocation isolation (write and read)
 
-The static settings above grant **no** outbox write, and **deny read** of the
-whole outbox area on both layers (`permissions.deny: Read(<outboxRoot>/**)` for
-the Read tool, `sandbox.filesystem.denyRead: [<outboxRoot>]` for sandboxed Bash).
-Each `claude -p` is then launched with a per-invocation `--settings` overlay that
-scopes access to **exactly its own** outbox:
+The **Write tool** is scoped to this invocation's outbox (and the tmp dir) by the
+**hook**, using `$AK_TGCLAUDE_OUTBOX`. The **sandbox** side (which governs Bash,
+not the tools) is scoped by a per-invocation `--settings` overlay:
 
-- **write** — the Write tool (`permissions.allow: Write(<outbox>/**)`) and
-  sandboxed Bash (`sandbox.filesystem.allowWrite: [<outbox>]`);
-- **read** — `sandbox.filesystem.allowRead: [<outbox>]`, carving its own outbox
-  back out of the static deny so `send --file` can read its own body.
+- `sandbox.filesystem.allowWrite: [<outbox>]` — so Bash (`send`, `cp`) can write
+  only this outbox, not a sibling's;
+- `sandbox.filesystem.allowRead: [<outbox>]` — carving this outbox back out of the
+  static `denyRead: [<outboxRoot>]` so `send --file` can read its own body while
+  sibling outboxes stay masked.
 
-These merge on top of the static settings (both `permissions.allow/deny` and the
-`sandbox.filesystem` arrays merge across `--settings` and the project file —
-verified empirically, including that a flag `allowRead` overrides a file
-`denyRead` for the carved path). Only `hooks` cannot be injected via `--settings`,
-which is why the hook lives in the materialized file.
+These merge on top of the static settings (the `sandbox.filesystem` arrays merge
+across `--settings` and the project file — verified empirically, including that a
+flag `allowRead` overrides a file `denyRead` for the carved path). Only `hooks`
+cannot be injected via `--settings`, which is why the hook lives in the
+materialized file.
 
 So a concurrent, possibly prompt-injected responder cannot **write** into another
-chat's outbox (Write tool denied; Bash `cp` / redirect / `send --outbox <sibling>`
-denied by the sandbox), nor **read** another chat's pending reply (the sibling
-outbox is masked — a Bash `cat`/`ls` sees `No such file or directory`, and the
-Read tool is denied). Combined with the dispatcher deciding the route from *which*
-outbox a descriptor lands in, the cross-chat confused-deputy is closed.
+chat's outbox (the hook denies a Write-tool path outside its own outbox; Bash
+`cp` / redirect / `send --outbox <sibling>` is denied by the sandbox), nor
+**read** another chat's pending reply (a Bash `cat`/`ls` of a sibling sees `No
+such file or directory`; a Read tool outside the project is denied by the hook).
+Combined with the dispatcher deciding the route from *which* outbox a descriptor
+lands in, the cross-chat confused-deputy is closed.
 
-> Residual: the Grep/Glob **tools** are not path-scoped here, so a determined,
-> injected responder could in principle enumerate sibling outbox *names* (not
-> Bash-maskable content) via those tools. Low value (random names; content reads
-> are closed on both the Bash and Read-tool paths) — noted, not yet fenced.
+> Residual: the Grep/Glob **tools** are not path-scoped, so a determined, injected
+> responder could in principle enumerate sibling outbox *names* (not Bash-maskable
+> content) via those tools. Low value (random names; content reads are closed on
+> both the Bash and Read-tool paths) — noted, not yet fenced.
 
 ### Fixed vs ephemeral cwd, and `scaffold`
 

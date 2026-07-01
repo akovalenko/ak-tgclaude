@@ -14,16 +14,16 @@ func TestBuildClaudeArgs(t *testing.T) {
 		t.Errorf("bare args = %q", got)
 	}
 
-	// With an outbox, a --settings overlay granting just that outbox is inserted
-	// before --agent/--resume.
+	// With an outbox, a --settings overlay scoping sandbox access to that outbox
+	// is inserted before --agent/--resume.
 	got := buildClaudeArgs("eputs-telegram-guide", "sess-7", "/run/out/outbox-A1")
 	joined := strings.Join(got, " ")
 	if !strings.Contains(joined, "--settings ") {
 		t.Fatalf("expected --settings overlay: %q", joined)
 	}
-	if !strings.Contains(joined, `Write(/run/out/outbox-A1/**)`) ||
-		!strings.Contains(joined, `"allowWrite":["/run/out/outbox-A1"]`) {
-		t.Errorf("overlay missing per-invocation grants: %q", joined)
+	if !strings.Contains(joined, `"allowWrite":["/run/out/outbox-A1"]`) ||
+		!strings.Contains(joined, `"allowRead":["/run/out/outbox-A1"]`) {
+		t.Errorf("overlay missing per-invocation sandbox grants: %q", joined)
 	}
 	if !strings.HasSuffix(joined, "--agent eputs-telegram-guide --resume sess-7") {
 		t.Errorf("agent/resume should come after --settings: %q", joined)
@@ -35,16 +35,16 @@ func TestBuildInvocationSettings(t *testing.T) {
 		t.Errorf("empty outbox => empty overlay")
 	}
 	s := buildInvocationSettings("/o/x")
-	if !strings.Contains(s, `"allow":["Write(/o/x/**)"]`) || !strings.Contains(s, `"allowWrite":["/o/x"]`) {
+	if !strings.Contains(s, `"allowWrite":["/o/x"]`) || !strings.Contains(s, `"allowRead":["/o/x"]`) {
 		t.Errorf("overlay JSON wrong: %s", s)
 	}
-	// Own outbox is carved back out of the static denyRead so `send` can read it.
-	if !strings.Contains(s, `"allowRead":["/o/x"]`) {
-		t.Errorf("overlay missing per-invocation allowRead: %s", s)
+	// The Write TOOL grant is the hook's job now — the overlay is sandbox-only.
+	if strings.Contains(s, "permissions") || strings.Contains(s, "Write(") {
+		t.Errorf("overlay should carry no permissions/Write, got: %s", s)
 	}
 	// Must NOT touch sandbox.enabled etc. (would clobber the merged base).
 	if strings.Contains(s, "enabled") {
-		t.Errorf("overlay should only carry allowWrite, got: %s", s)
+		t.Errorf("overlay should only carry filesystem allow*, got: %s", s)
 	}
 }
 
