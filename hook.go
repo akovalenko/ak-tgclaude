@@ -30,6 +30,10 @@ type preToolUseInput struct {
 	ToolInput struct {
 		FilePath string `json:"file_path"` // Read/Write/Edit
 		Command  string `json:"command"`   // Bash
+		// DangerouslyDisableSandbox is set by the model only when it wants a Bash
+		// command to run OUTSIDE the sandbox; absent/false means sandboxed. (This
+		// field is undocumented but real — the harness approve-hooks rely on it.)
+		DangerouslyDisableSandbox bool `json:"dangerouslyDisableSandbox"`
 	} `json:"tool_input"`
 }
 
@@ -42,10 +46,12 @@ type preToolUseDecision struct {
 	} `json:"hookSpecificOutput"`
 }
 
-// runHookPreToolUse gates the responder's tool calls. It is the primary token
-// guard: it denies any Read (or file-touching tool) of a --deny-read path and
-// any Bash command that references one (best-effort; the sandbox's
-// credentials.files deny-read is the authoritative backstop against obfuscation).
+// runHookPreToolUse gates the responder's tool calls. It DENIES the two things
+// that are out of contract — reading the token file (any tool) and running an
+// unsandboxed Bash command — and DEFERS everything else to the normal
+// permission + sandbox flow (so the per-invocation Write grant, the static Read
+// allow, and dontAsk decide). It never blanket-"allow"s, which would override
+// those layers.
 func runHookPreToolUse(args []string) {
 	fs := flag.NewFlagSet("hook pretooluse", flag.ContinueOnError)
 	var deny multiFlag
@@ -61,12 +67,28 @@ func runHookPreToolUse(args []string) {
 		return
 	}
 
-	if path, blocked := denyReason(&in, deny); blocked {
-		emitDecision("deny", "ak-tgclaude hook: access to a protected path is denied: "+path)
-		return
+	switch decision, reason := decidePreToolUse(&in, deny); decision {
+	case "":
+		os.Exit(0) // defer: no output => normal permission/sandbox flow applies
+	default:
+		emitDecision(decision, reason)
 	}
-	// Defer to the normal permission flow for everything else.
-	emitDecision("allow", "")
+}
+
+// decidePreToolUse returns "deny", "allow", or "" (defer). It denies a
+// token-file touch (any tool) and an unsandboxed Bash command; it explicitly
+// allows sandboxed Bash; everything else defers.
+func decidePreToolUse(in *preToolUseInput, deny []string) (decision, reason string) {
+	if path, blocked := denyReason(in, deny); blocked {
+		return "deny", "ak-tgclaude hook: access to a protected path is denied: " + path
+	}
+	if in.ToolName == "Bash" {
+		if in.ToolInput.DangerouslyDisableSandbox {
+			return "deny", "ak-tgclaude hook: unsandboxed Bash is not permitted (read-only, sandboxed inspection only)"
+		}
+		return "allow", "ak-tgclaude hook: sandboxed Bash allowed"
+	}
+	return "", ""
 }
 
 // denyReason reports whether the tool call touches a protected path.

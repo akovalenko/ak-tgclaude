@@ -213,8 +213,16 @@ deployment, the generated file:
 - installs the **token guard**: `sandbox.credentials.files` deny-read on the
   config file, `credentials.envVars` deny (unset) for `ANTHROPIC_*`, and the
   PreToolUse hook `ak-tgclaude hook pretooluse --deny-read <token file>` (bare
-  PATH name). The hook denies any Read/Bash that touches the token; the
-  deny-read is the authoritative backstop against obfuscation.
+  PATH name).
+
+The **PreToolUse hook** denies exactly two things and defers the rest: a
+token-file touch (any tool → deny; the sandbox deny-read is the authoritative
+backstop against obfuscation), and an **unsandboxed Bash command**
+(`tool_input.dangerouslyDisableSandbox` → deny; the responder is read-only,
+sandboxed-inspection-only). Sandboxed Bash is allowed; every other tool call is
+**deferred** (the hook emits nothing) so the permission layer decides — the hook
+never blanket-allows, which would override the per-invocation `Write(outbox)`
+grant.
 
 ### Per-invocation write isolation
 
