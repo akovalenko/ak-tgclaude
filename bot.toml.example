@@ -63,6 +63,19 @@ project = "~/code/example-project"
 # different chats run concurrently up to this bound.
 # max_concurrent = 4
 
+# After each answer, send the run's dollar cost as a bare "$n.nnn" message
+# (tenth-of-a-cent precision) to the chat — sent only when the cost is present
+# and non-zero, otherwise nothing. Under a Claude subscription the figure is
+# notional (what the run would cost at API rates), not real billing. Also --bill.
+# bill = false
+
+# Keep the chat->session map in memory only: it is never written to disk, so
+# every restart starts each chat fresh. The getUpdates offset still persists (a
+# restart won't reprocess the backlog). Default false (bindings persist). Also
+# --ephemeral-sessions. For a one-shot wipe without going ephemeral, run the
+# `clear` subcommand instead.
+# ephemeral_sessions = false
+
 # Materialize the do-what-you're-asked responder variant (does not decline
 # off-topic messages). Machine guards (read-only sandbox, token deny, per-chat
 # route) still apply, so it can't exceed the read-only contract. Also --norefuse.

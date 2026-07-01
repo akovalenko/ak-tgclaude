@@ -102,6 +102,12 @@ type Config struct {
 	// exceed the read-only sandboxed contract.
 	NoRefuse bool `toml:"no_refuse"`
 
+	// Bill sends the responder's dollar cost (total_cost_usd from `claude -p`) as a
+	// bare "$n.nnn" message to the chat after each answer, but only when that cost
+	// is present and non-zero. Under a subscription the figure is notional (what the
+	// run would cost at API rates), not real billing. Default false. Also --bill.
+	Bill bool `toml:"bill"`
+
 	// Project is the codebase the responder consults on (read-only under "qa").
 	// The sandbox and PreToolUse confine the responder's reads here.
 	Project string `toml:"project"`
@@ -140,6 +146,13 @@ type Config struct {
 	// which must survive restarts. Empty => $XDG_STATE_HOME/ak-tgclaude.
 	StateDir string `toml:"state_dir"`
 
+	// EphemeralSessions keeps the chat→session map in memory only: it is never
+	// written to disk, so every restart starts each chat fresh. The getUpdates
+	// offset still persists (a restart does not reprocess the backlog). Default
+	// false (bindings persist). Also --ephemeral-sessions. The `clear` subcommand
+	// is the one-shot alternative — wipe persisted bindings without going ephemeral.
+	EphemeralSessions bool `toml:"ephemeral_sessions"`
+
 	// ConfigPath is the path of the loaded TOML config, if any. Set at load time
 	// (not a config field). When the token lives in this file, it is registered
 	// for sandbox deny-read in the responder's scaffold.
@@ -173,6 +186,8 @@ func parseConfig(args []string) (*Config, error) {
 	cwd := fs.String("cwd", "", "fixed responder cwd to materialize into and keep (default: ephemeral, removed on exit)")
 	maxConcurrent := fs.Int("max-concurrent", 0, "max responders running at once (per-chat is always serialized; default 4)")
 	noRefuse := fs.Bool("norefuse", false, "materialize the do-what-you're-asked responder (does not decline off-topic; machine guards still apply)")
+	ephemeralSessions := fs.Bool("ephemeral-sessions", false, "keep chat→session bindings in memory only (never persisted; offset still persists; each restart starts fresh)")
+	bill := fs.Bool("bill", false, "after each answer, send the run's dollar cost as a bare \"$n.nnn\" message (only when present and non-zero)")
 	var allowUsers int64List
 	fs.Var(&allowUsers, "allow-user", "authorize a Telegram user id (repeatable; merged with allowed_users)")
 	var wireSkills stringList
@@ -213,6 +228,12 @@ func parseConfig(args []string) (*Config, error) {
 	}
 	if *noRefuse {
 		c.NoRefuse = true
+	}
+	if *ephemeralSessions {
+		c.EphemeralSessions = true
+	}
+	if *bill {
+		c.Bill = true
 	}
 	// allowed_users is additive: --allow-user appends to the file list (rather
 	// than overriding it) so the CLI can grant one-off access on top of config.

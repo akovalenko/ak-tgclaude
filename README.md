@@ -20,6 +20,7 @@ sprawl, one thing to put on `PATH`:
 | `send` | inside the responder's sandbox | enqueues an outbound Telegram message by dropping a descriptor into the outbox spool (no token, no network) |
 | `hook pretooluse` | as the responder's PreToolUse hook | gates the responder's tool calls (e.g. denies reads of the token file) |
 | `scaffold` | host | materializes a responder cwd (generated settings.json) without running the dispatcher, to inspect it and run `claude` by hand |
+| `clear` | host | drops every persisted chat→session binding (keeps the getUpdates offset); reads the state dir from `--config` or the default |
 | `deploy` | host, once | provisions the project tree, example config, and skills |
 
 ## Configuration
@@ -102,7 +103,11 @@ never race on the same `--resume` session). For each message:
    delivered message clears the action; the next refresh re-asserts it).
 3. When the responder finishes, the session id it used (parsed from
    `--output-format json`) is bound to the chat, so the next message
-   `--resume`s it.
+   `--resume`s it. With **`bill`** (`--bill`) set, the run's `total_cost_usd`
+   (also from that JSON) is sent to the chat as a bare **`$n.nnn`** message —
+   only when it is present and non-zero, otherwise nothing. Under a Claude
+   subscription the figure is *notional* (what the run would cost at API rates),
+   not real billing.
 
 **The per-invocation outbox dir is the route capability.** The dispatcher pins
 the route in memory and binds it to the directory it handed this one responder;
@@ -121,6 +126,19 @@ Session ids are **not** derived from the chat id — Claude Code mints a fresh o
 per new conversation and the dispatcher captures it, so `/clear` can truly sever
 the association. The `chat→session` map and the poll offset are the dispatcher's
 durable state (`$XDG_STATE_HOME/ak-tgclaude/sessions.json`).
+
+Two operator levers beyond the per-chat `/clear` reset the whole map:
+
+- **`ephemeral_sessions`** (`--ephemeral-sessions`) keeps the `chat→session` map
+  **in memory only** — it is never written to disk, so every restart starts each
+  chat fresh. The **poll offset still persists** (a restart doesn't reprocess the
+  backlog); only the bindings are dropped. A standing "no cross-restart continuity"
+  mode.
+- The **`clear`** subcommand is the one-shot alternative: wipe the persisted
+  bindings **now** (keeping the offset) without switching to ephemeral mode —
+  `ak-tgclaude clear [--config bot.toml]` (state dir from the config or the
+  default). Useful when the process is down, or to drop stale sessions whose
+  on-disk transcripts or scaffold have since changed.
 
 > Replying to an old bot message to **resurrect** its (since-cleared) session —
 > a `message→session` map keyed by the sent `message_id` — is a planned follow-up
@@ -498,7 +516,8 @@ send.go            `send` subcommand (text / code / document)
 render.go          descriptor -> Telegram text/parse_mode, code wrapping, spill
 telegram.go        Telegram Bot API client (getUpdates / sendMessage / sendDocument)
 drain.go           per-invocation outbox drain (fsnotify watch -> send -> ack)
-session.go         durable state: poll offset + chat->session map
+session.go         durable state: poll offset + chat->session map (+ ephemeral mode)
+clear.go           `clear` subcommand: wipe persisted chat->session bindings
 responder.go       Responder interface (claude / stub) + `claude -p` spawn
 dispatch.go        the dispatch loop: poll -> route -> respond -> deliver
 scaffold.go        generated .claude/settings.json + materialize embedded assets

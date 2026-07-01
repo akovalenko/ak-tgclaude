@@ -19,6 +19,24 @@ func TestParseConfigAccessFlags(t *testing.T) {
 	}
 }
 
+func TestParseConfigEphemeralAndBillFlags(t *testing.T) {
+	c, err := parseConfig([]string{"--ephemeral-sessions", "--bill"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !c.EphemeralSessions {
+		t.Error("--ephemeral-sessions should set EphemeralSessions")
+	}
+	if !c.Bill {
+		t.Error("--bill should set Bill")
+	}
+	// Both default off when unset.
+	d, _ := parseConfig(nil)
+	if d.EphemeralSessions || d.Bill {
+		t.Errorf("defaults should be off: ephemeral=%v bill=%v", d.EphemeralSessions, d.Bill)
+	}
+}
+
 func TestParseConfigAllowUserInvalid(t *testing.T) {
 	if _, err := parseConfig([]string{"--allow-user", "notanumber"}); err == nil {
 		t.Error("non-numeric --allow-user should error")

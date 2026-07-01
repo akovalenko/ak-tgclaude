@@ -41,6 +41,7 @@ func TestHandleShowsTypingDuringResponder(t *testing.T) {
 // calls, drops descriptors into the invocation's outbox.
 type fakeResponder struct {
 	sid         string
+	cost        float64
 	descriptors []*Descriptor
 	gotReq      RespondRequest
 	called      bool
@@ -54,12 +55,12 @@ func (f *fakeResponder) Respond(_ context.Context, req RespondRequest) (RespondR
 			return RespondResult{}, err
 		}
 	}
-	return RespondResult{SessionID: f.sid}, nil
+	return RespondResult{SessionID: f.sid, CostUSD: f.cost}, nil
 }
 
 func newTestDispatcher(t *testing.T, resp Responder, sender Sender) *Dispatcher {
 	t.Helper()
-	store, err := LoadSessionStore(t.TempDir())
+	store, err := LoadSessionStore(t.TempDir(), false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -157,6 +158,70 @@ func TestOutcomeField(t *testing.T) {
 	// Unknown with no final text => bare "?".
 	if got := outcomeField(RespondResult{}); got != "?" {
 		t.Errorf("empty => %q, want ?", got)
+	}
+}
+
+func TestBillLine(t *testing.T) {
+	cases := []struct {
+		cost float64
+		want string
+		ok   bool
+	}{
+		{0, "", false},
+		{-1, "", false},
+		{0.0001, "", false}, // rounds to $0.000 → suppressed
+		{0.0123, "$0.012", true},
+		{12.3, "$12.300", true},
+	}
+	for _, tc := range cases {
+		got, ok := billLine(tc.cost)
+		if got != tc.want || ok != tc.ok {
+			t.Errorf("billLine(%v) = %q,%v; want %q,%v", tc.cost, got, ok, tc.want, tc.ok)
+		}
+	}
+}
+
+func TestHandleBillSendsCostAfterAnswer(t *testing.T) {
+	resp := &fakeResponder{sid: "s", cost: 0.0123, descriptors: []*Descriptor{{Kind: KindText, Text: "answer"}}}
+	sender := &fakeSender{}
+	d := newTestDispatcher(t, resp, sender)
+	d.bill = true
+
+	d.handleUpdate(context.Background(), textUpdate(1, 42, 7, "hi"))
+
+	calls := sender.snapshot()
+	if len(calls) != 2 {
+		t.Fatalf("want answer + bill, got %d calls: %+v", len(calls), calls)
+	}
+	if calls[0].text != "answer" {
+		t.Errorf("first message should be the answer: %q", calls[0].text)
+	}
+	if calls[1].text != "$0.012" {
+		t.Errorf("bill line = %q, want $0.012", calls[1].text)
+	}
+	if calls[1].route.ChatID != 42 || calls[1].route.ReplyTo != 7 {
+		t.Errorf("bill not routed to the incoming message: %+v", calls[1].route)
+	}
+}
+
+func TestHandleBillSilentWhenZeroOrDisabled(t *testing.T) {
+	// bill enabled but cost is zero => no bill message (just the answer).
+	resp := &fakeResponder{sid: "s", cost: 0, descriptors: []*Descriptor{{Kind: KindText, Text: "answer"}}}
+	sender := &fakeSender{}
+	d := newTestDispatcher(t, resp, sender)
+	d.bill = true
+	d.handleUpdate(context.Background(), textUpdate(1, 42, 7, "hi"))
+	if calls := sender.snapshot(); len(calls) != 1 {
+		t.Fatalf("zero cost should send no bill: %+v", calls)
+	}
+
+	// bill disabled but cost present => still no bill message.
+	resp2 := &fakeResponder{sid: "s", cost: 5, descriptors: []*Descriptor{{Kind: KindText, Text: "answer"}}}
+	sender2 := &fakeSender{}
+	d2 := newTestDispatcher(t, resp2, sender2)
+	d2.handleUpdate(context.Background(), textUpdate(1, 42, 7, "hi"))
+	if calls := sender2.snapshot(); len(calls) != 1 {
+		t.Fatalf("bill disabled should send no bill: %+v", calls)
 	}
 }
 

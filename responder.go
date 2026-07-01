@@ -23,8 +23,9 @@ type RespondRequest struct {
 // final text (logged when the outcome is unrecognized).
 type RespondResult struct {
 	SessionID string
-	Outcome   string // "answered"|"problematic"|"refused"|"" (from the final output)
-	FinalText string // the responder's final result text (for diagnostics)
+	Outcome   string  // "answered"|"problematic"|"refused"|"" (from the final output)
+	FinalText string  // the responder's final result text (for diagnostics)
+	CostUSD   float64 // total_cost_usd for the run (0 if absent); surfaced by --bill
 }
 
 // Responder answers one update. The dispatcher depends on this interface so the
@@ -66,8 +67,8 @@ func (c *claudeResponder) Respond(ctx context.Context, req RespondRequest) (Resp
 	if err := cmd.Run(); err != nil {
 		return RespondResult{}, fmt.Errorf("claude -p: %w", err)
 	}
-	sid, outcome, final := parseResult(out.Bytes())
-	return RespondResult{SessionID: sid, Outcome: outcome, FinalText: final}, nil
+	sid, outcome, final, cost := parseResult(out.Bytes())
+	return RespondResult{SessionID: sid, Outcome: outcome, FinalText: final, CostUSD: cost}, nil
 }
 
 // buildPrompt prepends a small preamble giving the responder the LITERAL
@@ -133,15 +134,16 @@ func (s *stubResponder) Respond(_ context.Context, req RespondRequest) (RespondR
 	return RespondResult{Outcome: "answered"}, nil
 }
 
-// parseResult extracts the session id, the outcome word, and the raw final text
-// from `claude --output-format json` output.
-func parseResult(jsonOut []byte) (sessionID, outcome, finalText string) {
+// parseResult extracts the session id, the outcome word, the raw final text, and
+// the run's dollar cost from `claude --output-format json` output.
+func parseResult(jsonOut []byte) (sessionID, outcome, finalText string, costUSD float64) {
 	var r struct {
-		SessionID string `json:"session_id"`
-		Result    string `json:"result"`
+		SessionID    string  `json:"session_id"`
+		Result       string  `json:"result"`
+		TotalCostUSD float64 `json:"total_cost_usd"`
 	}
 	_ = json.Unmarshal(jsonOut, &r)
-	return r.SessionID, parseOutcome(r.Result), r.Result
+	return r.SessionID, parseOutcome(r.Result), r.Result, r.TotalCostUSD
 }
 
 // knownOutcomes are the status words the responder ends its output with. The

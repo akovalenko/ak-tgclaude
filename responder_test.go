@@ -81,8 +81,8 @@ func TestStubResponderRepliesFixed(t *testing.T) {
 }
 
 func TestParseResult(t *testing.T) {
-	out := []byte(`{"type":"result","session_id":"abc-123","result":"Sent the answer.\nanswered"}`)
-	sid, outcome, final := parseResult(out)
+	out := []byte(`{"type":"result","session_id":"abc-123","result":"Sent the answer.\nanswered","total_cost_usd":0.0123}`)
+	sid, outcome, final, cost := parseResult(out)
 	if sid != "abc-123" {
 		t.Errorf("session_id = %q, want abc-123", sid)
 	}
@@ -92,8 +92,11 @@ func TestParseResult(t *testing.T) {
 	if final != "Sent the answer.\nanswered" {
 		t.Errorf("final text = %q", final)
 	}
-	if s, o, f := parseResult([]byte("not json")); s != "" || o != "" || f != "" {
-		t.Errorf("malformed => %q/%q/%q, want empty", s, o, f)
+	if cost != 0.0123 {
+		t.Errorf("total_cost_usd = %v, want 0.0123", cost)
+	}
+	if s, o, f, c := parseResult([]byte("not json")); s != "" || o != "" || f != "" || c != 0 {
+		t.Errorf("malformed => %q/%q/%q/%v, want empty", s, o, f, c)
 	}
 }
 

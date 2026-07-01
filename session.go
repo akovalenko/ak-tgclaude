@@ -16,6 +16,11 @@ import (
 type SessionStore struct {
 	path string
 
+	// ephemeral keeps the chat→session map in memory only: persist writes just the
+	// offset, and a reload starts with no bindings. The offset still persists so a
+	// restart does not reprocess the getUpdates backlog.
+	ephemeral bool
+
 	mu   sync.Mutex
 	data storeData
 }
@@ -25,14 +30,17 @@ type storeData struct {
 	Sessions map[int64]string `json:"sessions"` // chat_id -> session_id
 }
 
-// LoadSessionStore opens (or initializes) the store under dir.
-func LoadSessionStore(dir string) (*SessionStore, error) {
+// LoadSessionStore opens (or initializes) the store under dir. When ephemeral,
+// any persisted chat→session bindings are ignored (each start is fresh) and
+// future writes never carry the map to disk; the offset is still loaded/kept.
+func LoadSessionStore(dir string, ephemeral bool) (*SessionStore, error) {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return nil, fmt.Errorf("creating state dir %s: %w", dir, err)
 	}
 	s := &SessionStore{
-		path: filepath.Join(dir, "sessions.json"),
-		data: storeData{Sessions: map[int64]string{}},
+		path:      filepath.Join(dir, "sessions.json"),
+		ephemeral: ephemeral,
+		data:      storeData{Sessions: map[int64]string{}},
 	}
 	b, err := os.ReadFile(s.path)
 	if err != nil {
@@ -44,7 +52,7 @@ func LoadSessionStore(dir string) (*SessionStore, error) {
 	if err := json.Unmarshal(b, &s.data); err != nil {
 		return nil, fmt.Errorf("parsing %s: %w", s.path, err)
 	}
-	if s.data.Sessions == nil {
+	if s.data.Sessions == nil || ephemeral {
 		s.data.Sessions = map[int64]string{}
 	}
 	return s, nil
@@ -74,6 +82,20 @@ func (s *SessionStore) Clear(chat int64) error {
 	return s.persist()
 }
 
+// ClearAll drops every chat→session binding (the `clear` subcommand), keeping
+// the getUpdates offset so the dispatcher does not reprocess the backlog on the
+// next start. It returns how many bindings were removed.
+func (s *SessionStore) ClearAll() (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	n := len(s.data.Sessions)
+	if n == 0 {
+		return 0, nil
+	}
+	s.data.Sessions = map[int64]string{}
+	return n, s.persist()
+}
+
 // Offset returns the next getUpdates offset.
 func (s *SessionStore) Offset() int64 {
 	s.mu.Lock()
@@ -89,9 +111,15 @@ func (s *SessionStore) SetOffset(offset int64) error {
 	return s.persist()
 }
 
-// persist writes the store atomically (temp + rename). Caller holds s.mu.
+// persist writes the store atomically (temp + rename). Caller holds s.mu. In
+// ephemeral mode the chat→session map is omitted, so only the offset reaches
+// disk (the in-memory map is left intact for the process lifetime).
 func (s *SessionStore) persist() error {
-	b, err := json.Marshal(s.data)
+	data := s.data
+	if s.ephemeral {
+		data.Sessions = nil
+	}
+	b, err := json.Marshal(data)
 	if err != nil {
 		return err
 	}

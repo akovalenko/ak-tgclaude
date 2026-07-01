@@ -57,6 +57,7 @@ type Dispatcher struct {
 	maxConcurrent int    // cap on responders running at once
 	helpText      string // reply to /help and /start
 	helpParseMode string // "" (plain) or "HTML" for the help reply
+	bill          bool   // send the run's dollar cost as a "$n.nnn" message after each answer
 }
 
 // Run long-polls and dispatches updates to per-chat workers until ctx is
@@ -251,6 +252,28 @@ func (d *Dispatcher) handleUpdate(ctx context.Context, u Update) {
 			log.Printf("ak-tgclaude: binding chat %d: %v", m.Chat.ID, err)
 		}
 	}
+	if d.bill {
+		if line, ok := billLine(res.CostUSD); ok {
+			if _, err := d.sender.SendMessage(ctx, route, line, "", false); err != nil {
+				log.Printf("ak-tgclaude: bill %d: %v", m.Chat.ID, err)
+			}
+		}
+	}
+}
+
+// billLine renders the run's dollar cost for the --bill message: a bare "$n.nnn"
+// at tenth-of-a-cent precision. ok is false when the cost is absent or rounds to
+// zero (total_cost_usd null/0 — e.g. a fully cached turn), so the dispatcher
+// sends nothing rather than a meaningless "$0.000".
+func billLine(costUSD float64) (string, bool) {
+	if costUSD <= 0 {
+		return "", false
+	}
+	line := fmt.Sprintf("$%.3f", costUSD)
+	if line == "$0.000" {
+		return "", false
+	}
+	return line, true
 }
 
 // outcomeField renders the outcome for the done log: the recognized word, or
@@ -360,7 +383,7 @@ func runDispatch(args []string) {
 		os.Exit(2)
 	}
 
-	store, err := LoadSessionStore(cfg.StateDir)
+	store, err := LoadSessionStore(cfg.StateDir, cfg.EphemeralSessions)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "ak-tgclaude: dispatch: %v\n", err)
 		os.Exit(1)
@@ -450,6 +473,7 @@ func runDispatch(args []string) {
 		maxConcurrent: cfg.MaxConcurrent,
 		helpText:      helpText,
 		helpParseMode: helpParseMode,
+		bill:          cfg.Bill,
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
