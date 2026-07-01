@@ -61,6 +61,41 @@ func TestClientSendMessagePlainOmitsParseMode(t *testing.T) {
 	}
 }
 
+func TestClientSendChatAction(t *testing.T) {
+	var gotPath string
+	var body map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		io.WriteString(w, `{"ok":true,"result":true}`)
+	}))
+	defer srv.Close()
+
+	c := &Client{Token: "T", BaseURL: srv.URL, HTTP: srv.Client()}
+	if err := c.SendChatAction(context.Background(), 100, "typing"); err != nil {
+		t.Fatalf("SendChatAction: %v", err)
+	}
+	if gotPath != "/botT/sendChatAction" {
+		t.Errorf("path = %q", gotPath)
+	}
+	if body["chat_id"].(float64) != 100 || body["action"] != "typing" {
+		t.Errorf("payload = %v", body)
+	}
+}
+
+func TestClientSendChatActionAPIError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		io.WriteString(w, `{"ok":false,"description":"chat not found"}`)
+	}))
+	defer srv.Close()
+
+	c := &Client{Token: "T", BaseURL: srv.URL, HTTP: srv.Client()}
+	err := c.SendChatAction(context.Background(), 100, "typing")
+	if err == nil || !strings.Contains(err.Error(), "chat not found") {
+		t.Errorf("expected API error surfaced, got %v", err)
+	}
+}
+
 func TestClientSendDocument(t *testing.T) {
 	var fileContent, fileName, chatID string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

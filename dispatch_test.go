@@ -2,9 +2,40 @@ package main
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
+	"time"
 )
+
+// typingProbe blocks in Respond until the sender has recorded a "typing" chat
+// action, proving the dispatcher shows typing for the responder's lifetime.
+type typingProbe struct{ sender *fakeSender }
+
+func (p *typingProbe) Respond(ctx context.Context, _ RespondRequest) (RespondResult, error) {
+	for i := 0; i < 1000; i++ {
+		if p.sender.actionCount() > 0 {
+			return RespondResult{Outcome: "answered"}, nil
+		}
+		select {
+		case <-ctx.Done():
+			return RespondResult{}, ctx.Err()
+		case <-time.After(2 * time.Millisecond):
+		}
+	}
+	return RespondResult{}, errors.New("no typing action observed")
+}
+
+func TestHandleShowsTypingDuringResponder(t *testing.T) {
+	sender := &fakeSender{}
+	d := newTestDispatcher(t, &typingProbe{sender: sender}, sender)
+
+	d.handleUpdate(context.Background(), textUpdate(1, 42, 7, "hello"))
+
+	if sender.actionCount() == 0 {
+		t.Fatal("expected a typing chat action during the responder's lifetime")
+	}
+}
 
 // fakeResponder records the request it got and, simulating the agent's `send`
 // calls, drops descriptors into the invocation's outbox.

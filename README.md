@@ -89,7 +89,11 @@ never race on the same `--resume` session). For each message:
    with `$AK_TGCLAUDE_OUTBOX` pointing at that directory and the message text on
    stdin. A drain bound to `Route{chat_id, reply_to=incoming message_id}` runs
    for the lifetime of that responder and delivers its messages (replying to the
-   incoming one).
+   incoming one). For that same lifetime the dispatcher shows a **`typing…`**
+   chat action, refreshed every few seconds (Telegram expires it after ~5s) and
+   stopped when the responder returns — so the user sees activity while the model
+   thinks, and the gaps between a multi-message answer stay filled (each
+   delivered message clears the action; the next refresh re-asserts it).
 3. When the responder finishes, the session id it used (parsed from
    `--output-format json`) is bound to the chat, so the next message
    `--resume`s it.

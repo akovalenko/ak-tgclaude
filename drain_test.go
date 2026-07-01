@@ -20,9 +20,10 @@ type fakeCall struct {
 }
 
 type fakeSender struct {
-	mu    sync.Mutex
-	calls []fakeCall
-	err   error // if set, every call fails with it
+	mu      sync.Mutex
+	calls   []fakeCall
+	actions []string // recorded SendChatAction actions
+	err     error    // if set, every call fails with it
 }
 
 func (f *fakeSender) SendMessage(_ context.Context, r Route, text, mode string, _ bool) (int64, error) {
@@ -45,10 +46,26 @@ func (f *fakeSender) SendDocument(_ context.Context, r Route, _, filename, _, _ 
 	return int64(len(f.calls)), nil
 }
 
+func (f *fakeSender) SendChatAction(_ context.Context, _ int64, action string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.err != nil {
+		return f.err
+	}
+	f.actions = append(f.actions, action)
+	return nil
+}
+
 func (f *fakeSender) snapshot() []fakeCall {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return append([]fakeCall(nil), f.calls...)
+}
+
+func (f *fakeSender) actionCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return len(f.actions)
 }
 
 func remainingJSON(t *testing.T, dir string) []string {

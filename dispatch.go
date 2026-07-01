@@ -19,6 +19,31 @@ import (
 // client timeout must exceed it.
 const defaultPollTimeout = 30
 
+// typingInterval is how often the "typing" chat action is refreshed. Telegram
+// clears the action after ~5s, so re-asserting well inside that window keeps it
+// continuously visible.
+const typingInterval = 4 * time.Second
+
+// keepTyping shows the "typing…" chat action in chat until ctx is cancelled,
+// refreshing it before Telegram's ~5s expiry. It sends once immediately (so the
+// user gets feedback the moment their message lands) and then every
+// typingInterval. Chat-action delivery is best-effort UX, so failures are only
+// logged, and not while ctx is already cancelled (a cancelled send is expected).
+func keepTyping(ctx context.Context, s Sender, chatID int64) {
+	t := time.NewTicker(typingInterval)
+	defer t.Stop()
+	for {
+		if err := s.SendChatAction(ctx, chatID, "typing"); err != nil && ctx.Err() == nil {
+			log.Printf("ak-tgclaude: chat action chat=%d: %v", chatID, err)
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+		}
+	}
+}
+
 // Dispatcher is the long-lived process: it long-polls Telegram, routes each
 // update to a responder, and delivers the responder's outbound messages.
 type Dispatcher struct {
@@ -160,6 +185,12 @@ func (d *Dispatcher) handleUpdate(ctx context.Context, u Update) {
 	ulabel := userLabel(m.From)
 	log.Printf("ak-tgclaude: launch responder chat=%d user=%s msg=%d", m.Chat.ID, ulabel, m.MessageID)
 
+	// Show "typing…" for the responder's whole lifetime: refreshed until the
+	// responder returns. Each delivered message clears the action, so the next
+	// refresh re-asserts it in the gaps of a multi-message answer.
+	typingCtx, stopTyping := context.WithCancel(ctx)
+	go keepTyping(typingCtx, d.sender, m.Chat.ID)
+
 	// One drainer for this invocation's outbox, stopped after the responder exits.
 	stop := make(chan struct{})
 	done := make(chan struct{})
@@ -175,6 +206,7 @@ func (d *Dispatcher) handleUpdate(ctx context.Context, u Update) {
 		SessionID: sid,
 		OutboxDir: outbox,
 	})
+	stopTyping()
 	close(stop)
 	<-done
 	dur := time.Since(start).Round(time.Millisecond)

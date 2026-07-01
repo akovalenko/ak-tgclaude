@@ -22,11 +22,12 @@ type Route struct {
 }
 
 // Sender delivers rendered messages to Telegram. Client implements it; tests
-// use a fake. Both calls return the sent message_id (for the future
-// reply-resurrection track).
+// use a fake. The Send* calls return the sent message_id (for the future
+// reply-resurrection track); SendChatAction is best-effort UX with no id.
 type Sender interface {
 	SendMessage(ctx context.Context, r Route, text, parseMode string, silent bool) (messageID int64, err error)
 	SendDocument(ctx context.Context, r Route, path, filename, caption, parseMode string, silent bool) (messageID int64, err error)
+	SendChatAction(ctx context.Context, chatID int64, action string) error
 }
 
 // Update is a single Telegram update (only message updates are requested).
@@ -138,6 +139,22 @@ func (c *Client) SendMessage(ctx context.Context, r Route, text, parseMode strin
 	return decodeMessageID(status, body)
 }
 
+// SendChatAction shows a chat action (e.g. "typing") in chat. Telegram clears
+// it after ~5s, or immediately when the bot next sends a message, so a caller
+// that wants it visible must refresh it. It is best-effort UX — the caller may
+// ignore the error.
+func (c *Client) SendChatAction(ctx context.Context, chatID int64, action string) error {
+	payload := map[string]any{
+		"chat_id": chatID,
+		"action":  action,
+	}
+	status, body, err := c.postJSON(ctx, "sendChatAction", payload)
+	if err != nil {
+		return err
+	}
+	return checkOK(status, body)
+}
+
 // SendDocument uploads a file as an attachment (sendDocument, multipart).
 func (c *Client) SendDocument(ctx context.Context, r Route, path, filename, caption, parseMode string, silent bool) (int64, error) {
 	f, err := os.Open(path)
@@ -215,6 +232,22 @@ func (c *Client) do(req *http.Request) (int, []byte, error) {
 		return resp.StatusCode, nil, err
 	}
 	return resp.StatusCode, body, nil
+}
+
+// checkOK verifies a Bot API response envelope carries ok:true (for methods
+// whose result payload the caller does not need, e.g. sendChatAction).
+func checkOK(status int, body []byte) error {
+	var ar struct {
+		OK          bool   `json:"ok"`
+		Description string `json:"description"`
+	}
+	if err := json.Unmarshal(body, &ar); err != nil {
+		return fmt.Errorf("decoding Telegram response (HTTP %d): %w", status, err)
+	}
+	if !ar.OK {
+		return fmt.Errorf("Telegram API error (HTTP %d): %s", status, ar.Description)
+	}
+	return nil
 }
 
 // decodeMessageID unwraps the {ok, result:{message_id}} envelope.
