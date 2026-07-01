@@ -147,9 +147,24 @@ func goCacheEnv(cacheDir string) map[string]string {
 	}
 }
 
+// selfExePath is the absolute path of the running binary, or "" if it cannot be
+// determined. The responder's PreToolUse hook is pinned to this path (baked into
+// the generated settings.json) so the security-critical token guard runs the
+// exact binary that wrote the settings, not whatever `ak-tgclaude` PATH happens
+// to resolve at hook-fire time. On "" the caller falls back to the bare name.
+func selfExePath() string {
+	if exe, err := os.Executable(); err == nil {
+		return exe
+	}
+	return ""
+}
+
 // buildSettings assembles the responder's .claude/settings.json.
 func buildSettings(p scaffoldParams) *claudeSettings {
 	if p.HookBinary == "" {
+		// os.Executable() failed upstream (rare): fall back to the bare name, which
+		// resolves via PATH. The dispatcher's startup check keeps that PATH entry
+		// pointing at this binary.
 		p.HookBinary = "ak-tgclaude"
 	}
 	if len(p.DenyEnvVars) == 0 {
@@ -210,7 +225,9 @@ func buildSettings(p scaffoldParams) *claudeSettings {
 	// The hook's --deny-read scopes the Read TOOL (checked before the project-read
 	// allow); the same paths also went into filesystem.denyRead above (the Bash
 	// path). Operator paths first, then the token file when it lives in a config.
-	hookCmd := p.HookBinary + " hook pretooluse"
+	// HookBinary is quoted: pinned to an absolute path it may contain spaces, and
+	// quoting the bare name is harmless (still PATH-resolved).
+	hookCmd := shellQuote(p.HookBinary) + " hook pretooluse"
 	for _, d := range p.DenyRead {
 		hookCmd += " --deny-read " + shellQuote(d)
 	}
@@ -507,6 +524,7 @@ func runScaffold(args []string) {
 		Project:    cfg.Project,
 		WireSkills: cfg.WireSkills,
 		DenyRead:   cfg.DenyRead,
+		HookBinary: selfExePath(),
 		BangBug:    cfg.BangBug,
 	}); err != nil {
 		fmt.Fprintf(os.Stderr, "ak-tgclaude: scaffold: %v\n", err)

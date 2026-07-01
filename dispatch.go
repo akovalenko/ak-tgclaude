@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"strconv"
@@ -374,6 +375,38 @@ func resolveRuntimeBase(configured string) string {
 	return os.TempDir()
 }
 
+// checkBinaryOnPath verifies that the `ak-tgclaude` resolved on PATH is the same
+// file as the running binary. The responder inherits this PATH and invokes
+// `ak-tgclaude send` (and other self-calls) by bare name, so a mismatch — not
+// installed, shadowed by an earlier PATH entry, or a stale copy — would route
+// replies through the wrong binary. Everything downstream assumes they match, so
+// the dispatcher fails fast here rather than discover it on the first reply.
+func checkBinaryOnPath() error {
+	self, err := os.Executable()
+	if err != nil {
+		return fmt.Errorf("cannot determine own path (os.Executable): %w", err)
+	}
+	onPath, err := exec.LookPath("ak-tgclaude")
+	if err != nil {
+		return fmt.Errorf("'ak-tgclaude' is not on PATH (%w); install it (e.g. `go install`) "+
+			"so the responder's `send` resolves to this binary", err)
+	}
+	selfInfo, err := os.Stat(self)
+	if err != nil {
+		return fmt.Errorf("stat self %s: %w", self, err)
+	}
+	pathInfo, err := os.Stat(onPath)
+	if err != nil {
+		return fmt.Errorf("stat %s: %w", onPath, err)
+	}
+	if !os.SameFile(selfInfo, pathInfo) {
+		return fmt.Errorf("the 'ak-tgclaude' on PATH (%s) is not this running binary (%s); "+
+			"the responder resolves `send` by bare name via PATH, so they must be the same — "+
+			"reinstall (e.g. `go install`) or fix PATH", onPath, self)
+	}
+	return nil
+}
+
 // runDispatch loads configuration and runs the dispatcher loop until SIGINT/
 // SIGTERM.
 func runDispatch(args []string) {
@@ -407,6 +440,17 @@ func runDispatch(args []string) {
 	case ResponderStub:
 		resp = &stubResponder{}
 	default:
+		// The responder invokes `ak-tgclaude send` by bare name from its skills
+		// (resolved via the inherited PATH — deliberately kept out of the skills so
+		// the model isn't burdened with a path). That send is a local outbox drop
+		// (no token, no network — the dispatcher delivers), but it must be THIS
+		// binary or replies run on some stale/other ak-tgclaude. The hook is pinned
+		// to an absolute path, but these self-calls are not, so fail fast if the
+		// ak-tgclaude on PATH is not us.
+		if err := checkBinaryOnPath(); err != nil {
+			fmt.Fprintf(os.Stderr, "ak-tgclaude: dispatch: %v\n", err)
+			os.Exit(1)
+		}
 		// Materialize the responder scaffold (generated .claude/settings.json with
 		// the literal runtime paths: sandbox, token deny-read, hook) and launch
 		// the responder there with --setting-sources project. The cache dir is
@@ -425,6 +469,7 @@ func runDispatch(args []string) {
 			Project:    cfg.Project,
 			WireSkills: cfg.WireSkills,
 			DenyRead:   cfg.DenyRead,
+			HookBinary: selfExePath(),
 			BangBug:    cfg.BangBug,
 		}); err != nil {
 			fmt.Fprintf(os.Stderr, "ak-tgclaude: dispatch: %v\n", err)

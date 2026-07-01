@@ -353,8 +353,10 @@ deployment, the generated file:
   per-invocation), and **deny-reads** the outbox area (see below);
 - installs the **token guard**: `sandbox.credentials.files` deny-read on the
   config file, `credentials.envVars` deny (unset) for `ANTHROPIC_*`, and the
-  PreToolUse hook `ak-tgclaude hook pretooluse --deny-read <token file>` (bare
-  PATH name).
+  PreToolUse hook `<self> hook pretooluse --deny-read <token file>`, where
+  `<self>` is the dispatcher's **own absolute path** (`os.Executable()`, not the
+  bare name): the security-critical hook must run the exact binary that wrote the
+  settings, never whatever `ak-tgclaude` PATH resolves at hook-fire time.
 
 The **PreToolUse hook** is the single authority for the **file tools**,
 path-scoped from the responder's env:
@@ -381,6 +383,20 @@ deferred tools (no Read/Write). A Bash read of the token is masked by the sandbo
 `credentials.files` deny-read, not the hook (obfuscation-proof; no command
 string-matching). The hook reads the project/outbox from env, which the
 dispatcher sets on the responder process and the (unsandboxed) hook inherits.
+
+**Which `ak-tgclaude` runs.** There are two self-invocation sites, handled
+differently. The **hook** is emitted by the dispatcher, so it is **pinned** to
+`os.Executable()` — PATH plays no part, and a stale or shadowing `ak-tgclaude`
+cannot become the token guard. The responder's **`ak-tgclaude send`** (from the
+`tg-emit` skill and doc export), by contrast, is invoked by the *model* and left
+as a **bare name** on purpose — the skills should not carry an absolute path. That
+`send` is only a local outbox drop (no token, no network; the dispatcher's drain
+delivers), so the risk is a broken/version-skewed reply, not a leak. To keep the
+bare name safe, `dispatch` **fails fast at startup** unless the `ak-tgclaude`
+resolved on PATH is `os.SameFile` as the running binary (not installed, shadowed,
+or a stale copy → a clear error, not a first-reply surprise). Caveat: this is a
+point-in-time check — reinstalling the binary *while the dispatcher runs* skews
+the send path until you restart it (the pinned hook is unaffected).
 
 ### Per-invocation isolation (write and read)
 
@@ -542,9 +558,12 @@ bot message revives its `--resume` session).
 The binary is distributed the normal Go way (`go install`), so by the time you run
 it, it is already on `PATH`. The `deploy` subcommand therefore **does not copy
 itself** — it provisions everything else (project root, example config, skills) and
-sanity-checks that it can find itself on `PATH`, warning if it cannot. The
-PreToolUse hook is referenced by **bare PATH name** (`ak-tgclaude hook pretooluse`)
-in the generated settings.json, never an absolute path.
+sanity-checks that the `ak-tgclaude` on `PATH` is this same binary
+(`os.SameFile`), warning if not. `dispatch` makes that same check **fatal** at
+startup, because the responder invokes `ak-tgclaude send` by bare name. The
+PreToolUse hook, by contrast, is pinned to the dispatcher's absolute path
+(`os.Executable()`) in the generated settings.json — see the **Which
+`ak-tgclaude` runs** note above — so the token guard never rides on `PATH`.
 
 ## Approval UX
 
@@ -564,11 +583,11 @@ drain.go           per-invocation outbox drain (fsnotify watch -> send -> ack)
 session.go         durable state: poll offset + chat->session map (+ ephemeral mode)
 clear.go           `clear` subcommand: wipe persisted chat->session bindings
 responder.go       Responder interface (claude / stub) + `claude -p` spawn
-dispatch.go        the dispatch loop: poll -> route -> respond -> deliver
-scaffold.go        generated .claude/settings.json + materialize embedded assets
+dispatch.go        the dispatch loop: poll -> route -> respond -> deliver (+ startup binary-on-PATH check)
+scaffold.go        generated .claude/settings.json + materialize embedded assets (hook pinned to os.Executable())
 assets/            embedded responder agent + emission skill (go:embed)
 hook.go            `hook pretooluse`: path-scope the file tools; deny protected reads (token + deny_read)
-deploy.go          `deploy`: PATH self-check + example config
+deploy.go          `deploy`: binary-on-PATH check (warning) + example config
 bot.toml.example   example config
 go.mod / go.sum
 README.md          this design

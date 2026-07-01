@@ -8,6 +8,16 @@ import (
 	"time"
 )
 
+func TestCheckBinaryOnPathRejectsMismatch(t *testing.T) {
+	// Under `go test` the running binary is the test harness, never the installed
+	// ak-tgclaude, so the check must fail (LookPath miss, or SameFile false if some
+	// ak-tgclaude happens to be on PATH). It must never pass by accident and let a
+	// mismatched `send` binary through.
+	if err := checkBinaryOnPath(); err == nil {
+		t.Error("checkBinaryOnPath must fail when the running binary is not the ak-tgclaude on PATH")
+	}
+}
+
 // typingProbe blocks in Respond until the sender has recorded a "typing" chat
 // action, proving the dispatcher shows typing for the responder's lifetime.
 type typingProbe struct{ sender *fakeSender }

@@ -4,7 +4,6 @@ import (
 	"flag"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 )
 
@@ -20,13 +19,13 @@ func runDeploy(args []string) {
 		os.Exit(2)
 	}
 
-	// The generated settings.json references the hook by bare name
-	// ("ak-tgclaude hook pretooluse"), so the binary must be resolvable on PATH.
-	if _, err := exec.LookPath("ak-tgclaude"); err != nil {
-		fmt.Fprintln(os.Stderr, "ak-tgclaude: deploy: warning: 'ak-tgclaude' is not on PATH; "+
-			"install it (e.g. `go install`) so the responder's hook command resolves")
+	// The responder invokes `ak-tgclaude send` by bare name, so the ak-tgclaude on
+	// PATH must be this binary. `dispatch` enforces this (fail-fast); here it is
+	// only a provisioning hint, so a mismatch is a warning, not an error.
+	if err := checkBinaryOnPath(); err != nil {
+		fmt.Fprintf(os.Stderr, "ak-tgclaude: deploy: warning: %v\n", err)
 	} else {
-		fmt.Println("ak-tgclaude: deploy: found ak-tgclaude on PATH")
+		fmt.Println("ak-tgclaude: deploy: ak-tgclaude on PATH is this binary")
 	}
 
 	if *conf != "" {

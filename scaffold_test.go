@@ -59,10 +59,21 @@ func TestBuildSettingsShape(t *testing.T) {
 		t.Errorf("credentials.envVars = %+v", s.Sandbox.Credentials.EnvVars)
 	}
 
-	// Hook command references the deny-read path (quoted) by bare binary name.
+	// Hook command references the deny-read path (quoted). The binary is quoted
+	// too (bare name here, since HookBinary is unset => the default).
 	cmd := s.Hooks.PreToolUse[0].Hooks[0].Command
-	if !strings.HasPrefix(cmd, "ak-tgclaude hook pretooluse") || !strings.Contains(cmd, "--deny-read '/cfg/bot.toml'") {
+	if !strings.HasPrefix(cmd, "'ak-tgclaude' hook pretooluse") || !strings.Contains(cmd, "--deny-read '/cfg/bot.toml'") {
 		t.Errorf("hook command = %q", cmd)
+	}
+}
+
+func TestBuildSettingsPinsHookBinary(t *testing.T) {
+	// When HookBinary is set (the dispatcher pins it to os.Executable()), the hook
+	// command runs that exact absolute path, shell-quoted so a space is safe.
+	s := buildSettings(scaffoldParams{CacheDir: "/c", HookBinary: "/opt/my bin/ak-tgclaude"})
+	cmd := s.Hooks.PreToolUse[0].Hooks[0].Command
+	if !strings.HasPrefix(cmd, "'/opt/my bin/ak-tgclaude' hook pretooluse") {
+		t.Errorf("hook binary not pinned/quoted: %q", cmd)
 	}
 }
 
