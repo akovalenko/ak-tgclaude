@@ -82,8 +82,12 @@ worker**: different chats are handled **concurrently** (bounded by
 `max_concurrent`), while updates within one chat are **serialized** (so they
 never race on the same `--resume` session). For each message:
 
-1. **`/clear`** drops the chat's session and acks — the next message starts fresh.
-   This is the explicit "break the user↔session association" lever.
+1. **Commands the dispatcher answers itself** (no model spawn): **`/clear`** drops
+   the chat's session and acks — the explicit "break the user↔session association"
+   lever; **`/help`** and **`/start`** reply with the configured `help_text` (or a
+   generic built-in). Telegram sends `/start` when a user first opens the bot, so
+   intercepting it keeps that stray message off the responder. The `/clear` and
+   `/help` menu is uploaded via `setMyCommands` at startup (best-effort).
 2. Otherwise it looks up the chat's session, creates a **per-invocation outbox
    directory**, and spawns the responder (`claude -p --agent … [--resume <id>]`)
    with `$AK_TGCLAUDE_OUTBOX` pointing at that directory and the message text on

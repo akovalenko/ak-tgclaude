@@ -96,6 +96,34 @@ func TestClientSendChatActionAPIError(t *testing.T) {
 	}
 }
 
+func TestClientSetMyCommands(t *testing.T) {
+	var gotPath string
+	var body map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		io.WriteString(w, `{"ok":true,"result":true}`)
+	}))
+	defer srv.Close()
+
+	c := &Client{Token: "T", BaseURL: srv.URL, HTTP: srv.Client()}
+	cmds := []BotCommand{{Command: "help", Description: "help"}, {Command: "clear", Description: "reset"}}
+	if err := c.SetMyCommands(context.Background(), cmds); err != nil {
+		t.Fatalf("SetMyCommands: %v", err)
+	}
+	if gotPath != "/botT/setMyCommands" {
+		t.Errorf("path = %q", gotPath)
+	}
+	list, ok := body["commands"].([]any)
+	if !ok || len(list) != 2 {
+		t.Fatalf("commands payload = %v", body["commands"])
+	}
+	first := list[0].(map[string]any)
+	if first["command"] != "help" || first["description"] != "help" {
+		t.Errorf("first command = %v", first)
+	}
+}
+
 func TestClientSendDocument(t *testing.T) {
 	var fileContent, fileName, chatID string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

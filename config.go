@@ -62,6 +62,11 @@ type Config struct {
 	// The sandbox and PreToolUse confine the responder's reads here.
 	Project string `toml:"project"`
 
+	// HelpText is the reply to /help and /start. Empty => a generic built-in
+	// blurb (defaultHelpText). Keeps the dispatcher domain-blind: any
+	// project-specific help comes from config, not baked into the binary.
+	HelpText string `toml:"help_text"`
+
 	// Cwd is a fixed responder launch dir. When set, the scaffold is materialized
 	// there and kept (inspect the generated settings, tweak settings.local, run
 	// claude by hand). Empty => an ephemeral cwd the dispatcher removes on exit.

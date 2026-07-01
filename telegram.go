@@ -139,6 +139,25 @@ func (c *Client) SendMessage(ctx context.Context, r Route, text, parseMode strin
 	return decodeMessageID(status, body)
 }
 
+// BotCommand is one entry of the bot's command menu (setMyCommands): the command
+// name without a leading slash, plus the description clients show in the "/" list.
+type BotCommand struct {
+	Command     string `json:"command"`
+	Description string `json:"description"`
+}
+
+// SetMyCommands uploads the bot's command menu (the "/" list clients show),
+// replacing any previously set commands for the default scope. Best-effort at
+// startup — the bot works without a menu, so the caller may just log a failure.
+func (c *Client) SetMyCommands(ctx context.Context, commands []BotCommand) error {
+	payload := map[string]any{"commands": commands}
+	status, body, err := c.postJSON(ctx, "setMyCommands", payload)
+	if err != nil {
+		return err
+	}
+	return checkOK(status, body)
+}
+
 // SendChatAction shows a chat action (e.g. "typing") in chat. Telegram clears
 // it after ~5s, or immediately when the bot next sends a message, so a caller
 // that wants it visible must refresh it. It is best-effort UX — the caller may

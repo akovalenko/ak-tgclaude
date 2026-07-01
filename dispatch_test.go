@@ -159,6 +159,46 @@ func TestOutcomeField(t *testing.T) {
 	}
 }
 
+func TestHandleHelpAndStart(t *testing.T) {
+	for _, cmd := range []string{"/help", "/start", "/help@mybot", "/start deep-link"} {
+		resp := &fakeResponder{}
+		sender := &fakeSender{}
+		d := newTestDispatcher(t, resp, sender)
+		d.helpText = "HELP BLURB"
+
+		d.handleUpdate(context.Background(), textUpdate(1, 42, 7, cmd))
+
+		if resp.called {
+			t.Errorf("%s: responder should not run", cmd)
+		}
+		calls := sender.snapshot()
+		if len(calls) != 1 || calls[0].text != "HELP BLURB" {
+			t.Fatalf("%s: help not delivered: %+v", cmd, calls)
+		}
+		if calls[0].route.ChatID != 42 || calls[0].route.ReplyTo != 7 {
+			t.Errorf("%s: help not routed to the incoming message: %+v", cmd, calls[0].route)
+		}
+		if _, ok := d.store.SessionID(42); ok {
+			t.Errorf("%s: help must not bind a session", cmd)
+		}
+	}
+}
+
+func TestIsSlashCommand(t *testing.T) {
+	if !isSlashCommand("/start deep-link-payload", "start") {
+		t.Error("/start with a payload should match")
+	}
+	if !isSlashCommand("/help@bot", "help") {
+		t.Error("/help@bot should match")
+	}
+	if isSlashCommand("/helpme", "help") {
+		t.Error("/helpme should not match help")
+	}
+	if isSlashCommand("please /help", "help") {
+		t.Error("non-leading /help should not match")
+	}
+}
+
 func TestIsClearCommand(t *testing.T) {
 	for _, s := range []string{"/clear", "/clear@mybot", "  /clear  "} {
 		if !isClearCommand(s) {

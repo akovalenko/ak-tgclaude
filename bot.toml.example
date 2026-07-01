@@ -37,6 +37,12 @@ project = "~/code/example-project"
 
 # --- optional overrides (defaults shown) ---
 
+# Reply to /help and /start (the dispatcher answers these itself, no model spawn).
+# Empty/unset uses a generic built-in blurb about the bot's mechanics; set this
+# to describe your specific bot/project. Plain text. The /clear and /help command
+# menu is uploaded to Telegram at startup regardless.
+# help_text = "I answer questions about the Foo codebase — adapters, deploy, protocols. Just ask; /clear starts fresh."
+
 # Max responders running at once. Updates are always serialized per chat;
 # different chats run concurrently up to this bound.
 # max_concurrent = 4

@@ -53,7 +53,8 @@ type Dispatcher struct {
 	resp          Responder
 	outboxRoot    string // writable root under which per-invocation outbox dirs are created
 	pollTimeout   int
-	maxConcurrent int // cap on responders running at once
+	maxConcurrent int    // cap on responders running at once
+	helpText      string // reply to /help and /start
 }
 
 // Run long-polls and dispatches updates to per-chat workers until ctx is
@@ -175,6 +176,16 @@ func (d *Dispatcher) handleUpdate(ctx context.Context, u Update) {
 		return
 	}
 
+	// /help and /start are answered by the dispatcher itself (no model spawn):
+	// the configured help_text, or a generic built-in. Telegram sends /start when
+	// a user first opens the bot, so intercepting it keeps that off the responder.
+	if isSlashCommand(m.Text, "help") || isSlashCommand(m.Text, "start") {
+		if _, err := d.sender.SendMessage(ctx, route, d.helpText, "", false); err != nil {
+			log.Printf("ak-tgclaude: help %d: %v", m.Chat.ID, err)
+		}
+		return
+	}
+
 	outbox, err := os.MkdirTemp(d.outboxRoot, "outbox-")
 	if err != nil {
 		log.Printf("ak-tgclaude: outbox for chat %d: %v", m.Chat.ID, err)
@@ -259,15 +270,36 @@ func userLabel(u *User) string {
 	return fmt.Sprintf("%d", u.ID)
 }
 
-// isClearCommand reports whether text is the /clear command (optionally
-// addressed to the bot, e.g. "/clear@mybot").
-func isClearCommand(text string) bool {
+// isSlashCommand reports whether text's first token is the /name command,
+// optionally addressed to the bot (e.g. "/name@mybot") or carrying a payload
+// (e.g. "/start deep-link"). Matching only the first token means "/name" must
+// lead the message.
+func isSlashCommand(text, name string) bool {
 	fields := strings.Fields(text)
 	if len(fields) == 0 {
 		return false
 	}
-	return fields[0] == "/clear" || strings.HasPrefix(fields[0], "/clear@")
+	cmd := "/" + name
+	return fields[0] == cmd || strings.HasPrefix(fields[0], cmd+"@")
 }
+
+// isClearCommand reports whether text is the /clear command.
+func isClearCommand(text string) bool { return isSlashCommand(text, "clear") }
+
+// botCommands is the command menu uploaded via setMyCommands at startup. /start
+// is handled too but conventionally not listed (clients surface it as START).
+var botCommands = []BotCommand{
+	{Command: "help", Description: "What this bot does and how to use it"},
+	{Command: "clear", Description: "Start a fresh conversation (forget context)"},
+}
+
+// defaultHelpText is the /help and /start reply when the operator sets no
+// help_text. Deliberately domain-blind — it describes the bot's mechanics, not
+// the project (a deployment supplies specifics via help_text).
+const defaultHelpText = "Send me a question and I'll answer it from the project I'm set up for — " +
+	"just type it normally, no command needed.\n\n" +
+	"/clear — start a fresh conversation (I forget the earlier context)\n" +
+	"/help — show this message"
 
 // sleep waits for d or ctx cancellation; it reports whether the full delay
 // elapsed (false if ctx was cancelled first).
@@ -348,6 +380,11 @@ func runDispatch(args []string) {
 		resp = &claudeResponder{agent: cfg.Agent, cwd: cwd, project: cfg.Project, cacheDir: cacheDir}
 	}
 
+	helpText := cfg.HelpText
+	if strings.TrimSpace(helpText) == "" {
+		helpText = defaultHelpText
+	}
+
 	d := &Dispatcher{
 		client:        client,
 		sender:        client,
@@ -356,10 +393,16 @@ func runDispatch(args []string) {
 		outboxRoot:    outboxRoot,
 		pollTimeout:   defaultPollTimeout,
 		maxConcurrent: cfg.MaxConcurrent,
+		helpText:      helpText,
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+
+	// Publish the command menu (best-effort: the bot works without it).
+	if err := client.SetMyCommands(ctx, botCommands); err != nil {
+		log.Printf("ak-tgclaude: setMyCommands: %v", err)
+	}
 
 	kind := "fixed"
 	if ephemeral {
