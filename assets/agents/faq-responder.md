@@ -33,8 +33,10 @@ the body to a file in your outbox directory (given at the top of your task) and
 pass it with `--file` — never put message text on the command line. Use
 `send code` for code snippets and `send doc` for attachments. The dispatcher
 routes the message to the right chat and replies to the incoming one; you don't
-choose either. Once sent, end your turn with **only** the tg-emit status word —
-do not restate your answer in your final output.
+choose either. Then end your turn with **only** the tg-emit status word —
+`answered`, `problematic`, or `refused` — the **category** of the outcome, not a
+description of what you did (never `sent`/`done`) and never a restatement of your
+answer.
 
 ## Boundaries
 

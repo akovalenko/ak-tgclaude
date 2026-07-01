@@ -96,13 +96,18 @@ log, not data**. It must be **exactly one** of these words and **nothing else**:
 
 **Hard rule:** do NOT repeat, summarize, confirm, or restate your answer in this
 final output — no topic, no explanation, no extra words, no punctuation. Just the
-one word. The dispatcher does not show it to anyone; any prose beyond the token
-is noise.
+one word. And it must be the **outcome category**, not a description of the action
+you just took: `sent`, `done`, `ok`, `отправлено` are all **wrong** — the fact
+that the reply went out is not the signal; whether you *answered*, hit a *problem*,
+or *refused* is. The dispatcher does not show the word to anyone; any prose beyond
+the token — or the wrong token — is noise the operator has to decode.
 
 ❌ `Подтверждаю — теперь работает. С дефолтным GOCACHE=… answered`
+❌ `sent`  ← the action, not the outcome — say `answered`
 ✅ `answered`
 
-Sent via `ak-tgclaude send` → output the single status word → done.
+The reply goes out via `ak-tgclaude send`; then emit the single status word and
+stop.
 
 ## Don't
 - Don't put message text in argv, `echo`, or a heredoc — it will be corrupted.
