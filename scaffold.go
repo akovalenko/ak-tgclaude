@@ -249,6 +249,27 @@ func buildSettings(p scaffoldParams) *claudeSettings {
 	return s
 }
 
+// resetDirContents removes every entry inside dir without removing dir itself, so
+// the caller can regenerate the contents from canon while preserving the dir's
+// identity. Trust in ~/.claude.json is keyed by PATH, so a static workdir/project
+// keeps its trust across a contents reset — but a remove+recreate of the dir would
+// lose it. This is the "pure function of canon" primitive: on every start the
+// workdir/project is reset, then materializeScaffold regenerates it, so a removed
+// wire-skill or stale scaffold file never lingers.
+func resetDirContents(dir string) error {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return fmt.Errorf("resetting %s: %w", dir, err)
+	}
+	for _, e := range entries {
+		p := filepath.Join(dir, e.Name())
+		if err := os.RemoveAll(p); err != nil {
+			return fmt.Errorf("resetting %s: removing %s: %w", dir, p, err)
+		}
+	}
+	return nil
+}
+
 // materializeScaffold writes the generated settings.json into <cwd>/.claude.
 // The cwd is the responder's launch dir (used with `claude -p --setting-sources
 // project`); the binary embeds no finished settings — it is generated here with

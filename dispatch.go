@@ -429,6 +429,17 @@ func runDispatch(args []string) {
 		fmt.Fprintf(os.Stderr, "ak-tgclaude: dispatch: %v\n", err)
 		os.Exit(1)
 	}
+	// A static workdir/project is a pure function of canon: reset its contents on
+	// every start so a removed wire-skill or stale scaffold file never lingers.
+	// Wipe the CONTENTS, never the dir — trust in ~/.claude.json is keyed by path,
+	// so keeping the dir keeps it trusted. (An ephemeral cwd is freshly made, so
+	// there is nothing to reset.)
+	if cfg.Workdir != "" {
+		if err := resetDirContents(cwd); err != nil {
+			fmt.Fprintf(os.Stderr, "ak-tgclaude: dispatch: %v\n", err)
+			os.Exit(1)
+		}
+	}
 	outboxRoot := filepath.Join(cwd, "outbox")
 	if err := os.MkdirAll(outboxRoot, 0o700); err != nil {
 		fmt.Fprintf(os.Stderr, "ak-tgclaude: dispatch: %v\n", err)
@@ -554,9 +565,18 @@ func runDispatch(args []string) {
 }
 
 // resolveResponderCwd returns the responder launch dir and whether it is
-// ephemeral. A configured Cwd is fixed (created if needed, kept on exit);
-// otherwise a pseudo-random dir is created under the runtime base.
+// ephemeral. A configured Workdir uses its fixed $Workdir/project (created if
+// needed; the caller resets+regenerates its contents from canon each start). A
+// configured Cwd is fixed too (created if needed, kept as-is on exit). Otherwise a
+// pseudo-random dir is created under the runtime base and removed on exit.
 func resolveResponderCwd(cfg *Config) (dir string, ephemeral bool, err error) {
+	if cfg.Workdir != "" {
+		project := filepath.Join(cfg.Workdir, "project")
+		if err := os.MkdirAll(project, 0o700); err != nil {
+			return "", false, fmt.Errorf("creating responder cwd %s: %w", project, err)
+		}
+		return project, false, nil
+	}
 	if cfg.Cwd != "" {
 		if err := os.MkdirAll(cfg.Cwd, 0o700); err != nil {
 			return "", false, fmt.Errorf("creating responder cwd %s: %w", cfg.Cwd, err)
