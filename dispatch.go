@@ -51,7 +51,8 @@ type Dispatcher struct {
 	sender        Sender  // sendMessage/sendDocument (= client in production)
 	store         *SessionStore
 	resp          Responder
-	outboxRoot    string // writable root under which per-invocation outbox dirs are created
+	authz         Authorizer // gates which Telegram users may use the bot
+	outboxRoot    string     // writable root under which per-invocation outbox dirs are created
 	pollTimeout   int
 	maxConcurrent int    // cap on responders running at once
 	helpText      string // reply to /help and /start
@@ -167,6 +168,21 @@ func (d *Dispatcher) handleUpdate(ctx context.Context, u Update) {
 	m := u.Message
 	route := Route{ChatID: m.Chat.ID, ReplyTo: m.MessageID}
 
+	// Access gate (runs before any command or the responder). A user not on the
+	// whitelist gets a "no access for id N" line on /start and /help — so they can
+	// report the id to be whitelisted — and is otherwise silently ignored (the bot
+	// does not talk to strangers). The id in the reply is that user's own.
+	if uid := userID(m.From); !d.authz.Allowed(uid) {
+		if isSlashCommand(m.Text, "help") || isSlashCommand(m.Text, "start") {
+			msg := fmt.Sprintf("no access for id %d", uid)
+			if _, err := d.sender.SendMessage(ctx, route, msg, "", false); err != nil {
+				log.Printf("ak-tgclaude: no-access reply %d: %v", m.Chat.ID, err)
+			}
+		}
+		log.Printf("ak-tgclaude: denied chat=%d user=%s msg=%d", m.Chat.ID, userLabel(m.From), m.MessageID)
+		return
+	}
+
 	if isClearCommand(m.Text) {
 		if err := d.store.Clear(m.Chat.ID); err != nil {
 			log.Printf("ak-tgclaude: clear %d: %v", m.Chat.ID, err)
@@ -257,6 +273,15 @@ func snippet(s string, n int) string {
 		return string(r[:n]) + "…"
 	}
 	return s
+}
+
+// userID returns the sender's Telegram id, or 0 when there is no sender (e.g. a
+// channel post); id 0 is never whitelisted, so such updates are denied.
+func userID(u *User) int64 {
+	if u == nil {
+		return 0
+	}
+	return u.ID
 }
 
 // userLabel renders a message sender for logs: the numeric id, plus @username
@@ -390,11 +415,26 @@ func runDispatch(args []string) {
 		helpParseMode = "HTML"
 	}
 
+	var authz Authorizer
+	accessDesc := fmt.Sprintf("%d users", len(cfg.AllowedUsers))
+	switch {
+	case cfg.Open:
+		authz = openAccess{}
+		accessDesc = "OPEN"
+		log.Printf("ak-tgclaude: dispatch: OPEN ACCESS — every Telegram user is allowed (demo mode)")
+	default:
+		authz = newAllowList(cfg.AllowedUsers)
+		if len(cfg.AllowedUsers) == 0 {
+			log.Printf("ak-tgclaude: dispatch: no allowed_users — denying everyone; send /start to see your id, then whitelist it")
+		}
+	}
+
 	d := &Dispatcher{
 		client:        client,
 		sender:        client,
 		store:         store,
 		resp:          resp,
+		authz:         authz,
 		outboxRoot:    outboxRoot,
 		pollTimeout:   defaultPollTimeout,
 		maxConcurrent: cfg.MaxConcurrent,
@@ -414,8 +454,8 @@ func runDispatch(args []string) {
 	if ephemeral {
 		kind = "ephemeral"
 	}
-	log.Printf("ak-tgclaude: dispatch: responder=%s cwd=%s (%s) max_concurrent=%d state=%s token=%s",
-		cfg.Responder, cwd, kind, cfg.MaxConcurrent, cfg.StateDir, redact(cfg.BotToken))
+	log.Printf("ak-tgclaude: dispatch: responder=%s cwd=%s (%s) max_concurrent=%d access=%s state=%s token=%s",
+		cfg.Responder, cwd, kind, cfg.MaxConcurrent, accessDesc, cfg.StateDir, redact(cfg.BotToken))
 
 	runErr := d.Run(ctx)
 

@@ -67,6 +67,7 @@ func newTestDispatcher(t *testing.T, resp Responder, sender Sender) *Dispatcher 
 		sender:      sender,
 		store:       store,
 		resp:        resp,
+		authz:       openAccess{}, // tests that don't exercise access allow everyone
 		outboxRoot:  t.TempDir(),
 		pollTimeout: 1,
 	}
@@ -181,6 +182,63 @@ func TestHandleHelpAndStart(t *testing.T) {
 		if _, ok := d.store.SessionID(42); ok {
 			t.Errorf("%s: help must not bind a session", cmd)
 		}
+	}
+}
+
+func TestHandleDeniesUnauthorized(t *testing.T) {
+	// /start and /help get a no-access reply carrying the id; anything else from a
+	// denied user gets no reply and never reaches the responder.
+	cases := []struct {
+		text      string
+		wantReply bool
+	}{
+		{"/start", true},
+		{"/help", true},
+		{"tell me about X", false},
+		{"/clear", false},
+	}
+	for _, tc := range cases {
+		resp := &fakeResponder{}
+		sender := &fakeSender{}
+		d := newTestDispatcher(t, resp, sender)
+		d.authz = newAllowList(nil) // deny everyone
+		d.helpText = "HELP"
+
+		u := Update{UpdateID: 1, Message: &Message{
+			MessageID: 7, Text: tc.text, Chat: Chat{ID: 42}, From: &User{ID: 999},
+		}}
+		d.handleUpdate(context.Background(), u)
+
+		if resp.called {
+			t.Errorf("%q: responder must not run for a denied user", tc.text)
+		}
+		calls := sender.snapshot()
+		if tc.wantReply {
+			if len(calls) != 1 || !strings.Contains(calls[0].text, "999") {
+				t.Errorf("%q: want no-access reply mentioning id 999, got %+v", tc.text, calls)
+			}
+		} else if len(calls) != 0 {
+			t.Errorf("%q: denied non-command should get no reply, got %+v", tc.text, calls)
+		}
+	}
+}
+
+func TestHandleAllowedUserPasses(t *testing.T) {
+	resp := &fakeResponder{descriptors: []*Descriptor{{Kind: KindText, Text: "answer"}}}
+	sender := &fakeSender{}
+	d := newTestDispatcher(t, resp, sender)
+	d.authz = newAllowList([]int64{999})
+
+	u := Update{UpdateID: 1, Message: &Message{
+		MessageID: 7, Text: "hello", Chat: Chat{ID: 42}, From: &User{ID: 999},
+	}}
+	d.handleUpdate(context.Background(), u)
+
+	if !resp.called {
+		t.Error("whitelisted user should reach the responder")
+	}
+	if calls := sender.snapshot(); len(calls) != 1 || calls[0].text != "answer" {
+		t.Errorf("whitelisted user's answer not delivered: %+v", calls)
 	}
 }
 

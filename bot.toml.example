@@ -35,6 +35,17 @@ profile = "qa"
 # and PreToolUse confine the responder's reads here. Required.
 project = "~/code/example-project"
 
+# Access control: Telegram user ids allowed to use the bot. Empty (the default)
+# denies everyone — the bot answers /start and /help with "no access for id N"
+# (so a user can report the id) and silently ignores everything else. To find
+# your own id, start the bot and send it /start. Also --allow-user (repeatable).
+# allowed_users = [123456789]
+
+# OPEN ACCESS: allow every Telegram user, no whitelist. DEMO ONLY — exposes the
+# bot (and the project it answers about) to anyone who finds it. Logged loudly at
+# startup. Also --open.
+# open_access = false
+
 # --- optional overrides (defaults shown) ---
 
 # Reply to /help and /start (the dispatcher answers these itself, no model spawn).

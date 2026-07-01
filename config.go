@@ -5,10 +5,31 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"github.com/BurntSushi/toml"
 )
+
+// int64List is a repeatable integer flag (e.g. --allow-user 1 --allow-user 2).
+type int64List []int64
+
+func (l *int64List) String() string {
+	parts := make([]string, len(*l))
+	for i, v := range *l {
+		parts[i] = strconv.FormatInt(v, 10)
+	}
+	return strings.Join(parts, ",")
+}
+
+func (l *int64List) Set(s string) error {
+	v, err := strconv.ParseInt(strings.TrimSpace(s), 10, 64)
+	if err != nil {
+		return fmt.Errorf("invalid user id %q: %w", s, err)
+	}
+	*l = append(*l, v)
+	return nil
+}
 
 // Profile selects the responder's access level. Only ProfileQA (read-only) is
 // implemented for now; ProfileDev/ProfileOps are reserved for a future
@@ -72,6 +93,17 @@ type Config struct {
 	// blurb can't break rendering. Set only when help_text is valid Telegram HTML.
 	HelpHTML bool `toml:"help_html"`
 
+	// AllowedUsers whitelists the Telegram user ids that may use the bot. Empty
+	// (and Open=false) denies everyone — default-closed, so an unconfigured bot is
+	// shut, not open. A denied user still gets a "no access for id N" line on
+	// /start and /help so they can report the id to be whitelisted. Merged with
+	// any --allow-user flags.
+	AllowedUsers []int64 `toml:"allowed_users"`
+
+	// Open disables the whitelist — every Telegram user is allowed. Demo only;
+	// loudly logged at startup. Also --open. Overrides AllowedUsers.
+	Open bool `toml:"open_access"`
+
 	// Cwd is a fixed responder launch dir. When set, the scaffold is materialized
 	// there and kept (inspect the generated settings, tweak settings.local, run
 	// claude by hand). Empty => an ephemeral cwd the dispatcher removes on exit.
@@ -118,6 +150,9 @@ func parseConfig(args []string) (*Config, error) {
 	cwd := fs.String("cwd", "", "fixed responder cwd to materialize into and keep (default: ephemeral, removed on exit)")
 	maxConcurrent := fs.Int("max-concurrent", 0, "max responders running at once (per-chat is always serialized; default 4)")
 	noRefuse := fs.Bool("norefuse", false, "materialize the do-what-you're-asked responder (does not decline off-topic; machine guards still apply)")
+	var allowUsers int64List
+	fs.Var(&allowUsers, "allow-user", "authorize a Telegram user id (repeatable; merged with allowed_users)")
+	open := fs.Bool("open", false, "OPEN ACCESS: allow every Telegram user (demo only; overrides the whitelist)")
 	if err := fs.Parse(args); err != nil {
 		return nil, err
 	}
@@ -153,6 +188,14 @@ func parseConfig(args []string) (*Config, error) {
 	}
 	if *noRefuse {
 		c.NoRefuse = true
+	}
+	// allowed_users is additive: --allow-user appends to the file list (rather
+	// than overriding it) so the CLI can grant one-off access on top of config.
+	if len(allowUsers) > 0 {
+		c.AllowedUsers = append(c.AllowedUsers, allowUsers...)
+	}
+	if *open {
+		c.Open = true
 	}
 
 	c.applyDefaults()

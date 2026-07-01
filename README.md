@@ -140,6 +140,30 @@ ak-tgclaude dispatch --responder stub --bot-token 123:ABC
 Use it to verify connectivity, the bot token, long-polling, and reply routing
 end to end before wiring the real responder.
 
+## Access control
+
+The bot talks only to whitelisted users. `allowed_users` (config) / `--allow-user`
+(repeatable) list the Telegram **user ids** allowed to use it, and the gate runs
+before any command or the responder. Matching is by **numeric id** — usernames
+are mutable and can be re-registered, so they are never a key (only a log label).
+
+A user not on the list is **silently ignored**, except that `/start` and `/help`
+get a single `no access for id N` line — that id is the user's own, so they can
+report it to be whitelisted. This doubles as onboarding: a stranger's `/start`
+hands them the id to relay; you add it and restart.
+
+The list is **default-closed**: empty (and not open) denies everyone, so an
+unconfigured bot is shut, not exposed. Bootstrap your own access by starting the
+bot, sending `/start`, and whitelisting the id it reports (or pass
+`--allow-user <id>` at launch). `open_access` / `--open` disables the gate
+entirely — **demo only**, as it exposes the bot and the project it answers about
+to anyone; it is logged loudly at startup.
+
+The gate sits behind a one-method `Authorizer` seam, so a future stateful
+allowlist (an admin `/allow <id>` mutating persisted state, composing with the
+`no access for id N` id report) can replace the static list without touching the
+routing.
+
 ## Token isolation
 
 The Telegram **bot token** is the asset to protect: whoever holds it controls the
