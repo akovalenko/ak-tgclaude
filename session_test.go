@@ -1,6 +1,11 @@
 package main
 
-import "testing"
+import (
+	"encoding/json"
+	"os"
+	"path/filepath"
+	"testing"
+)
 
 func TestSessionStorePersistsAcrossReload(t *testing.T) {
 	dir := t.TempDir()
@@ -62,6 +67,38 @@ func TestEphemeralSessionsKeepOffsetButNotBindings(t *testing.T) {
 	}
 	if s2.Offset() != 99 {
 		t.Errorf("offset should persist even in ephemeral mode: %d", s2.Offset())
+	}
+}
+
+func TestEphemeralLoadScrubsDiskBindings(t *testing.T) {
+	dir := t.TempDir()
+	// Seed a persistent store with bindings + an offset.
+	s, _ := LoadSessionStore(dir, false)
+	if err := s.SetSession(1, "sess-a"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetOffset(88); err != nil {
+		t.Fatal(err)
+	}
+
+	// Loading ephemeral must scrub the on-disk bindings immediately — before any
+	// SetOffset — while keeping the offset.
+	if _, err := LoadSessionStore(dir, true); err != nil {
+		t.Fatal(err)
+	}
+	b, err := os.ReadFile(filepath.Join(dir, "sessions.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var d storeData
+	if err := json.Unmarshal(b, &d); err != nil {
+		t.Fatal(err)
+	}
+	if len(d.Sessions) != 0 {
+		t.Errorf("ephemeral load should scrub disk bindings, got %v", d.Sessions)
+	}
+	if d.Offset != 88 {
+		t.Errorf("offset should survive the load-time scrub: %d", d.Offset)
 	}
 }
 

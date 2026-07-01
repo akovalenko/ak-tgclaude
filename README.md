@@ -131,9 +131,10 @@ Two operator levers beyond the per-chat `/clear` reset the whole map:
 
 - **`ephemeral_sessions`** (`--ephemeral-sessions`) keeps the `chat→session` map
   **in memory only** — it is never written to disk, so every restart starts each
-  chat fresh. The **poll offset still persists** (a restart doesn't reprocess the
-  backlog); only the bindings are dropped. A standing "no cross-restart continuity"
-  mode.
+  chat fresh; any bindings still on disk from a previous run are **scrubbed at
+  load** (not resurrected). The **poll offset still persists** (a restart doesn't
+  reprocess the backlog); only the bindings are dropped. A standing "no
+  cross-restart continuity" mode.
 - The **`clear`** subcommand is the one-shot alternative: wipe the persisted
   bindings **now** (keeping the offset) without switching to ephemeral mode —
   `ak-tgclaude clear [--config bot.toml]` (state dir from the config or the

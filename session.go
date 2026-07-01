@@ -17,8 +17,9 @@ type SessionStore struct {
 	path string
 
 	// ephemeral keeps the chat→session map in memory only: persist writes just the
-	// offset, and a reload starts with no bindings. The offset still persists so a
-	// restart does not reprocess the getUpdates backlog.
+	// offset, and a reload starts with no bindings (and scrubs any stale ones from
+	// disk). The offset still persists so a restart does not reprocess the
+	// getUpdates backlog.
 	ephemeral bool
 
 	mu   sync.Mutex
@@ -32,7 +33,8 @@ type storeData struct {
 
 // LoadSessionStore opens (or initializes) the store under dir. When ephemeral,
 // any persisted chat→session bindings are ignored (each start is fresh) and
-// future writes never carry the map to disk; the offset is still loaded/kept.
+// scrubbed from disk at load time, and future writes never carry the map to
+// disk; the offset is still loaded/kept.
 func LoadSessionStore(dir string, ephemeral bool) (*SessionStore, error) {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return nil, fmt.Errorf("creating state dir %s: %w", dir, err)
@@ -52,8 +54,17 @@ func LoadSessionStore(dir string, ephemeral bool) (*SessionStore, error) {
 	if err := json.Unmarshal(b, &s.data); err != nil {
 		return nil, fmt.Errorf("parsing %s: %w", s.path, err)
 	}
+	hadBindings := len(s.data.Sessions) > 0
 	if s.data.Sessions == nil || ephemeral {
 		s.data.Sessions = map[int64]string{}
+	}
+	if ephemeral && hadBindings {
+		// Scrub the now-ignored bindings from disk at load time (rather than
+		// waiting for the first offset write), so the file never lingers with
+		// stale sessions once ephemeral mode is on. persist keeps the offset.
+		if err := s.persist(); err != nil {
+			return nil, fmt.Errorf("scrubbing %s: %w", s.path, err)
+		}
 	}
 	return s, nil
 }
