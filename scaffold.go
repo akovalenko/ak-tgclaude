@@ -102,6 +102,7 @@ type scaffoldParams struct {
 	NoRefuse       bool     // materialize the do-what-you're-asked agent variant
 	Project        string   // knowledge root; substituted for {{PROJECT}} in agent/skill templates
 	WireSkills     []string // operator skill templates (dir or SKILL.md) to materialize + preload
+	DenyRead       []string // operator paths denied at BOTH layers (Read-tool hook + sandbox Bash)
 	BangBug        bool     // pass --bang-bug to the hook (deny sandboxed Bash with the corrupted `\!`)
 }
 
@@ -165,9 +166,11 @@ func buildSettings(p scaffoldParams) *claudeSettings {
 
 	// Bash-layer read denies. The Read TOOL is already confined to the project by
 	// the PreToolUse hook; this closes the Bash path (`cat`/`grep`) for host
-	// secrets and sibling outboxes. Host secrets first, then this run's outbox
-	// area (own outbox carved back per invocation).
+	// secrets, operator-configured paths, and sibling outboxes. Host secrets first,
+	// then operator --deny-read, then this run's outbox area (own outbox carved
+	// back per invocation).
 	denyReadFS := append([]string{}, hostSecretDenyRead...)
+	denyReadFS = append(denyReadFS, p.DenyRead...)
 	if p.OutboxRoot != "" {
 		denyReadFS = append(denyReadFS, p.OutboxRoot)
 	}
@@ -204,7 +207,13 @@ func buildSettings(p scaffoldParams) *claudeSettings {
 		},
 	}
 
+	// The hook's --deny-read scopes the Read TOOL (checked before the project-read
+	// allow); the same paths also went into filesystem.denyRead above (the Bash
+	// path). Operator paths first, then the token file when it lives in a config.
 	hookCmd := p.HookBinary + " hook pretooluse"
+	for _, d := range p.DenyRead {
+		hookCmd += " --deny-read " + shellQuote(d)
+	}
 	if p.TokenFile != "" {
 		hookCmd += " --deny-read " + shellQuote(p.TokenFile)
 	}
@@ -497,6 +506,7 @@ func runScaffold(args []string) {
 		NoRefuse:   cfg.NoRefuse,
 		Project:    cfg.Project,
 		WireSkills: cfg.WireSkills,
+		DenyRead:   cfg.DenyRead,
 		BangBug:    cfg.BangBug,
 	}); err != nil {
 		fmt.Fprintf(os.Stderr, "ak-tgclaude: scaffold: %v\n", err)
@@ -513,6 +523,9 @@ func runScaffold(args []string) {
 	fmt.Printf("  agent:    %s\n", agentVariant)
 	if len(cfg.WireSkills) > 0 {
 		fmt.Printf("  wired:    %s (preloaded into the agent)\n", strings.Join(cfg.WireSkills, ", "))
+	}
+	if len(cfg.DenyRead) > 0 {
+		fmt.Printf("  deny-read: %s (Read-tool + sandboxed Bash)\n", strings.Join(cfg.DenyRead, ", "))
 	}
 	fmt.Printf("  outbox:   %s\n", outboxRoot)
 	if cfg.ConfigPath == "" {

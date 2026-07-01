@@ -69,6 +69,30 @@ func TestParseConfigWireSkills(t *testing.T) {
 	}
 }
 
+func TestParseConfigDenyRead(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "bot.toml")
+	if err := os.WriteFile(path, []byte("deny_read = [\"/etc/secret\"]\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	c, err := parseConfig([]string{"--config", path, "--deny-read", "~/priv", "--deny-read", "/var/token"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Additive: file [/etc/secret] + flags [~/priv, /var/token].
+	if len(c.DenyRead) != 3 {
+		t.Fatalf("expected 3 deny-read paths, got %v", c.DenyRead)
+	}
+	if c.DenyRead[0] != "/etc/secret" || c.DenyRead[2] != "/var/token" {
+		t.Errorf("deny-read order/merge wrong: %v", c.DenyRead)
+	}
+	// A leading ~ is expanded (like project/wire_skills), so the hook's absolute
+	// path match works.
+	home, _ := os.UserHomeDir()
+	if c.DenyRead[1] != filepath.Join(home, "priv") {
+		t.Errorf("tilde not expanded: %q", c.DenyRead[1])
+	}
+}
+
 func TestParseConfigAllowUserMergesWithFile(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "bot.toml")
 	if err := os.WriteFile(path, []byte("allowed_users = [1, 2]\n"), 0o600); err != nil {

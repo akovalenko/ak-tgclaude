@@ -35,6 +35,14 @@ profile = "qa"
 # and PreToolUse confine the responder's reads here. Required.
 project = "~/code/example-project"
 
+# Extra paths the responder must NEVER read, on top of the always-denied host
+# secrets (SSH keys, Claude creds/history, other sessions' transcripts, the token
+# file). Each is denied at BOTH layers: the PreToolUse hook blocks the Read tool
+# (wins even for a path inside the project), and sandbox.filesystem.denyRead blocks
+# the sandboxed Bash (cat/grep). Give absolute or ~-rooted paths. Also --deny-read
+# (repeatable; merged with this list).
+# deny_read = ["~/code/example-project/secrets.env", "~/.aws"]
+
 # Access control: Telegram user ids allowed to use the bot. Empty (the default)
 # denies everyone — the bot answers /start and /help with "no access for id N"
 # (so a user can report the id) and silently ignores everything else. To find

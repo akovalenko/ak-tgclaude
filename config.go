@@ -120,6 +120,17 @@ type Config struct {
 	// The sandbox and PreToolUse confine the responder's reads here.
 	Project string `toml:"project"`
 
+	// DenyRead lists extra paths the responder must never read, on top of the
+	// always-denied host secrets (SSH keys, Claude creds/history, other sessions'
+	// transcripts, the token file). Each path is denied at BOTH layers: the
+	// PreToolUse hook blocks the Read tool (checked before the project-read allow,
+	// so it wins even for a path inside the project), and sandbox.filesystem.denyRead
+	// blocks the sandboxed Bash (`cat`/`grep`). A leading ~ is expanded; give
+	// absolute or ~-rooted paths (a bare relative path is resolved against the
+	// responder cwd at hook time, not what you mean). Repeatable via --deny-read
+	// (additive with this list).
+	DenyRead []string `toml:"deny_read"`
+
 	// HelpText is the reply to /help and /start. Empty => a generic built-in
 	// blurb (defaultHelpText). Keeps the dispatcher domain-blind: any
 	// project-specific help comes from config, not baked into the binary.
@@ -201,6 +212,8 @@ func parseConfig(args []string) (*Config, error) {
 	fs.Var(&allowUsers, "allow-user", "authorize a Telegram user id (repeatable; merged with allowed_users)")
 	var wireSkills stringList
 	fs.Var(&wireSkills, "wire-skill", "skill template (dir or SKILL.md) to materialize and preload into the responder (repeatable; merged with wire_skills)")
+	var denyRead stringList
+	fs.Var(&denyRead, "deny-read", "path the responder must never read, at both the Read-tool and sandboxed-Bash layers (repeatable; merged with deny_read; absolute or ~-rooted)")
 	open := fs.Bool("open", false, "OPEN ACCESS: allow every Telegram user (demo only; overrides the whitelist)")
 	if err := fs.Parse(args); err != nil {
 		return nil, err
@@ -256,6 +269,10 @@ func parseConfig(args []string) (*Config, error) {
 	if len(wireSkills) > 0 {
 		c.WireSkills = append(c.WireSkills, wireSkills...)
 	}
+	// deny_read is additive too (protect one more path ad-hoc).
+	if len(denyRead) > 0 {
+		c.DenyRead = append(c.DenyRead, denyRead...)
+	}
 	if *open {
 		c.Open = true
 	}
@@ -267,6 +284,9 @@ func parseConfig(args []string) (*Config, error) {
 	c.RuntimeBase = expandTilde(c.RuntimeBase)
 	for i := range c.WireSkills {
 		c.WireSkills[i] = expandTilde(c.WireSkills[i])
+	}
+	for i := range c.DenyRead {
+		c.DenyRead[i] = expandTilde(c.DenyRead[i])
 	}
 
 	return &c, nil

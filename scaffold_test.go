@@ -79,6 +79,38 @@ func TestBuildSettingsBangBug(t *testing.T) {
 	}
 }
 
+func TestBuildSettingsDenyRead(t *testing.T) {
+	// Operator --deny-read paths land at BOTH layers: sandbox.filesystem.denyRead
+	// (the Bash `cat`/`grep` path) and the hook's --deny-read (the Read tool).
+	s := buildSettings(scaffoldParams{
+		CacheDir:   "/c",
+		OutboxRoot: "/run/out",
+		TokenFile:  "/cfg/bot.toml",
+		DenyRead:   []string{"/secret/a", "~/b"},
+	})
+
+	// Bash layer: host secrets (2), then operator paths, then the outbox root.
+	want := []string{"~/.claude/history.jsonl", "~/.claude/projects", "/secret/a", "~/b", "/run/out"}
+	got := s.Sandbox.Filesystem.DenyRead
+	if len(got) != len(want) {
+		t.Fatalf("denyRead = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("denyRead[%d] = %q, want %q (full %v)", i, got[i], want[i], got)
+		}
+	}
+
+	// Read-tool layer: the hook command carries each operator path (quoted) plus
+	// the token file.
+	cmd := s.Hooks.PreToolUse[0].Hooks[0].Command
+	for _, p := range []string{"--deny-read '/secret/a'", "--deny-read '~/b'", "--deny-read '/cfg/bot.toml'"} {
+		if !strings.Contains(cmd, p) {
+			t.Errorf("hook command missing %q: %q", p, cmd)
+		}
+	}
+}
+
 func TestBuildSettingsNoTokenFile(t *testing.T) {
 	s := buildSettings(scaffoldParams{CacheDir: "/c"})
 	// Even without a bot token, the host secrets are always denied; only the bot

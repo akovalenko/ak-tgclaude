@@ -34,6 +34,7 @@ bot_token = "123456789:AA..."   # secret; kept in dispatcher memory, never in en
 profile   = "qa"                # qa (read-only, default) | dev | ops (reserved)
 project   = "~/code/myproject"  # the codebase consulted on (read-only under qa)
 # wire_skills = ["~/lib/eputs-qa-knowledge"]  # domain skill(s) preloaded into the responder
+# deny_read = ["~/code/myproject/secrets.env"]  # extra paths the responder must never read
 # runtime_base = ""             # base for the ephemeral cwd (default: $XDG_RUNTIME_DIR)
 # state_dir    = ""             # durable state (default: $XDG_STATE_HOME/ak-tgclaude)
 ```
@@ -247,6 +248,15 @@ so they can't reach these paths either. Denying `~/.claude/.credentials.json` do
 credentials **unsandboxed**; only the Bash tools it spawns are confined. (`~/` is
 expanded by the sandbox to the responder's home.)
 
+**Extra paths — `deny_read` / `--deny-read`.** To hide more paths (a secrets
+file inside the project, a sibling repo, a mounted volume), list them in
+`deny_read` (or repeat `--deny-read <path>`; the two merge, like
+`wire_skills`/`allowed_users`). Each path is denied at **both** layers: the hook
+blocks the **Read tool** (checked before the project-read allow, so it wins even
+for a path *inside* the project) and `sandbox.filesystem.denyRead` blocks the
+**sandboxed Bash**. Give **absolute or `~`-rooted** paths — a bare relative path
+is resolved against the responder cwd at hook time, not the dir you meant.
+
 ## Responder (agent + emission skill)
 
 The responder is a Claude Code **agent** launched per message. ak-tgclaude ships
@@ -346,8 +356,9 @@ path-scoped from the responder's env:
 - **Edit/Write/NotebookEdit** → allowed under this invocation's outbox
   (`$AK_TGCLAUDE_OUTBOX`) or the sandbox tmp (`/tmp/claude-<uid>`), else denied
   (so the project stays read-only but the responder can author/iterate on files);
-- a **token-file** touch (`--deny-read`) is denied first — it wins even if the
-  token happens to sit under the project.
+- a **protected-path** touch (`--deny-read`: the token file, plus any operator
+  `deny_read`/`--deny-read`) is denied first — it wins even if that path happens to
+  sit under the project.
 
 It also **allows sandboxed** Bash / **denies unsandboxed** Bash, and **defers**
 everything else (Grep/Glob/Skill/…) to the permission layer. With `bang_bug`
@@ -547,7 +558,7 @@ responder.go       Responder interface (claude / stub) + `claude -p` spawn
 dispatch.go        the dispatch loop: poll -> route -> respond -> deliver
 scaffold.go        generated .claude/settings.json + materialize embedded assets
 assets/            embedded responder agent + emission skill (go:embed)
-hook.go            `hook pretooluse`: deny reads of the token file
+hook.go            `hook pretooluse`: path-scope the file tools; deny protected reads (token + deny_read)
 deploy.go          `deploy`: PATH self-check + example config
 bot.toml.example   example config
 go.mod / go.sum
