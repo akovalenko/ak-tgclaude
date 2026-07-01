@@ -55,6 +55,7 @@ type Dispatcher struct {
 	pollTimeout   int
 	maxConcurrent int    // cap on responders running at once
 	helpText      string // reply to /help and /start
+	helpParseMode string // "" (plain) or "HTML" for the help reply
 }
 
 // Run long-polls and dispatches updates to per-chat workers until ctx is
@@ -180,7 +181,7 @@ func (d *Dispatcher) handleUpdate(ctx context.Context, u Update) {
 	// the configured help_text, or a generic built-in. Telegram sends /start when
 	// a user first opens the bot, so intercepting it keeps that off the responder.
 	if isSlashCommand(m.Text, "help") || isSlashCommand(m.Text, "start") {
-		if _, err := d.sender.SendMessage(ctx, route, d.helpText, "", false); err != nil {
+		if _, err := d.sender.SendMessage(ctx, route, d.helpText, d.helpParseMode, false); err != nil {
 			log.Printf("ak-tgclaude: help %d: %v", m.Chat.ID, err)
 		}
 		return
@@ -384,6 +385,10 @@ func runDispatch(args []string) {
 	if strings.TrimSpace(helpText) == "" {
 		helpText = defaultHelpText
 	}
+	helpParseMode := ""
+	if cfg.HelpHTML {
+		helpParseMode = "HTML"
+	}
 
 	d := &Dispatcher{
 		client:        client,
@@ -394,6 +399,7 @@ func runDispatch(args []string) {
 		pollTimeout:   defaultPollTimeout,
 		maxConcurrent: cfg.MaxConcurrent,
 		helpText:      helpText,
+		helpParseMode: helpParseMode,
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)

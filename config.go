@@ -67,6 +67,11 @@ type Config struct {
 	// project-specific help comes from config, not baked into the binary.
 	HelpText string `toml:"help_text"`
 
+	// HelpHTML sends HelpText with parse_mode=HTML (Telegram HTML: <b> <i> <a…>,
+	// with &<> escaped). Default false = plain text, so a stray &/< in a plain
+	// blurb can't break rendering. Set only when help_text is valid Telegram HTML.
+	HelpHTML bool `toml:"help_html"`
+
 	// Cwd is a fixed responder launch dir. When set, the scaffold is materialized
 	// there and kept (inspect the generated settings, tweak settings.local, run
 	// claude by hand). Empty => an ephemeral cwd the dispatcher removes on exit.

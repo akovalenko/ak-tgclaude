@@ -184,6 +184,20 @@ func TestHandleHelpAndStart(t *testing.T) {
 	}
 }
 
+func TestHandleHelpHTMLMode(t *testing.T) {
+	sender := &fakeSender{}
+	d := newTestDispatcher(t, &fakeResponder{}, sender)
+	d.helpText = "<b>hi</b>"
+	d.helpParseMode = "HTML"
+
+	d.handleUpdate(context.Background(), textUpdate(1, 42, 7, "/help"))
+
+	calls := sender.snapshot()
+	if len(calls) != 1 || calls[0].text != "<b>hi</b>" || calls[0].mode != "HTML" {
+		t.Fatalf("help should be sent as HTML: %+v", calls)
+	}
+}
+
 func TestIsSlashCommand(t *testing.T) {
 	if !isSlashCommand("/start deep-link-payload", "start") {
 		t.Error("/start with a payload should match")
