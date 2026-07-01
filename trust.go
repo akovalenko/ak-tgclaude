@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -95,14 +96,23 @@ func setProjectTrust(configPath, key string) error {
 		return err
 	}
 	root["projects"] = projectsRaw
-	out, err := json.Marshal(root)
+	compact, err := json.Marshal(root)
 	if err != nil {
+		return err
+	}
+	// Pretty-print for a human-readable ~/.claude.json. json.Indent (not
+	// json.MarshalIndent) is deliberate: root's values are RawMessage blobs, and
+	// MarshalIndent re-emits RawMessage verbatim rather than re-indenting it,
+	// yielding ragged nesting. json.Indent re-indents an already-valid JSON stream
+	// uniformly and never rewrites value bytes, so large integers stay byte-exact.
+	var out bytes.Buffer
+	if err := json.Indent(&out, compact, "", "  "); err != nil {
 		return err
 	}
 
 	// Atomic write (temp + rename, 0600), mirroring SessionStore.persist.
 	tmp := configPath + ".tmp"
-	if err := os.WriteFile(tmp, out, 0o600); err != nil {
+	if err := os.WriteFile(tmp, out.Bytes(), 0o600); err != nil {
 		return err
 	}
 	if err := os.Rename(tmp, configPath); err != nil {

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -122,6 +123,32 @@ func TestSetProjectTrustNoOpWhenTrusted(t *testing.T) {
 	b, _ := os.ReadFile(path)
 	if string(b) != orig {
 		t.Errorf("no-op path rewrote the file:\n got %s\nwant %s", b, orig)
+	}
+}
+
+func TestSetProjectTrustWritesIndented(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, ".claude.json")
+	// Compact single-line input carrying a big-int; the rewrite must come back
+	// pretty-printed while keeping the big-int byte-exact.
+	orig := `{"projects":{"/p":{"hasTrustDialogAccepted":false,"lastCost":` + bigInt + `}}}`
+	if err := os.WriteFile(path, []byte(orig), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := setProjectTrust(path, "/p"); err != nil {
+		t.Fatal(err)
+	}
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Indented output: a newline followed by a two-space indent, not a single line.
+	if !bytes.Contains(b, []byte("\n  ")) {
+		t.Errorf("output not indented (want newline + two-space indent):\n%s", b)
+	}
+	// Indentation must not corrupt the big-int value.
+	if !bytes.Contains(b, []byte(bigInt)) {
+		t.Errorf("big-int not preserved through indentation:\n%s", b)
 	}
 }
 
