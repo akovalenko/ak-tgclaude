@@ -111,6 +111,24 @@ var defaultDenyEnvVars = []string{"ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"}
 // defaultNetworkDomains is the egress the responder needs to build Go code.
 var defaultNetworkDomains = []string{"proxy.golang.org", "sum.golang.org", "storage.googleapis.com"}
 
+// hostSecretCredFiles are host credential paths the sandboxed shell must never
+// read: SSH private keys and Claude Code's own auth token. `~/` is expanded by
+// the sandbox to the responder's home. Denying them does NOT break the
+// responder's own `claude -p` auth — the parent process reads its credentials
+// unsandboxed; only the Bash tools it spawns are confined (so a prompt-injected
+// `cat ~/.ssh/id_rsa` is masked). Unconditional (independent of --config).
+var hostSecretCredFiles = []string{
+	"~/.ssh",
+	"~/.claude/.credentials.json",
+}
+
+// hostSecretDenyRead are sensitive-but-not-credential host paths hidden from the
+// sandboxed shell (so they go in filesystem.denyRead, not the credentials
+// block): Claude Code's cross-session prompt/command history.
+var hostSecretDenyRead = []string{
+	"~/.claude/history.jsonl",
+}
+
 // goCacheEnv is the isolated Go cache environment for the responder. It is both
 // written into settings.json and injected into the `claude -p` process env — the
 // latter is what actually reaches the sandboxed `go` (a project settings-file
@@ -142,11 +160,23 @@ func buildSettings(p scaffoldParams) *claudeSettings {
 		envVars = append(envVars, credEnv{Name: name, Mode: "deny"})
 	}
 
-	// Sandboxed Bash reads of a sibling outbox are masked by denyRead (the Read
-	// TOOL is instead path-scoped by the PreToolUse hook).
-	var denyReadFS []string
+	// Bash-layer read denies. The Read TOOL is already confined to the project by
+	// the PreToolUse hook; this closes the Bash path (`cat`/`grep`) for host
+	// secrets and sibling outboxes. Host secrets first, then this run's outbox
+	// area (own outbox carved back per invocation).
+	denyReadFS := append([]string{}, hostSecretDenyRead...)
 	if p.OutboxRoot != "" {
-		denyReadFS = []string{p.OutboxRoot}
+		denyReadFS = append(denyReadFS, p.OutboxRoot)
+	}
+
+	// credentials.files: SSH keys + Claude's auth token (always), plus the bot's
+	// own config file when the token lives there.
+	credFiles := make([]credFile, 0, len(hostSecretCredFiles)+1)
+	for _, path := range hostSecretCredFiles {
+		credFiles = append(credFiles, credFile{Path: path, Mode: "deny"})
+	}
+	if p.TokenFile != "" {
+		credFiles = append(credFiles, credFile{Path: p.TokenFile, Mode: "deny"})
 	}
 
 	s := &claudeSettings{
@@ -167,11 +197,8 @@ func buildSettings(p scaffoldParams) *claudeSettings {
 				AllowWrite: []string{p.CacheDir},
 				DenyRead:   denyReadFS,
 			},
-			Credentials: &credentialsCfg{EnvVars: envVars},
+			Credentials: &credentialsCfg{EnvVars: envVars, Files: credFiles},
 		},
-	}
-	if p.TokenFile != "" {
-		s.Sandbox.Credentials.Files = []credFile{{Path: p.TokenFile, Mode: "deny"}}
 	}
 
 	hookCmd := p.HookBinary + " hook pretooluse"

@@ -36,14 +36,23 @@ func TestBuildSettingsShape(t *testing.T) {
 	if len(s.Permissions.Deny) != 0 {
 		t.Errorf("static settings should carry no permissions.deny, got %v", s.Permissions.Deny)
 	}
-	// Sandboxed Bash reads of a sibling outbox are still masked (Bash isn't
+	// denyRead masks host history plus the sibling-outbox root (Bash isn't
 	// hook-scoped); own outbox is carved back per invocation.
-	if got := s.Sandbox.Filesystem.DenyRead; len(got) != 1 || got[0] != "/run/out" {
-		t.Errorf("sandbox denyRead should be the outbox root, got %v", got)
+	if got := s.Sandbox.Filesystem.DenyRead; len(got) != 2 ||
+		got[0] != "~/.claude/history.jsonl" || got[1] != "/run/out" {
+		t.Errorf("sandbox denyRead = %v, want [~/.claude/history.jsonl /run/out]", got)
 	}
-	if len(s.Sandbox.Credentials.Files) != 1 || s.Sandbox.Credentials.Files[0].Path != "/cfg/bot.toml" ||
-		s.Sandbox.Credentials.Files[0].Mode != "deny" {
-		t.Errorf("credentials.files = %+v", s.Sandbox.Credentials.Files)
+	// credentials.files: the host secrets (SSH keys, Claude token) always, then
+	// the bot's config file since the token lives there.
+	files := s.Sandbox.Credentials.Files
+	if len(files) != 3 || files[0].Path != "~/.ssh" ||
+		files[1].Path != "~/.claude/.credentials.json" || files[2].Path != "/cfg/bot.toml" {
+		t.Errorf("credentials.files = %+v", files)
+	}
+	for _, f := range files {
+		if f.Mode != "deny" {
+			t.Errorf("credentials.files entry not deny: %+v", f)
+		}
 	}
 	if len(s.Sandbox.Credentials.EnvVars) != 2 || s.Sandbox.Credentials.EnvVars[0].Mode != "deny" {
 		t.Errorf("credentials.envVars = %+v", s.Sandbox.Credentials.EnvVars)
@@ -58,8 +67,11 @@ func TestBuildSettingsShape(t *testing.T) {
 
 func TestBuildSettingsNoTokenFile(t *testing.T) {
 	s := buildSettings(scaffoldParams{CacheDir: "/c"})
-	if s.Sandbox.Credentials.Files != nil {
-		t.Errorf("no token file => no credentials.files, got %+v", s.Sandbox.Credentials.Files)
+	// Even without a bot token, the host secrets are always denied; only the bot
+	// config file is absent.
+	files := s.Sandbox.Credentials.Files
+	if len(files) != 2 || files[0].Path != "~/.ssh" || files[1].Path != "~/.claude/.credentials.json" {
+		t.Errorf("host secrets should always be denied (no token), got %+v", files)
 	}
 	if cmd := s.Hooks.PreToolUse[0].Hooks[0].Command; strings.Contains(cmd, "--deny-read") {
 		t.Errorf("no token file => hook has no --deny-read, got %q", cmd)

@@ -228,6 +228,24 @@ model calls keep working while the shell never sees the secret.
 > is an alternative — the key is fed by a script and stays out of the tool env
 > unless the script itself exports it.)
 
+### Host secrets beyond the bot token
+
+The responder runs as the host user, so a prompt-injected `cat` in its sandboxed
+shell could otherwise read the operator's own secrets. The generated
+`settings.json` denies these unconditionally (independent of `--config`):
+
+- **`~/.ssh`** and **`~/.claude/.credentials.json`** (the user's SSH keys and
+  Claude Code's own auth token) via `sandbox.credentials.files` (`mode: "deny"`);
+- **`~/.claude/history.jsonl`** (cross-session prompt/command history) via
+  `sandbox.filesystem.denyRead`.
+
+This is the **Bash layer** only — the file tools (`Read`/`Grep`/`Glob`) are
+already confined to the project by the PreToolUse hook (default-closed allowlist),
+so they can't reach these paths either. Denying `~/.claude/.credentials.json` does
+**not** break the responder's own `claude -p` auth: the parent process reads its
+credentials **unsandboxed**; only the Bash tools it spawns are confined. (`~/` is
+expanded by the sandbox to the responder's home.)
+
 ## Responder (agent + emission skill)
 
 The responder is a Claude Code **agent** launched per message. ak-tgclaude ships
