@@ -156,6 +156,8 @@ func (d *Dispatcher) handleUpdate(ctx context.Context, u Update) {
 	}
 	defer os.RemoveAll(outbox)
 
+	log.Printf("ak-tgclaude: launch responder chat=%d user=%s msg=%d", m.Chat.ID, userLabel(m.From), m.MessageID)
+
 	// One drainer for this invocation's outbox, stopped after the responder exits.
 	stop := make(chan struct{})
 	done := make(chan struct{})
@@ -182,6 +184,18 @@ func (d *Dispatcher) handleUpdate(ctx context.Context, u Update) {
 			log.Printf("ak-tgclaude: binding chat %d: %v", m.Chat.ID, err)
 		}
 	}
+}
+
+// userLabel renders a message sender for logs: the numeric id, plus @username
+// when present. "?" if there is no sender (e.g. channel posts).
+func userLabel(u *User) string {
+	if u == nil {
+		return "?"
+	}
+	if u.Username != "" {
+		return fmt.Sprintf("%d(@%s)", u.ID, u.Username)
+	}
+	return fmt.Sprintf("%d", u.ID)
 }
 
 // isClearCommand reports whether text is the /clear command (optionally

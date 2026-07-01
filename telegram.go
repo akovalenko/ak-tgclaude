@@ -40,12 +40,19 @@ type Message struct {
 	MessageID int64    `json:"message_id"`
 	Text      string   `json:"text"`
 	Chat      Chat     `json:"chat"`
+	From      *User    `json:"from"`
 	ReplyTo   *Message `json:"reply_to_message"`
 }
 
 // Chat identifies the conversation an update belongs to.
 type Chat struct {
 	ID int64 `json:"id"`
+}
+
+// User is the sender of a message (only id/username are used, for logging).
+type User struct {
+	ID       int64  `json:"id"`
+	Username string `json:"username"`
 }
 
 // Client talks to the Telegram Bot API. It holds the bot token — the dispatcher

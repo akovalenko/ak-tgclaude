@@ -103,7 +103,7 @@ func TestClientGetUpdates(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewDecoder(r.Body).Decode(&body)
 		io.WriteString(w, `{"ok":true,"result":[
-			{"update_id":10,"message":{"message_id":5,"text":"hi","chat":{"id":99}}},
+			{"update_id":10,"message":{"message_id":5,"text":"hi","chat":{"id":99},"from":{"id":7,"username":"bob"}}},
 			{"update_id":11,"message":{"message_id":6,"text":"yo","chat":{"id":99},"reply_to_message":{"message_id":5}}}
 		]}`)
 	}))
@@ -125,6 +125,21 @@ func TestClientGetUpdates(t *testing.T) {
 	}
 	if ups[1].Message.ReplyTo == nil || ups[1].Message.ReplyTo.MessageID != 5 {
 		t.Errorf("reply_to not parsed: %+v", ups[1].Message)
+	}
+	if ups[0].Message.From == nil || ups[0].Message.From.ID != 7 || ups[0].Message.From.Username != "bob" {
+		t.Errorf("from not parsed: %+v", ups[0].Message.From)
+	}
+}
+
+func TestUserLabel(t *testing.T) {
+	if got := userLabel(nil); got != "?" {
+		t.Errorf("nil user => %q", got)
+	}
+	if got := userLabel(&User{ID: 7}); got != "7" {
+		t.Errorf("id-only => %q", got)
+	}
+	if got := userLabel(&User{ID: 7, Username: "bob"}); got != "7(@bob)" {
+		t.Errorf("id+username => %q", got)
 	}
 }
 
