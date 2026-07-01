@@ -261,7 +261,7 @@ func runDispatch(args []string) {
 			fmt.Fprintf(os.Stderr, "ak-tgclaude: dispatch: %v\n", err)
 			os.Exit(1)
 		}
-		resp = &claudeResponder{agent: cfg.Agent, cwd: cwd}
+		resp = &claudeResponder{agent: cfg.Agent, cwd: cwd, project: cfg.Project}
 	}
 
 	d := &Dispatcher{

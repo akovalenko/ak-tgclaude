@@ -30,10 +30,15 @@ type Responder interface {
 	Respond(ctx context.Context, req RespondRequest) (RespondResult, error)
 }
 
+// projectEnv tells the responder where the project it consults on lives, so its
+// agent can explore it (read-only) by absolute path.
+const projectEnv = "AK_TGCLAUDE_PROJECT"
+
 // claudeResponder spawns a headless `claude -p` for each update.
 type claudeResponder struct {
-	agent string // --agent <name>; empty => the configured default agent
-	cwd   string // responder cwd (the materialized scaffold: settings.json + skills)
+	agent   string // --agent <name>; empty => the configured default agent
+	cwd     string // responder cwd (the materialized scaffold: settings.json + skills)
+	project string // the project the agent answers about ($AK_TGCLAUDE_PROJECT)
 }
 
 // Respond runs `claude -p [--agent] [--resume] --output-format json`, feeding
@@ -42,7 +47,7 @@ type claudeResponder struct {
 func (c *claudeResponder) Respond(ctx context.Context, req RespondRequest) (RespondResult, error) {
 	cmd := exec.CommandContext(ctx, "claude", buildClaudeArgs(c.agent, req.SessionID, req.OutboxDir)...)
 	cmd.Dir = c.cwd
-	cmd.Env = append(os.Environ(), outboxEnv+"="+req.OutboxDir)
+	cmd.Env = append(os.Environ(), outboxEnv+"="+req.OutboxDir, projectEnv+"="+c.project)
 	cmd.Stdin = strings.NewReader(req.Prompt)
 	var out bytes.Buffer
 	cmd.Stdout = &out

@@ -1,12 +1,22 @@
 package main
 
 import (
+	"embed"
 	"encoding/json"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
 )
+
+// scaffoldAssets are the static responder assets copied into <cwd>/.claude:
+// the responder agent(s) and the shared emission skill. They carry no runtime
+// paths, so they are embedded verbatim (unlike settings.json, which is
+// generated).
+//
+//go:embed assets
+var scaffoldAssets embed.FS
 
 // The responder's generated .claude/settings.json is built from these structs
 // (not a text template) so the literal, runtime-computed paths are inserted
@@ -172,7 +182,35 @@ func materializeScaffold(cwd string, p scaffoldParams) error {
 	if err := os.WriteFile(path, b, 0o600); err != nil {
 		return fmt.Errorf("writing %s: %w", path, err)
 	}
-	return nil
+	return materializeAssets(claudeDir)
+}
+
+// materializeAssets copies the embedded agents/skills tree into <cwd>/.claude.
+func materializeAssets(claudeDir string) error {
+	return fs.WalkDir(scaffoldAssets, "assets", func(p string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		rel, err := filepath.Rel("assets", p)
+		if err != nil {
+			return err
+		}
+		if rel == "." {
+			return nil
+		}
+		dst := filepath.Join(claudeDir, rel)
+		if d.IsDir() {
+			return os.MkdirAll(dst, 0o700)
+		}
+		data, err := scaffoldAssets.ReadFile(p)
+		if err != nil {
+			return err
+		}
+		if err := os.MkdirAll(filepath.Dir(dst), 0o700); err != nil {
+			return err
+		}
+		return os.WriteFile(dst, data, 0o600)
+	})
 }
 
 // buildInvocationSettings returns the per-invocation --settings JSON that grants

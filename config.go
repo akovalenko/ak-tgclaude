@@ -27,6 +27,9 @@ const (
 	ResponderStub   = "stub"   // fixed-reply stub for Telegram I/O smoke tests
 )
 
+// defaultAgent is the responder agent shipped in the scaffold (assets/agents).
+const defaultAgent = "faq-responder"
+
 // Config is the resolved dispatcher configuration, populated from a TOML file
 // and/or CLI flags. Precedence: flags > file > defaults.
 type Config struct {
@@ -95,7 +98,7 @@ func parseConfig(args []string) (*Config, error) {
 	botToken := fs.String("bot-token", "", "Telegram bot token (overrides config; visible in host ps — prefer the config file in production)")
 	profile := fs.String("profile", "", "access profile: qa|dev|ops (default qa, read-only)")
 	project := fs.String("project", "", "path to the project the responder consults on (read-only)")
-	agent := fs.String("agent", "", "responder agent name for `claude -p --agent` (default: cwd's default agent)")
+	agent := fs.String("agent", "", "responder agent name for `claude -p --agent` (default: the shipped faq-responder)")
 	responder := fs.String("responder", "", "responder implementation: claude|stub (default claude; stub replies a fixed line for Telegram I/O tests)")
 	cwd := fs.String("cwd", "", "fixed responder cwd to materialize into and keep (default: ephemeral, removed on exit)")
 	maxConcurrent := fs.Int("max-concurrent", 0, "max responders running at once (per-chat is always serialized; default 4)")
@@ -148,6 +151,9 @@ func (c *Config) applyDefaults() {
 	}
 	if c.Responder == "" {
 		c.Responder = ResponderClaude
+	}
+	if c.Agent == "" {
+		c.Agent = defaultAgent
 	}
 	if c.MaxConcurrent == 0 {
 		c.MaxConcurrent = 4

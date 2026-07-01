@@ -71,4 +71,14 @@ func TestMaterializeScaffoldWritesValidJSON(t *testing.T) {
 	if _, ok := round["hooks"]; !ok {
 		t.Errorf("settings.json missing hooks")
 	}
+
+	// The embedded responder agent and emission skill must be materialized too.
+	for _, rel := range []string{
+		filepath.Join("agents", defaultAgent+".md"),
+		filepath.Join("skills", "tg-emit", "SKILL.md"),
+	} {
+		if _, err := os.Stat(filepath.Join(cwd, ".claude", rel)); err != nil {
+			t.Errorf("asset not materialized: %s (%v)", rel, err)
+		}
+	}
 }

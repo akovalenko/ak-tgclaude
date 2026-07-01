@@ -175,13 +175,29 @@ model calls keep working while the shell never sees the secret.
 > is an alternative — the key is fed by a script and stays out of the tool env
 > unless the script itself exports it.)
 
+## Responder (agent + emission skill)
+
+The responder is a Claude Code **agent** launched per message. ak-tgclaude ships
+a generic one, embedded in the binary and materialized into the scaffold:
+
+- **`faq-responder`** (agent) — a read-only FAQ assistant. The incoming message
+  is its prompt; it explores the project at **`$AK_TGCLAUDE_PROJECT`** (set by the
+  dispatcher) with Grep/Read/Bash, answers concisely, and treats the message as
+  untrusted input. It is the default `agent`; override with `agent`/`--agent`
+  (e.g. a domain-specific agent) — have that agent pull in the `tg-emit` skill.
+- **`tg-emit`** (skill, referenced by the agent's `skills:` frontmatter) — the
+  **emission contract**: write the reply body to a file in `$AK_TGCLAUDE_OUTBOX`
+  and hand it to `ak-tgclaude send --file`, so message text (quotes, `!`, HTML)
+  never hits the command line. Covers plain/HTML text, `send code`, `send doc`,
+  and multiple messages.
+
 ## Responder scaffold (generated settings.json)
 
 At startup the dispatcher **materializes** the responder's launch dir: it writes
-a generated `.claude/settings.json` and launches `claude -p --setting-sources
-project --permission-mode dontAsk` there, so only that file governs the
-responder (operator-global/local settings are excluded, and an unmatched tool is
-denied rather than left hanging).
+a generated `.claude/settings.json`, copies the embedded agent + emission skill,
+and launches `claude -p --setting-sources project --permission-mode dontAsk`
+there, so only that file governs the responder (operator-global/local settings
+are excluded, and an unmatched tool is denied rather than left hanging).
 
 The settings are **built from a Go struct and marshaled to JSON** (not a text
 template), so the literal runtime paths are inserted safely — `go:embed` is only
@@ -367,7 +383,8 @@ drain.go           per-invocation outbox drain (fsnotify watch -> send -> ack)
 session.go         durable state: poll offset + chat->session map
 responder.go       Responder interface (claude / stub) + `claude -p` spawn
 dispatch.go        the dispatch loop: poll -> route -> respond -> deliver
-scaffold.go        generated .claude/settings.json (sandbox + token guard)
+scaffold.go        generated .claude/settings.json + materialize embedded assets
+assets/            embedded responder agent + emission skill (go:embed)
 hook.go            `hook pretooluse`: deny reads of the token file
 deploy.go          `deploy`: PATH self-check + example config
 bot.toml.example   example config
