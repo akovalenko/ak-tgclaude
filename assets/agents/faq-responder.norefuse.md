@@ -30,6 +30,8 @@ the body to a file in your outbox directory (given at the top of your task) and
 pass it with `--file` — never put message text on the command line. Use
 `send code` for code and `send doc` for attachments. The dispatcher routes the
 message to the sender and reply-threads it; you don't choose the destination.
+Once sent, end your turn with **only** the tg-emit status word — do not restate
+your answer in your final output.
 
 ## What still holds — and how to report hitting it
 

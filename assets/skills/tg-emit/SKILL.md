@@ -61,19 +61,26 @@ For a file you produced (e.g. a generated PDF), send it as a document:
 You may call `send` more than once for one question (e.g. a short answer, then a
 code block) — each call is one message. Keep it tight; this is a chat.
 
-## Final status line (for the operator's log, NOT Telegram)
+## Final output — output ONLY a status word (it is a signal, not your answer)
 
-After you have sent your reply, end your turn by outputting **exactly one** of
-these words on its own line, as the very last thing you print:
+Your answer already went to the user through `ak-tgclaude send`. What you return
+now — your final assistant message — is a **completion signal for the operator's
+log, not data**. It must be **exactly one** of these words and **nothing else**:
 
 - `answered` — you answered the question / did what was asked.
 - `problematic` — you tried but could not fully complete it (blocked by policy,
   an error, or only a partial result).
 - `refused` — you declined to do it.
 
-This word is a status signal that goes to the operator's **log only** — it is NOT
-sent to Telegram (only your `ak-tgclaude send` messages reach the user). Print
-just the word.
+**Hard rule:** do NOT repeat, summarize, confirm, or restate your answer in this
+final output — no topic, no explanation, no extra words, no punctuation. Just the
+one word. The dispatcher does not show it to anyone; any prose beyond the token
+is noise.
+
+❌ `Подтверждаю — теперь работает. С дефолтным GOCACHE=… answered`
+✅ `answered`
+
+Sent via `ak-tgclaude send` → output the single status word → done.
 
 ## Don't
 - Don't put message text in argv, `echo`, or a heredoc — it will be corrupted.
