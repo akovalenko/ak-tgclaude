@@ -77,8 +77,10 @@ Three distinct locations, following the XDG split:
 
 ## Dispatch loop & sessions
 
-The dispatcher long-polls `getUpdates` and processes updates **sequentially**
-(per-chat concurrency is a later optimization). For each message:
+The dispatcher long-polls `getUpdates` and dispatches each update to a **per-chat
+worker**: different chats are handled **concurrently** (bounded by
+`max_concurrent`), while updates within one chat are **serialized** (so they
+never race on the same `--resume` session). For each message:
 
 1. **`/clear`** drops the chat's session and acks — the next message starts fresh.
    This is the explicit "break the user↔session association" lever.
@@ -94,10 +96,16 @@ The dispatcher long-polls `getUpdates` and processes updates **sequentially**
 
 **The per-invocation outbox dir is the route capability.** The dispatcher pins
 the route in memory and binds it to the directory it handed this one responder;
-the responder only writes its message, never names a chat — a confused-deputy is
-closed by construction, no separate uid needed. (This is the route-binding
-decision the spool transport deliberately left open: a private dir per
-invocation, rather than a shared spool plus a per-message token.)
+the responder never names a chat, so it cannot retarget a message by descriptor
+content — the route is decided by *which* outbox dir the descriptor lands in.
+(This is the route-binding decision the spool transport deliberately left open: a
+private dir per invocation, rather than a shared spool plus a per-message token.)
+
+> Under concurrency this relies on a responder being able to write **only to its
+> own** outbox — otherwise a prompt-injected responder could enumerate sibling
+> dirs and drop a descriptor into another chat's outbox. That per-invocation
+> write isolation is enforced by the sandbox grant; see the plan for the exact
+> mechanism being finalized.
 
 Session ids are **not** derived from the chat id — Claude Code mints a fresh one
 per new conversation and the dispatcher captures it, so `/clear` can truly sever

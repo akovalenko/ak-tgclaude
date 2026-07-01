@@ -46,6 +46,10 @@ type Config struct {
 	// Telegram I/O path without a model or scaffold.
 	Responder string `toml:"responder"`
 
+	// MaxConcurrent caps how many responders run at once. Updates are serialized
+	// per chat, but different chats run concurrently up to this bound. Default 4.
+	MaxConcurrent int `toml:"max_concurrent"`
+
 	// Project is the codebase the responder consults on (read-only under "qa").
 	// The sandbox and PreToolUse confine the responder's reads here.
 	Project string `toml:"project"`
@@ -94,6 +98,7 @@ func parseConfig(args []string) (*Config, error) {
 	agent := fs.String("agent", "", "responder agent name for `claude -p --agent` (default: cwd's default agent)")
 	responder := fs.String("responder", "", "responder implementation: claude|stub (default claude; stub replies a fixed line for Telegram I/O tests)")
 	cwd := fs.String("cwd", "", "fixed responder cwd to materialize into and keep (default: ephemeral, removed on exit)")
+	maxConcurrent := fs.Int("max-concurrent", 0, "max responders running at once (per-chat is always serialized; default 4)")
 	if err := fs.Parse(args); err != nil {
 		return nil, err
 	}
@@ -124,6 +129,9 @@ func parseConfig(args []string) (*Config, error) {
 	if *cwd != "" {
 		c.Cwd = *cwd
 	}
+	if *maxConcurrent != 0 {
+		c.MaxConcurrent = *maxConcurrent
+	}
 
 	c.applyDefaults()
 	c.Project = expandTilde(c.Project)
@@ -140,6 +148,9 @@ func (c *Config) applyDefaults() {
 	}
 	if c.Responder == "" {
 		c.Responder = ResponderClaude
+	}
+	if c.MaxConcurrent == 0 {
+		c.MaxConcurrent = 4
 	}
 	if c.StateDir == "" {
 		c.StateDir = defaultStateDir()
@@ -159,6 +170,9 @@ func (c *Config) validate() error {
 		return fmt.Errorf("profile %q is reserved but not implemented yet (only %q works)", c.Profile, ProfileQA)
 	default:
 		return fmt.Errorf("unknown profile %q (want qa|dev|ops)", c.Profile)
+	}
+	if c.MaxConcurrent < 1 {
+		return fmt.Errorf("max_concurrent must be >= 1, got %d", c.MaxConcurrent)
 	}
 	switch c.Responder {
 	case ResponderClaude:

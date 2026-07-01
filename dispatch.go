@@ -9,6 +9,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 )
@@ -20,41 +21,113 @@ const defaultPollTimeout = 30
 // Dispatcher is the long-lived process: it long-polls Telegram, routes each
 // update to a responder, and delivers the responder's outbound messages.
 type Dispatcher struct {
-	client      *Client // getUpdates
-	sender      Sender  // sendMessage/sendDocument (= client in production)
-	store       *SessionStore
-	resp        Responder
-	outboxRoot  string // writable root under which per-invocation outbox dirs are created
-	pollTimeout int
+	client        *Client // getUpdates
+	sender        Sender  // sendMessage/sendDocument (= client in production)
+	store         *SessionStore
+	resp          Responder
+	outboxRoot    string // writable root under which per-invocation outbox dirs are created
+	pollTimeout   int
+	maxConcurrent int // cap on responders running at once
 }
 
-// Run long-polls and processes updates sequentially until ctx is cancelled.
+// Run long-polls and dispatches updates to per-chat workers until ctx is
+// cancelled. Different chats are handled concurrently (bounded by
+// maxConcurrent); updates within one chat are serialized.
 func (d *Dispatcher) Run(ctx context.Context) error {
+	workers := newChatWorkers(ctx, d.handleUpdate, d.maxConcurrent)
 	offset := d.store.Offset()
-	for {
-		if err := ctx.Err(); err != nil {
-			return err
-		}
+	for ctx.Err() == nil {
 		updates, err := d.client.GetUpdates(ctx, offset, d.pollTimeout)
 		if err != nil {
 			if ctx.Err() != nil {
-				return ctx.Err()
+				break
 			}
 			log.Printf("ak-tgclaude: getUpdates: %v", err)
 			if !sleep(ctx, 3*time.Second) {
-				return ctx.Err()
+				break
 			}
 			continue
 		}
 		for _, u := range updates {
-			d.handleUpdate(ctx, u)
+			workers.dispatch(u)
 			offset = u.UpdateID + 1
 			if err := d.store.SetOffset(offset); err != nil {
 				log.Printf("ak-tgclaude: persisting offset: %v", err)
 			}
 		}
 	}
+	workers.wait()
+	return ctx.Err()
 }
+
+// chatWorkers serializes updates per chat while running different chats
+// concurrently, bounded by a global responder cap. A worker goroutine per chat
+// drains that chat's queue in order; the semaphore caps how many run at once.
+type chatWorkers struct {
+	ctx    context.Context
+	handle func(context.Context, Update)
+	sem    chan struct{}
+
+	mu      sync.Mutex
+	workers map[int64]chan Update
+	wg      sync.WaitGroup
+}
+
+func newChatWorkers(ctx context.Context, handle func(context.Context, Update), maxConcurrent int) *chatWorkers {
+	if maxConcurrent < 1 {
+		maxConcurrent = 1
+	}
+	return &chatWorkers{
+		ctx:     ctx,
+		handle:  handle,
+		sem:     make(chan struct{}, maxConcurrent),
+		workers: make(map[int64]chan Update),
+	}
+}
+
+// dispatch routes an update to its chat's worker, creating one on first sight.
+func (w *chatWorkers) dispatch(u Update) {
+	if u.Message == nil {
+		return // non-message update: no chat to serialize on
+	}
+	chat := u.Message.Chat.ID
+	w.mu.Lock()
+	ch, ok := w.workers[chat]
+	if !ok {
+		ch = make(chan Update, 128)
+		w.workers[chat] = ch
+		w.wg.Add(1)
+		go w.serve(ch)
+	}
+	w.mu.Unlock()
+
+	select {
+	case ch <- u:
+	case <-w.ctx.Done():
+	}
+}
+
+// serve drains one chat's queue sequentially, each update taking a global slot.
+func (w *chatWorkers) serve(ch chan Update) {
+	defer w.wg.Done()
+	for {
+		select {
+		case <-w.ctx.Done():
+			return
+		case u := <-ch:
+			select {
+			case w.sem <- struct{}{}:
+			case <-w.ctx.Done():
+				return
+			}
+			w.handle(w.ctx, u)
+			<-w.sem
+		}
+	}
+}
+
+// wait blocks until all worker goroutines have exited (after ctx is done).
+func (w *chatWorkers) wait() { w.wg.Wait() }
 
 // handleUpdate processes one update: /clear resets the chat's session; anything
 // else is answered by a responder whose outbound messages are delivered to the
@@ -193,12 +266,13 @@ func runDispatch(args []string) {
 	}
 
 	d := &Dispatcher{
-		client:      client,
-		sender:      client,
-		store:       store,
-		resp:        resp,
-		outboxRoot:  outboxRoot,
-		pollTimeout: defaultPollTimeout,
+		client:        client,
+		sender:        client,
+		store:         store,
+		resp:          resp,
+		outboxRoot:    outboxRoot,
+		pollTimeout:   defaultPollTimeout,
+		maxConcurrent: cfg.MaxConcurrent,
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -208,8 +282,8 @@ func runDispatch(args []string) {
 	if ephemeral {
 		kind = "ephemeral"
 	}
-	log.Printf("ak-tgclaude: dispatch: responder=%s cwd=%s (%s) state=%s token=%s",
-		cfg.Responder, cwd, kind, cfg.StateDir, redact(cfg.BotToken))
+	log.Printf("ak-tgclaude: dispatch: responder=%s cwd=%s (%s) max_concurrent=%d state=%s token=%s",
+		cfg.Responder, cwd, kind, cfg.MaxConcurrent, cfg.StateDir, redact(cfg.BotToken))
 
 	runErr := d.Run(ctx)
 

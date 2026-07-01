@@ -31,6 +31,10 @@ project = "~/code/example-project"
 
 # --- optional overrides (defaults shown) ---
 
+# Max responders running at once. Updates are always serialized per chat;
+# different chats run concurrently up to this bound.
+# max_concurrent = 4
+
 # Fixed responder cwd. When set, the generated .claude/settings.json is
 # materialized here and kept (inspect it, drop a settings.local.json, run claude
 # by hand). Default: an ephemeral dir removed on shutdown. See also the
