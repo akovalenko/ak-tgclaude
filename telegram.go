@@ -253,18 +253,59 @@ func (c *Client) do(req *http.Request) (int, []byte, error) {
 	return resp.StatusCode, body, nil
 }
 
+// apiErrorParams carries the optional parameters object of a non-OK Bot API
+// envelope; only retry_after (429) is consumed.
+type apiErrorParams struct {
+	RetryAfter int `json:"retry_after"`
+}
+
+// APIError is a structured non-OK Telegram Bot API response. The dispatcher's
+// drain type-asserts it (errors.As) to classify a send failure as permanent (a
+// 4xx the responder must fix) or transient (429 / 5xx — retry with back-off);
+// RetryAfter carries an authoritative 429 back-off. Error() keeps the
+// "(HTTP <n>): <description>" shape older tests match on.
+type APIError struct {
+	Code        int    // error_code from the body, else the HTTP status
+	Description string // Telegram's human-readable description
+	RetryAfter  int    // parameters.retry_after in seconds (429 only)
+}
+
+func (e *APIError) Error() string {
+	return fmt.Sprintf("Telegram API error (HTTP %d): %s", e.Code, e.Description)
+}
+
+// pickCode prefers the body's own error_code and falls back to the HTTP status
+// when the envelope omits it.
+func pickCode(errorCode, status int) int {
+	if errorCode != 0 {
+		return errorCode
+	}
+	return status
+}
+
+// newAPIError assembles an *APIError from a decoded non-OK envelope.
+func newAPIError(status, errorCode int, description string, params *apiErrorParams) *APIError {
+	e := &APIError{Code: pickCode(errorCode, status), Description: description}
+	if params != nil {
+		e.RetryAfter = params.RetryAfter
+	}
+	return e
+}
+
 // checkOK verifies a Bot API response envelope carries ok:true (for methods
 // whose result payload the caller does not need, e.g. sendChatAction).
 func checkOK(status int, body []byte) error {
 	var ar struct {
-		OK          bool   `json:"ok"`
-		Description string `json:"description"`
+		OK          bool            `json:"ok"`
+		ErrorCode   int             `json:"error_code"`
+		Description string          `json:"description"`
+		Parameters  *apiErrorParams `json:"parameters"`
 	}
 	if err := json.Unmarshal(body, &ar); err != nil {
 		return fmt.Errorf("decoding Telegram response (HTTP %d): %w", status, err)
 	}
 	if !ar.OK {
-		return fmt.Errorf("Telegram API error (HTTP %d): %s", status, ar.Description)
+		return newAPIError(status, ar.ErrorCode, ar.Description, ar.Parameters)
 	}
 	return nil
 }
@@ -272,8 +313,10 @@ func checkOK(status int, body []byte) error {
 // decodeMessageID unwraps the {ok, result:{message_id}} envelope.
 func decodeMessageID(status int, body []byte) (int64, error) {
 	var ar struct {
-		OK          bool   `json:"ok"`
-		Description string `json:"description"`
+		OK          bool            `json:"ok"`
+		ErrorCode   int             `json:"error_code"`
+		Description string          `json:"description"`
+		Parameters  *apiErrorParams `json:"parameters"`
 		Result      struct {
 			MessageID int64 `json:"message_id"`
 		} `json:"result"`
@@ -282,7 +325,7 @@ func decodeMessageID(status int, body []byte) (int64, error) {
 		return 0, fmt.Errorf("decoding Telegram response (HTTP %d): %w", status, err)
 	}
 	if !ar.OK {
-		return 0, fmt.Errorf("Telegram API error (HTTP %d): %s", status, ar.Description)
+		return 0, newAPIError(status, ar.ErrorCode, ar.Description, ar.Parameters)
 	}
 	return ar.Result.MessageID, nil
 }

@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -217,5 +218,30 @@ func TestClientAPIError(t *testing.T) {
 	_, err := c.SendMessage(context.Background(), Route{ChatID: 1}, "hi", "", false)
 	if err == nil || !strings.Contains(err.Error(), "chat not found") {
 		t.Errorf("err = %v, want it to carry the description", err)
+	}
+}
+
+func TestDecodeAPIErrorFields(t *testing.T) {
+	// 429 with an authoritative retry_after: Code from error_code, RetryAfter set.
+	body := []byte(`{"ok":false,"error_code":429,"parameters":{"retry_after":7},"description":"Too Many Requests"}`)
+	_, err := decodeMessageID(200, body)
+	var ae *APIError
+	if !errors.As(err, &ae) {
+		t.Fatalf("want *APIError, got %T: %v", err, err)
+	}
+	if ae.Code != 429 || ae.RetryAfter != 7 {
+		t.Errorf("code=%d retryAfter=%d, want 429/7", ae.Code, ae.RetryAfter)
+	}
+	if !strings.Contains(ae.Description, "Too Many Requests") {
+		t.Errorf("description = %q", ae.Description)
+	}
+
+	// 400 without error_code: Code falls back to the HTTP status, RetryAfter stays 0.
+	_, err = decodeMessageID(400, []byte(`{"ok":false,"description":"Bad Request"}`))
+	if !errors.As(err, &ae) {
+		t.Fatalf("want *APIError, got %T: %v", err, err)
+	}
+	if ae.Code != 400 || ae.RetryAfter != 0 {
+		t.Errorf("code=%d retryAfter=%d, want 400/0", ae.Code, ae.RetryAfter)
 	}
 }
