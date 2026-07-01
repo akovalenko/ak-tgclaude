@@ -157,6 +157,16 @@ type Config struct {
 	// claude by hand). Empty => an ephemeral cwd the dispatcher removes on exit.
 	Cwd string `toml:"cwd"`
 
+	// Workdir is a static, canon-only workspace root. When set, the responder cwd
+	// is $Workdir/project — materialized from canon on every start (its contents are
+	// reset and regenerated, so unlike Cwd it is NOT a hand-drop overlay) — and the
+	// durable session store moves to $Workdir/state. Because $Workdir/project lives
+	// at a stable path, it can be marked trusted once in ~/.claude.json (trust is
+	// keyed by path, so regenerating the contents keeps it trusted). Mutually
+	// exclusive with Cwd (and with RuntimeBase, which only governs an ephemeral cwd).
+	// The Go build cache stays under StateDir, shared across bots. Also --workdir.
+	Workdir string `toml:"workdir"`
+
 	// RuntimeBase is the base dir under which the ephemeral responder cwd (a
 	// pseudo-random subdir) is created. Empty => $XDG_RUNTIME_DIR, else a temp dir.
 	RuntimeBase string `toml:"runtime_base"`
@@ -203,6 +213,7 @@ func parseConfig(args []string) (*Config, error) {
 	agent := fs.String("agent", "", "responder agent name for `claude -p --agent` (default: the shipped faq-responder)")
 	responder := fs.String("responder", "", "responder implementation: claude|stub (default claude; stub replies a fixed line for Telegram I/O tests)")
 	cwd := fs.String("cwd", "", "fixed responder cwd to materialize into and keep (default: ephemeral, removed on exit)")
+	workdir := fs.String("workdir", "", "static canon-only workspace root: $workdir/project is the responder cwd (regenerated from canon, trusted once) and $workdir/state holds the session store (mutually exclusive with --cwd)")
 	maxConcurrent := fs.Int("max-concurrent", 0, "max responders running at once (per-chat is always serialized; default 4)")
 	noRefuse := fs.Bool("norefuse", false, "materialize the do-what-you're-asked responder (does not decline off-topic; machine guards still apply)")
 	ephemeralSessions := fs.Bool("ephemeral-sessions", false, "keep chat→session bindings in memory only (never persisted; offset still persists; each restart starts fresh)")
@@ -245,6 +256,9 @@ func parseConfig(args []string) (*Config, error) {
 	if *cwd != "" {
 		c.Cwd = *cwd
 	}
+	if *workdir != "" {
+		c.Workdir = *workdir
+	}
 	if *maxConcurrent != 0 {
 		c.MaxConcurrent = *maxConcurrent
 	}
@@ -284,6 +298,7 @@ func parseConfig(args []string) (*Config, error) {
 	// still matches in the hook.
 	c.Project = resolvePath(c.Project)
 	c.Cwd = resolvePath(c.Cwd)
+	c.Workdir = resolvePath(c.Workdir)
 	c.StateDir = resolvePath(c.StateDir)
 	c.RuntimeBase = resolvePath(c.RuntimeBase)
 	c.ConfigPath = resolvePath(c.ConfigPath)
@@ -300,6 +315,7 @@ func parseConfig(args []string) (*Config, error) {
 	for _, pv := range []struct{ field, path string }{
 		{"project", c.Project},
 		{"cwd", c.Cwd},
+		{"workdir", c.Workdir},
 		{"state_dir", c.StateDir},
 		{"runtime_base", c.RuntimeBase},
 		{"config", c.ConfigPath},
@@ -367,6 +383,14 @@ func (c *Config) validate() error {
 		// ok — no project needed
 	default:
 		return fmt.Errorf("unknown responder %q (want claude|stub)", c.Responder)
+	}
+	if c.Workdir != "" {
+		if c.Cwd != "" {
+			return fmt.Errorf("cwd and workdir are mutually exclusive: workdir owns a canon-only $workdir/project, cwd is a separate kept, hand-editable dir")
+		}
+		if c.RuntimeBase != "" {
+			return fmt.Errorf("runtime_base is meaningless with workdir: the responder cwd is the fixed $workdir/project, never ephemeral")
+		}
 	}
 	return nil
 }
