@@ -439,6 +439,13 @@ func runDispatch(args []string) {
 			fmt.Fprintf(os.Stderr, "ak-tgclaude: dispatch: %v\n", err)
 			os.Exit(1)
 		}
+		// Mark the static project trusted once so Claude Code honors its
+		// permissions.allow (and registers Grep/Glob on a vanilla build). Non-fatal:
+		// a failure leaves the responder untrusted (its prior state), which still
+		// works, so log and continue rather than refuse to start.
+		if err := markProjectTrusted(cwd); err != nil {
+			log.Printf("ak-tgclaude: dispatch: marking %s trusted in ~/.claude.json: %v (responder runs untrusted)", cwd, err)
+		}
 	}
 	outboxRoot := filepath.Join(cwd, "outbox")
 	if err := os.MkdirAll(outboxRoot, 0o700); err != nil {
