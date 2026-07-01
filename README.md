@@ -17,7 +17,7 @@ sprawl, one thing to put on `PATH`:
 | mode | where it runs | what it does |
 |------|---------------|--------------|
 | `dispatch` | host (trusted) | holds the bot token in memory, polls Telegram `getUpdates`, routes each update to a responder, watches the outbox spool and sends queued messages |
-| `send` | inside the responder's sandbox | enqueues an outbound Telegram message by dropping a descriptor into the outbox spool (no token, no network) |
+| `send` | inside the responder's sandbox | enqueues an outbound Telegram message (drops a descriptor into the outbox spool; no token, no network), then blocks until the dispatcher reports delivery — exiting non-zero if Telegram rejected it |
 | `hook pretooluse` | as the responder's PreToolUse hook | gates the responder's tool calls (e.g. denies reads of the token file) |
 | `scaffold` | host | materializes a responder `workdir/project` (generated settings.json) without running the dispatcher, to inspect it and run `claude` by hand |
 | `clear` | host | drops every persisted chat→session binding (keeps the getUpdates offset); reads the state dir from `--config` or the default |
@@ -541,6 +541,16 @@ A responder may call `send` several times to emit multiple messages for one
 update (the rich agent facade — text, code, attachments, "think and send more"
 — is preserved).
 
+**`send` blocks on delivery.** After dropping the descriptor it waits (up to 5s)
+for the dispatcher's delivery result, then exits: `0` on success (silently), or on
+timeout — degrading to fire-and-forget, the drop stays queued and drain finishes
+in the background; **non-zero** when Telegram rejected the message, printing the
+error to stderr (a permanent reject such as malformed HTML additionally hints to
+fix and resend). This closes the feedback loop: a responder that emits bad HTML
+sees the failure in the same turn and can correct it. There are **no flags** to
+skip or retune the wait — the responder is not burdened with delivery options, and
+the timeout is a constant.
+
 ### Dispatcher-side delivery (drain)
 
 The dispatcher runs one **drain** per invocation's outbox: it watches the
@@ -557,14 +567,28 @@ the outbox — never taken from the descriptor.
   `parse_mode=HTML`); `code` is wrapped in `<pre><code class="language-…">` with
   the body HTML-escaped; a message over Telegram's 4096-char limit **spills to a
   document** (the raw, unwrapped payload). `document` is a `sendDocument` upload.
-- **Ordering and failures.** Sends are sequential per outbox. A transient send
-  failure stops the pass — leaving that descriptor and everything after it — so a
-  retry preserves order (head-of-line). An unparseable descriptor is moved to
-  `<outbox>/bad/` and skipped, so junk never blocks the queue.
+- **Ordering and failures.** Sends are sequential per outbox. A **permanent
+  reject** (a 4xx Telegram won't accept on retry — bad HTML, blocked chat,
+  chat-not-found; 429 excepted) is moved to `<outbox>/bad/`, a delivery result is
+  written, and the pass **continues** past it, so one bad descriptor can never
+  wedge the queue behind it. A **transient** failure (429 / 5xx / network) stops
+  the pass — leaving that descriptor and everything after it — and is retried with
+  exponential back-off (honoring a 429's `retry_after`), capped, and quarantined
+  as a give-up after a few attempts; stopping the pass preserves order
+  (head-of-line). An unparseable descriptor is likewise moved to `<outbox>/bad/`
+  and skipped, so junk never blocks the queue.
+- **Delivery results / blocking `send`.** On every terminal outcome the drain
+  writes a small result descriptor to `<outbox>/results/<basename>` (correlated
+  1:1 with the drop by filename, written atomically): `ok`+`message_id` on
+  success, or `!ok` with the Telegram description and a `permanent` / give-up flag
+  on failure. `send` blocks polling for its result and maps it to an exit code —
+  see [The `send` surface](#the-send-surface). Results live **inside** the outbox,
+  so the per-invocation `RemoveAll` on teardown sweeps them and **no reaper is
+  needed** — a deliberate simplification over the long-lived host relay.
 
-Each send returns the Telegram `message_id`, which the dispatcher will later map
-back to the responder's session for **reply-resurrection** (replying to an old
-bot message revives its `--resume` session).
+Each successful send returns the Telegram `message_id`, which the dispatcher will
+later map back to the responder's session for **reply-resurrection** (replying to
+an old bot message revives its `--resume` session).
 
 ## Install & deploy
 
@@ -592,7 +616,8 @@ outbox.go          outbound descriptor model + atomic spool drop
 send.go            `send` subcommand (text / code / document)
 render.go          descriptor -> Telegram text/parse_mode, code wrapping, spill
 telegram.go        Telegram Bot API client (getUpdates / sendMessage / sendDocument)
-drain.go           per-invocation outbox drain (fsnotify watch -> send -> ack)
+drain.go           per-invocation outbox drain (fsnotify watch -> send -> ack); classify + back-off
+result.go          delivery result descriptors (drain writes on a terminal outcome, send polls)
 session.go         durable state: poll offset + chat->session map (+ ephemeral mode)
 clear.go           `clear` subcommand: wipe persisted chat->session bindings
 responder.go       Responder interface (claude / stub) + `claude -p` spawn

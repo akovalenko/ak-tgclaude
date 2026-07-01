@@ -83,11 +83,31 @@ attachment* instead of inline text, which is worse to read — so split rather t
 rely on that.) Long **code** needs no splitting: `send code` spills an oversized
 snippet to a document automatically, which is the right form for a big block.
 
+## If `send` fails
+
+`send` waits for delivery and **exits non-zero if Telegram rejected the
+message**, printing the reason to stderr. The usual cause is invalid HTML in
+`--html` — an unescaped `<` or `&`, or a tag Telegram does not allow — which
+comes back as a "can't parse entities" error. When a `send` command fails:
+
+1. **Read the stderr message** — it carries Telegram's own description of what
+   was wrong.
+2. **Fix and resend**: correct the body file (escape the offending character,
+   drop the disallowed tag, or fall back to plain `send text` without `--html`)
+   and run `send` again. Nothing went out yet, so there is no duplicate.
+3. If you genuinely cannot produce a sendable message, emit `problematic` as your
+   final status word.
+
+A `send` that prints `queued; delivery outcome unknown after 5s` and exits `0` is
+**not** a failure — the dispatcher was just slow to confirm; the message is queued
+and will go out. No action needed.
+
 ## Final output — output ONLY a status word (it is a signal, not your answer)
 
-Your answer already went to the user through `ak-tgclaude send`. What you return
-now — your final assistant message — is a **completion signal for the operator's
-log, not data**. It must be **exactly one** of these words and **nothing else**:
+Your answer has already gone to the user through a successful `ak-tgclaude send`
+(if a `send` reported an error, you fixed it and resent — see above). What you
+return now — your final assistant message — is a **completion signal for the
+operator's log, not data**. It must be **exactly one** of these words and **nothing else**:
 
 - `answered` — you answered the question / did what was asked.
 - `problematic` — you tried but could not fully complete it (blocked by policy,
