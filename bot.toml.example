@@ -97,16 +97,20 @@ project = "~/code/example-project"
 # route) still apply, so it can't exceed the read-only contract. Also --norefuse.
 # no_refuse = false
 
-# Fixed responder cwd. When set, the generated .claude/settings.json is
-# materialized here and kept (inspect it, drop a settings.local.json, run claude
-# by hand). Default: an ephemeral dir removed on shutdown. See also the
-# `scaffold` subcommand, which materializes this without running the dispatcher.
-# cwd = "~/qa-cwd"
+# Static workdir. When set, the responder cwd is $workdir/project — regenerated
+# from canon on every start (contents reset, then re-materialized, so a removed
+# wire-skill never lingers) — and the session store moves to $workdir/state.
+# $workdir/project is marked trusted once in ~/.claude.json, so its
+# permissions.allow is honored and (on a vanilla build) Grep/Glob are registered.
+# NOT a hand-drop dir: add skills via wire_skills, not by hand. Default: an
+# ephemeral cwd removed on shutdown. See also the `scaffold` subcommand. Also
+# --workdir.
+# workdir = "~/qa"
 
 # Base directory under which the ephemeral responder cwd is created (a
 # pseudo-random subdir is made inside it). Default: $XDG_RUNTIME_DIR, else a
-# temp dir. The cwd holds only a generated settings.json + skills; it is
-# disposable.
+# temp dir. Only applies to the ephemeral cwd — rejected together with workdir
+# (which uses a fixed $workdir/project instead).
 # runtime_base = ""
 
 # Durable dispatcher state (chat->session and message->session maps), which must

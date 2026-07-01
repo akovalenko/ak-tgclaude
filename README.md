@@ -19,9 +19,9 @@ sprawl, one thing to put on `PATH`:
 | `dispatch` | host (trusted) | holds the bot token in memory, polls Telegram `getUpdates`, routes each update to a responder, watches the outbox spool and sends queued messages |
 | `send` | inside the responder's sandbox | enqueues an outbound Telegram message by dropping a descriptor into the outbox spool (no token, no network) |
 | `hook pretooluse` | as the responder's PreToolUse hook | gates the responder's tool calls (e.g. denies reads of the token file) |
-| `scaffold` | host | materializes a responder cwd (generated settings.json) without running the dispatcher, to inspect it and run `claude` by hand |
+| `scaffold` | host | materializes a responder `workdir/project` (generated settings.json) without running the dispatcher, to inspect it and run `claude` by hand |
 | `clear` | host | drops every persisted chat→session binding (keeps the getUpdates offset); reads the state dir from `--config` or the default |
-| `deploy` | host, once | provisions the project tree, example config, and skills |
+| `deploy` | host, once | writes an example config, checks PATH, and (with `--workdir`) provisions the static workdir + marks it trusted |
 
 ## Configuration
 
@@ -58,7 +58,7 @@ ak-tgclaude dispatch --bot-token 123:ABC --profile qa --project ~/code/myproject
   responder's permissions and what its PreToolUse hook allows. `project`/`profile`
   are single for now; they may grow into a `[[project]]` array (per-project profile)
   later.
-- **Paths.** Every path field (`project`, `cwd`, `wire_skills`, `deny_read`,
+- **Paths.** Every path field (`project`, `workdir`, `wire_skills`, `deny_read`,
   `state_dir`, `runtime_base`, `--config`) takes a leading `~` and is made
   **absolute against the dispatcher's launch cwd**. The responder consumes them
   from a different cwd (the scaffold dir), so they are resolved once, up front —
@@ -82,10 +82,13 @@ Three distinct locations, following the XDG split:
     defeats path-squatting even on a shared base: nobody can pre-create our dir as
     another user to block or hijack writes.
 - **Config** — `$XDG_CONFIG_HOME/ak-tgclaude` (`~/.config/ak-tgclaude`).
-- **Durable state** — `$XDG_STATE_HOME/ak-tgclaude` (`~/.local/state/ak-tgclaude`):
-  the `chat→session` and `message→session` maps, which must survive restarts. It
-  lives here, **not** in the launch cwd (state location must not depend on where
-  the process was started from) nor in the ephemeral cwd (which is wiped).
+- **Durable state** — the `chat→session` and `message→session` maps (in
+  `sessions.json`, alongside the getUpdates offset), which must survive restarts.
+  Default `$XDG_STATE_HOME/ak-tgclaude` (`~/.local/state/ak-tgclaude`); with a
+  `workdir` it moves to `$workdir/state`. Either way it is **not** in the launch cwd
+  (state must not depend on where the process started) nor in the ephemeral cwd
+  (which is wiped). The Go build cache stays under `state_dir` even with a workdir,
+  so it is shared across bots rather than duplicated per-workdir.
 
 ## Dispatch loop & sessions
 
@@ -323,7 +326,7 @@ bot; preloading via `skills:` guarantees it is always in context.
   path. A skill with no placeholder passes through unchanged, so ordinary
   project-agnostic skills wire in the same way.
 - **Path resolution.** A wired path expands a leading `~`, and if relative
-  resolves against the **dispatcher's launch cwd** (like `project`/`cwd`) — never
+  resolves against the **dispatcher's launch cwd** (like `project`/`workdir`) — never
   against the project, since the template may live outside it. For a daemon
   (systemd, unpredictable launch cwd), use an absolute or `~` path.
 - **Structural boundary.** `wire_skills` produces **only** skills under
@@ -429,20 +432,28 @@ lands in, the cross-chat confused-deputy is closed.
 > content) via those tools. Low value (random names; content reads are closed on
 > both the Bash and Read-tool paths) — noted, not yet fenced.
 
-### Fixed vs ephemeral cwd, and `scaffold`
+### Static workdir vs ephemeral cwd, and `scaffold`
 
 By default the responder cwd is **ephemeral** — a pseudo-random dir the
-dispatcher removes on shutdown (SIGINT/SIGTERM). Set **`cwd`** (config or
-`--cwd`) to pin a **fixed** dir instead: it is materialized there and kept, so
-you can read the generated settings, drop a `settings.local.json` override, or
-run `claude` in it by hand. The per-invocation outboxes live under `<cwd>/outbox`
-(so a fixed cwd is self-contained).
+dispatcher removes on shutdown (SIGINT/SIGTERM). Set **`workdir`** (config or
+`--workdir`) to use a **static** one instead: the responder cwd becomes
+`$workdir/project`, regenerated from canon on every start (its contents are reset,
+then the scaffold is re-materialized — so a removed wire-skill never lingers), and
+the session store moves to `$workdir/state`. Because `$workdir/project` sits at a
+stable path, the dispatcher marks it **trusted once** in `~/.claude.json` (trust is
+keyed by path, so the per-start reset keeps it): a trusted workspace keeps its
+`permissions.allow` and, on a vanilla build, its Grep/Glob tools. It is **not** a
+hand-drop workspace — anything you leave in `project/` is wiped on the next start,
+so add skills via `wire_skills`, not by hand. The Go build cache stays under
+`state_dir`, shared across bots. (`workdir` is mutually exclusive with
+`runtime_base`, which only governs the ephemeral cwd.)
 
-The **`scaffold`** subcommand materializes such a cwd **without** running the
-dispatcher — for inspecting the sandbox in isolation:
+The **`scaffold`** subcommand materializes `$workdir/project` **without** running
+the dispatcher — for inspecting the sandbox in isolation (point it at a throwaway
+`--workdir` so you don't disturb a live bot's project):
 
 ```sh
-ak-tgclaude scaffold --cwd ~/qa-inspect --config bot.toml
+ak-tgclaude scaffold --workdir ~/qa-inspect --config bot.toml
 # then run claude there by hand (the command is printed) to watch the sandbox
 ```
 
@@ -451,9 +462,11 @@ ak-tgclaude scaffold --cwd ~/qa-inspect --config bot.toml
 - Runs in its **own (ephemeral) cwd**, launched with `--setting-sources project`
   so only that project's generated `.claude/settings.json` is read —
   operator-global and local settings are excluded.
-- The cwd is added to `sandbox.filesystem.allowWrite` so the responder may write
-  there. Because settings paths are **not** environment-expanded, the binary
-  writes the **literal** computed cwd path into the generated settings.json.
+- Its writable surface is minimal: `sandbox.filesystem.allowWrite` grants only the
+  **cache dir** (static) and this invocation's **outbox** (a per-invocation
+  `--settings` overlay) — the responder cwd is otherwise read-only. Because settings
+  paths are **not** environment-expanded, the binary writes the **literal** computed
+  paths into the generated settings.json.
 - Uses an **isolated module/tool cache** so its activity does not touch the host's.
 
 ## Outbound transport: an outbox directory
