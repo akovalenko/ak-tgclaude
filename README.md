@@ -104,8 +104,8 @@ private dir per invocation, rather than a shared spool plus a per-message token.
 > Under concurrency this relies on a responder being able to write **only to its
 > own** outbox — otherwise a prompt-injected responder could enumerate sibling
 > dirs and drop a descriptor into another chat's outbox. That per-invocation
-> write isolation is enforced by the sandbox grant; see the plan for the exact
-> mechanism being finalized.
+> write isolation is enforced by a `--settings` overlay on both the Write-tool
+> and sandbox layers — see [Per-invocation write isolation](#per-invocation-write-isolation).
 
 Session ids are **not** derived from the chat id — Claude Code mints a fresh one
 per new conversation and the dispatcher captures it, so `/clear` can truly sever
@@ -192,12 +192,29 @@ deployment, the generated file:
   send` run without prompts) and `allowUnsandboxedCommands: false` (no escape);
 - points the Go caches (`GOCACHE`/`GOMODCACHE`/…) at an **isolated** dir, and
   allows egress only to `proxy.golang.org`/`sum.golang.org`/`storage.googleapis.com`;
-- grants sandbox writes only to the outbox root and the cache dir;
+- grants sandbox writes to only the cache dir — **not** the outbox (that is
+  per-invocation, see below);
 - installs the **token guard**: `sandbox.credentials.files` deny-read on the
   config file, `credentials.envVars` deny (unset) for `ANTHROPIC_*`, and the
   PreToolUse hook `ak-tgclaude hook pretooluse --deny-read <token file>` (bare
   PATH name). The hook denies any Read/Bash that touches the token; the
   deny-read is the authoritative backstop against obfuscation.
+
+### Per-invocation write isolation
+
+The static settings above grant **no** outbox write. Instead, each `claude -p` is
+launched with a per-invocation `--settings` overlay that grants write to **exactly
+its own** outbox, on both layers — the Write tool (`permissions.allow:
+Write(<outbox>/**)`) and sandboxed Bash (`sandbox.filesystem.allowWrite:
+[<outbox>]`) — merged on top of the static settings (both arrays merge across
+`--settings` and the project file; verified empirically). Only `hooks` cannot be
+injected via `--settings`, which is why the hook lives in the materialized file.
+
+So a concurrent, possibly prompt-injected responder cannot drop a descriptor into
+another chat's outbox: not with the Write tool (permission denies it) and not via
+Bash (`cp`, redirect, or `ak-tgclaude send --outbox <sibling>` — the sandbox
+denies the write). Combined with the dispatcher deciding the route from *which*
+outbox a descriptor lands in, the cross-chat confused-deputy is closed.
 
 ### Fixed vs ephemeral cwd, and `scaffold`
 

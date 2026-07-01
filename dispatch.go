@@ -255,9 +255,8 @@ func runDispatch(args []string) {
 		// the literal runtime paths: sandbox, token deny-read, hook) and launch
 		// the responder there with --setting-sources project.
 		if err := materializeScaffold(cwd, scaffoldParams{
-			CacheDir:   filepath.Join(cfg.StateDir, "cache"),
-			OutboxRoot: outboxRoot,
-			TokenFile:  cfg.ConfigPath,
+			CacheDir:  filepath.Join(cfg.StateDir, "cache"),
+			TokenFile: cfg.ConfigPath,
 		}); err != nil {
 			fmt.Fprintf(os.Stderr, "ak-tgclaude: dispatch: %v\n", err)
 			os.Exit(1)

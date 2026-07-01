@@ -10,9 +10,8 @@ import (
 
 func TestBuildSettingsShape(t *testing.T) {
 	s := buildSettings(scaffoldParams{
-		CacheDir:   "/state/cache",
-		OutboxRoot: "/run/out",
-		TokenFile:  "/cfg/bot.toml",
+		CacheDir:  "/state/cache",
+		TokenFile: "/cfg/bot.toml",
 	})
 
 	if !s.Sandbox.Enabled || !s.Sandbox.AutoAllowBashIfSandboxed || s.Sandbox.AllowUnsandboxedCommands {
@@ -21,8 +20,15 @@ func TestBuildSettingsShape(t *testing.T) {
 	if s.Env["GOMODCACHE"] != "/state/cache/go-mod" {
 		t.Errorf("GOMODCACHE = %q", s.Env["GOMODCACHE"])
 	}
-	if got := s.Sandbox.Filesystem.AllowWrite; len(got) != 2 || got[0] != "/run/out" {
-		t.Errorf("allowWrite = %v", got)
+	// The static settings grant NO outbox write (that is per-invocation): only
+	// the cache is writable, and only Read is allowed.
+	if got := s.Sandbox.Filesystem.AllowWrite; len(got) != 1 || got[0] != "/state/cache" {
+		t.Errorf("allowWrite should be just the cache, got %v", got)
+	}
+	for _, a := range s.Permissions.Allow {
+		if strings.HasPrefix(a, "Write(") {
+			t.Errorf("static settings must not grant Write, got %v", s.Permissions.Allow)
+		}
 	}
 	if len(s.Sandbox.Credentials.Files) != 1 || s.Sandbox.Credentials.Files[0].Path != "/cfg/bot.toml" ||
 		s.Sandbox.Credentials.Files[0].Mode != "deny" {
@@ -37,21 +43,10 @@ func TestBuildSettingsShape(t *testing.T) {
 	if !strings.HasPrefix(cmd, "ak-tgclaude hook pretooluse") || !strings.Contains(cmd, "--deny-read '/cfg/bot.toml'") {
 		t.Errorf("hook command = %q", cmd)
 	}
-
-	// Write permission is confined to the outbox root.
-	foundWrite := false
-	for _, a := range s.Permissions.Allow {
-		if a == "Write(/run/out/**)" {
-			foundWrite = true
-		}
-	}
-	if !foundWrite {
-		t.Errorf("permissions.allow missing outbox write: %v", s.Permissions.Allow)
-	}
 }
 
 func TestBuildSettingsNoTokenFile(t *testing.T) {
-	s := buildSettings(scaffoldParams{CacheDir: "/c", OutboxRoot: "/o"})
+	s := buildSettings(scaffoldParams{CacheDir: "/c"})
 	if s.Sandbox.Credentials.Files != nil {
 		t.Errorf("no token file => no credentials.files, got %+v", s.Sandbox.Credentials.Files)
 	}
@@ -62,7 +57,7 @@ func TestBuildSettingsNoTokenFile(t *testing.T) {
 
 func TestMaterializeScaffoldWritesValidJSON(t *testing.T) {
 	cwd := t.TempDir()
-	if err := materializeScaffold(cwd, scaffoldParams{CacheDir: "/c", OutboxRoot: "/o", TokenFile: "/cfg/bot.toml"}); err != nil {
+	if err := materializeScaffold(cwd, scaffoldParams{CacheDir: "/c", TokenFile: "/cfg/bot.toml"}); err != nil {
 		t.Fatalf("materializeScaffold: %v", err)
 	}
 	b, err := os.ReadFile(filepath.Join(cwd, ".claude", "settings.json"))

@@ -8,13 +8,39 @@ import (
 
 func TestBuildClaudeArgs(t *testing.T) {
 	base := "-p --output-format json --setting-sources project --permission-mode dontAsk"
-	if got := strings.Join(buildClaudeArgs("", ""), " "); got != base {
+
+	// No outbox => no --settings overlay.
+	if got := strings.Join(buildClaudeArgs("", "", ""), " "); got != base {
 		t.Errorf("bare args = %q", got)
 	}
-	got := strings.Join(buildClaudeArgs("eputs-telegram-guide", "sess-7"), " ")
-	want := base + " --agent eputs-telegram-guide --resume sess-7"
-	if got != want {
-		t.Errorf("full args = %q, want %q", got, want)
+
+	// With an outbox, a --settings overlay granting just that outbox is inserted
+	// before --agent/--resume.
+	got := buildClaudeArgs("eputs-telegram-guide", "sess-7", "/run/out/outbox-A1")
+	joined := strings.Join(got, " ")
+	if !strings.Contains(joined, "--settings ") {
+		t.Fatalf("expected --settings overlay: %q", joined)
+	}
+	if !strings.Contains(joined, `Write(/run/out/outbox-A1/**)`) ||
+		!strings.Contains(joined, `"allowWrite":["/run/out/outbox-A1"]`) {
+		t.Errorf("overlay missing per-invocation grants: %q", joined)
+	}
+	if !strings.HasSuffix(joined, "--agent eputs-telegram-guide --resume sess-7") {
+		t.Errorf("agent/resume should come after --settings: %q", joined)
+	}
+}
+
+func TestBuildInvocationSettings(t *testing.T) {
+	if buildInvocationSettings("") != "" {
+		t.Errorf("empty outbox => empty overlay")
+	}
+	s := buildInvocationSettings("/o/x")
+	if !strings.Contains(s, `"allow":["Write(/o/x/**)"]`) || !strings.Contains(s, `"allowWrite":["/o/x"]`) {
+		t.Errorf("overlay JSON wrong: %s", s)
+	}
+	// Must NOT touch sandbox.enabled etc. (would clobber the merged base).
+	if strings.Contains(s, "enabled") {
+		t.Errorf("overlay should only carry allowWrite, got: %s", s)
 	}
 }
 

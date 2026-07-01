@@ -40,7 +40,7 @@ type claudeResponder struct {
 // the prompt on stdin and pointing the responder's `send` at OutboxDir. It
 // returns the session id parsed from the JSON result.
 func (c *claudeResponder) Respond(ctx context.Context, req RespondRequest) (RespondResult, error) {
-	cmd := exec.CommandContext(ctx, "claude", buildClaudeArgs(c.agent, req.SessionID)...)
+	cmd := exec.CommandContext(ctx, "claude", buildClaudeArgs(c.agent, req.SessionID, req.OutboxDir)...)
 	cmd.Dir = c.cwd
 	cmd.Env = append(os.Environ(), outboxEnv+"="+req.OutboxDir)
 	cmd.Stdin = strings.NewReader(req.Prompt)
@@ -55,13 +55,18 @@ func (c *claudeResponder) Respond(ctx context.Context, req RespondRequest) (Resp
 
 // buildClaudeArgs assembles the `claude -p` argument list. It loads only the
 // responder cwd's project settings (--setting-sources project) so the generated
-// scaffold governs sandbox/permissions/hooks, and runs headless deny-by-default
-// (--permission-mode dontAsk) so an unmatched tool is denied, not hung on.
-func buildClaudeArgs(agent, sessionID string) []string {
+// scaffold governs sandbox/permissions/hooks, runs headless deny-by-default
+// (--permission-mode dontAsk) so an unmatched tool is denied rather than hung
+// on, and overlays a per-invocation --settings that grants write to just this
+// invocation's outbox (merged on top of the static settings).
+func buildClaudeArgs(agent, sessionID, outbox string) []string {
 	args := []string{
 		"-p", "--output-format", "json",
 		"--setting-sources", "project",
 		"--permission-mode", "dontAsk",
+	}
+	if s := buildInvocationSettings(outbox); s != "" {
+		args = append(args, "--settings", s)
 	}
 	if agent != "" {
 		args = append(args, "--agent", agent)

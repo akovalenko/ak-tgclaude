@@ -75,9 +75,11 @@ type hookEntry struct {
 }
 
 // scaffoldParams are the runtime-computed values baked into settings.json.
+// Note: the outbox is NOT granted here — write access to a specific outbox is
+// added per invocation via buildInvocationSettings, so concurrent responders are
+// each confined to their own.
 type scaffoldParams struct {
 	CacheDir       string   // isolated Go caches root
-	OutboxRoot     string   // writable root that holds per-invocation outboxes
 	TokenFile      string   // config file holding the token; "" if token came via --bot-token
 	HookBinary     string   // default "ak-tgclaude"
 	DenyEnvVars    []string // secrets to unset in the sandbox
@@ -117,16 +119,18 @@ func buildSettings(p scaffoldParams) *claudeSettings {
 		},
 		Permissions: &permissionsCfg{
 			// Read is broad (the token stays protected by the hook + deny-read
-			// below regardless); Write is confined to the outbox root, where the
-			// responder drops its message body files and `send` descriptors.
-			Allow: []string{"Read", "Write(" + p.OutboxRoot + "/**)"},
+			// below regardless). Write is NOT granted here: each invocation gets
+			// write access to exactly its own outbox via a per-invocation
+			// --settings overlay (buildInvocationSettings), so concurrent
+			// responders cannot write into each other's outbox.
+			Allow: []string{"Read"},
 		},
 		Sandbox: &sandboxCfg{
 			Enabled:                  true,
 			AutoAllowBashIfSandboxed: true,
 			AllowUnsandboxedCommands: false,
 			Network:                  &networkCfg{AllowedDomains: p.NetworkDomains},
-			Filesystem:               &filesystemCfg{AllowWrite: []string{p.OutboxRoot, p.CacheDir}},
+			Filesystem:               &filesystemCfg{AllowWrite: []string{p.CacheDir}},
 			Credentials:              &credentialsCfg{EnvVars: envVars},
 		},
 	}
@@ -171,6 +175,32 @@ func materializeScaffold(cwd string, p scaffoldParams) error {
 	return nil
 }
 
+// buildInvocationSettings returns the per-invocation --settings JSON that grants
+// write access to exactly one outbox — both the Write tool (permissions.allow)
+// and sandboxed Bash (sandbox.filesystem.allowWrite) — merged on top of the
+// static project settings. This confines each concurrent responder to its own
+// outbox: it can neither Write-tool nor Bash-write (cp / `send --outbox`) into
+// another chat's. Empty outbox => "".
+func buildInvocationSettings(outbox string) string {
+	if outbox == "" {
+		return ""
+	}
+	var s struct {
+		Permissions struct {
+			Allow []string `json:"allow"`
+		} `json:"permissions"`
+		Sandbox struct {
+			Filesystem struct {
+				AllowWrite []string `json:"allowWrite"`
+			} `json:"filesystem"`
+		} `json:"sandbox"`
+	}
+	s.Permissions.Allow = []string{"Write(" + outbox + "/**)"}
+	s.Sandbox.Filesystem.AllowWrite = []string{outbox}
+	b, _ := json.Marshal(&s)
+	return string(b)
+}
+
 // shellQuote single-quotes a path for embedding in the hook command string.
 func shellQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
@@ -200,9 +230,8 @@ func runScaffold(args []string) {
 		os.Exit(1)
 	}
 	if err := materializeScaffold(cfg.Cwd, scaffoldParams{
-		CacheDir:   filepath.Join(cfg.Cwd, "cache"),
-		OutboxRoot: outboxRoot,
-		TokenFile:  cfg.ConfigPath,
+		CacheDir:  filepath.Join(cfg.Cwd, "cache"),
+		TokenFile: cfg.ConfigPath,
 	}); err != nil {
 		fmt.Fprintf(os.Stderr, "ak-tgclaude: scaffold: %v\n", err)
 		os.Exit(1)
@@ -219,8 +248,9 @@ func runScaffold(args []string) {
 	if cfg.Agent != "" {
 		agentFlag = " --agent " + cfg.Agent
 	}
-	fmt.Printf("\nrun claude there by hand to observe the sandbox:\n")
+	fmt.Printf("\nrun claude there by hand to observe the sandbox (the --settings\n")
+	fmt.Printf("overlay grants write to just this outbox, as the dispatcher does per invocation):\n")
 	fmt.Printf("  cd %s\n", cfg.Cwd)
-	fmt.Printf("  AK_TGCLAUDE_OUTBOX=%s claude -p --setting-sources project --permission-mode dontAsk%s 'hello'\n",
-		outboxRoot, agentFlag)
+	fmt.Printf("  AK_TGCLAUDE_OUTBOX=%s claude -p --setting-sources project --permission-mode dontAsk \\\n", outboxRoot)
+	fmt.Printf("    --settings '%s'%s 'hello'\n", buildInvocationSettings(outboxRoot), agentFlag)
 }
