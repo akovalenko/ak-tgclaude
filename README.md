@@ -32,6 +32,7 @@ config (`bot.toml`, see `bot.toml.example`):
 bot_token = "123456789:AA..."   # secret; kept in dispatcher memory, never in env
 profile   = "qa"                # qa (read-only, default) | dev | ops (reserved)
 project   = "~/code/myproject"  # the codebase consulted on (read-only under qa)
+# wire_skills = ["~/lib/eputs-qa-knowledge"]  # domain skill(s) preloaded into the responder
 # runtime_base = ""             # base for the ephemeral cwd (default: $XDG_RUNTIME_DIR)
 # state_dir    = ""             # durable state (default: $XDG_STATE_HOME/ak-tgclaude)
 ```
@@ -216,8 +217,9 @@ a generic one, embedded in the binary and materialized into the scaffold:
 - **`faq-responder`** (agent) — a read-only FAQ assistant. The incoming message
   is its prompt; it explores the project at **`$AK_TGCLAUDE_PROJECT`** (set by the
   dispatcher) with Grep/Read/Bash, answers concisely, and treats the message as
-  untrusted input. It is the default `agent`; override with `agent`/`--agent`
-  (e.g. a domain-specific agent) — have that agent pull in the `tg-emit` skill.
+  untrusted input. It is the default `agent`. To give it **domain knowledge**,
+  wire a skill into it with `wire_skills`/`--wire-skill` (see [Wiring domain
+  skills](#wiring-domain-skills)) rather than writing a custom agent.
 - **`tg-emit`** (skill, referenced by the agent's `skills:` frontmatter) — the
   **emission contract**: write the reply body to a file in `$AK_TGCLAUDE_OUTBOX`
   and hand it to `ak-tgclaude send --file`, so message text (quotes, `!`, HTML)
@@ -238,6 +240,40 @@ relaxed persona cannot exceed them (it still can't modify the project, read
 secrets, or message anyone but the sender). When a tool call *is* denied, it
 relays the concrete technical reason it got back (from the hook or the sandbox)
 rather than a vague refusal.
+
+### Wiring domain skills
+
+To turn the generic bot into a **domain expert**, you don't write a custom agent
+— you **wire a skill** into the built-in `faq-responder`:
+
+```toml
+wire_skills = ["~/lib/eputs-qa-knowledge"]   # a skill dir, or a SKILL.md file
+```
+
+(or `--wire-skill <path>`, repeatable and additive with the file list). At startup
+each wired skill is **materialized** into the scaffold's `.claude/skills/<name>/`
+and its name is appended to `faq-responder`'s `skills:` frontmatter, so its **full
+body is preloaded** into the responder's context. This is deliberate: a skill
+merely present in `.claude/skills/` is loaded only **on-demand** (the model sees
+its description and *may* invoke it), which is not reliable for a single-domain
+bot; preloading via `skills:` guarantees it is always in context.
+
+- **`{{PROJECT}}` substitution.** The responder's cwd is the disposable scaffold,
+  not your project, so a skill can't use bare relative paths (`notes/…` would
+  resolve under the scaffold). Write `{{PROJECT}}/notes/…` in the skill; it is
+  replaced with the absolute `project` path at materialization, giving the
+  Read/Grep tools (which don't shell-expand `$VARS` in path arguments) a literal
+  path. A skill with no placeholder passes through unchanged, so ordinary
+  project-agnostic skills wire in the same way.
+- **Path resolution.** A wired path expands a leading `~`, and if relative
+  resolves against the **dispatcher's launch cwd** (like `project`/`cwd`) — never
+  against the project, since the template may live outside it. For a daemon
+  (systemd, unpredictable launch cwd), use an absolute or `~` path.
+- **Structural boundary.** `wire_skills` produces **only** skills under
+  `.claude/skills/` — by construction it cannot introduce a `settings.json` (the
+  token guard) into the scaffold.
+- Wiring is read at **startup**, so changing a skill takes effect on the next
+  dispatcher restart.
 
 ## Responder scaffold (generated settings.json)
 

@@ -31,6 +31,16 @@ func (l *int64List) Set(s string) error {
 	return nil
 }
 
+// stringList is a repeatable string flag (e.g. --wire-skill a --wire-skill b).
+type stringList []string
+
+func (l *stringList) String() string { return strings.Join(*l, ",") }
+
+func (l *stringList) Set(s string) error {
+	*l = append(*l, s)
+	return nil
+}
+
 // Profile selects the responder's access level. Only ProfileQA (read-only) is
 // implemented for now; ProfileDev/ProfileOps are reserved for a future
 // remote-development pivot.
@@ -64,6 +74,19 @@ type Config struct {
 	// Agent is the responder agent name passed to `claude -p --agent`. Empty
 	// uses the cwd's configured default agent.
 	Agent string `toml:"agent"`
+
+	// WireSkills lists skill templates to materialize into the responder scaffold
+	// and preload into the built-in agent. Each entry is a path to a skill
+	// directory (containing SKILL.md) or a SKILL.md file. A leading ~ is expanded;
+	// a relative path resolves against the dispatcher's launch cwd (like Project/
+	// Cwd) — the template may live outside the project tree, so it is never
+	// resolved against the project. Any {{PROJECT}} in the template body is
+	// replaced with the project path at materialization (Read/Grep do not expand
+	// $VARS in tool paths, so a wired skill hard-codes {{PROJECT}}/notes/…). The
+	// wired skill's name is appended to the built-in agent's `skills:` so its body
+	// is always in context — on-demand skill loading is not guaranteed. Repeatable
+	// via --wire-skill (additive with this list).
+	WireSkills []string `toml:"wire_skills"`
 
 	// Responder selects the responder implementation: "claude" (default) spawns
 	// `claude -p`; "stub" replies with a fixed line, for smoke-testing the
@@ -152,6 +175,8 @@ func parseConfig(args []string) (*Config, error) {
 	noRefuse := fs.Bool("norefuse", false, "materialize the do-what-you're-asked responder (does not decline off-topic; machine guards still apply)")
 	var allowUsers int64List
 	fs.Var(&allowUsers, "allow-user", "authorize a Telegram user id (repeatable; merged with allowed_users)")
+	var wireSkills stringList
+	fs.Var(&wireSkills, "wire-skill", "skill template (dir or SKILL.md) to materialize and preload into the responder (repeatable; merged with wire_skills)")
 	open := fs.Bool("open", false, "OPEN ACCESS: allow every Telegram user (demo only; overrides the whitelist)")
 	if err := fs.Parse(args); err != nil {
 		return nil, err
@@ -194,6 +219,10 @@ func parseConfig(args []string) (*Config, error) {
 	if len(allowUsers) > 0 {
 		c.AllowedUsers = append(c.AllowedUsers, allowUsers...)
 	}
+	// wire_skills is additive too, for the same reason (grant one skill ad-hoc).
+	if len(wireSkills) > 0 {
+		c.WireSkills = append(c.WireSkills, wireSkills...)
+	}
 	if *open {
 		c.Open = true
 	}
@@ -203,6 +232,9 @@ func parseConfig(args []string) (*Config, error) {
 	c.Cwd = expandTilde(c.Cwd)
 	c.StateDir = expandTilde(c.StateDir)
 	c.RuntimeBase = expandTilde(c.RuntimeBase)
+	for i := range c.WireSkills {
+		c.WireSkills[i] = expandTilde(c.WireSkills[i])
+	}
 
 	return &c, nil
 }

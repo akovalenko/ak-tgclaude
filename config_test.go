@@ -25,6 +25,29 @@ func TestParseConfigAllowUserInvalid(t *testing.T) {
 	}
 }
 
+func TestParseConfigWireSkills(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "bot.toml")
+	if err := os.WriteFile(path, []byte("wire_skills = [\"/lib/a\"]\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	c, err := parseConfig([]string{"--config", path, "--wire-skill", "~/b", "--wire-skill", "/lib/c"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Additive: file [/lib/a] + flags [~/b, /lib/c].
+	if len(c.WireSkills) != 3 {
+		t.Fatalf("expected 3 wire skills, got %v", c.WireSkills)
+	}
+	if c.WireSkills[0] != "/lib/a" || c.WireSkills[2] != "/lib/c" {
+		t.Errorf("wire skills order/merge wrong: %v", c.WireSkills)
+	}
+	// A leading ~ is expanded (like project/cwd).
+	home, _ := os.UserHomeDir()
+	if c.WireSkills[1] != filepath.Join(home, "b") {
+		t.Errorf("tilde not expanded: %q", c.WireSkills[1])
+	}
+}
+
 func TestParseConfigAllowUserMergesWithFile(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "bot.toml")
 	if err := os.WriteFile(path, []byte("allowed_users = [1, 2]\n"), 0o600); err != nil {

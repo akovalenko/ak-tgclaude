@@ -399,8 +399,18 @@ func runDispatch(args []string) {
 			OutboxRoot: outboxRoot,
 			TokenFile:  cfg.ConfigPath,
 			NoRefuse:   cfg.NoRefuse,
+			Project:    cfg.Project,
+			WireSkills: cfg.WireSkills,
 		}); err != nil {
 			fmt.Fprintf(os.Stderr, "ak-tgclaude: dispatch: %v\n", err)
+			os.Exit(1)
+		}
+		// Fail fast if the selected agent was not materialized (e.g. a custom
+		// --agent name with nothing shipping it): otherwise `claude -p --agent`
+		// would silently find no agent. The built-in default always exists.
+		agentFile := filepath.Join(cwd, ".claude", "agents", cfg.Agent+".md")
+		if _, err := os.Stat(agentFile); err != nil {
+			fmt.Fprintf(os.Stderr, "ak-tgclaude: dispatch: agent %q not materialized (%s); use the default %q (custom agents are not wired yet)\n", cfg.Agent, agentFile, defaultAgent)
 			os.Exit(1)
 		}
 		resp = &claudeResponder{agent: cfg.Agent, cwd: cwd, project: cfg.Project, cacheDir: cacheDir}

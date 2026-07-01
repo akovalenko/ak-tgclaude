@@ -100,6 +100,8 @@ type scaffoldParams struct {
 	DenyEnvVars    []string // secrets to unset in the sandbox
 	NetworkDomains []string // sandbox egress allowlist
 	NoRefuse       bool     // materialize the do-what-you're-asked agent variant
+	Project        string   // knowledge root; substituted for {{PROJECT}} in agent/skill templates
+	WireSkills     []string // operator skill templates (dir or SKILL.md) to materialize + preload
 }
 
 // defaultDenyEnvVars are the ambient secrets scrubbed from the responder's
@@ -206,14 +208,44 @@ func materializeScaffold(cwd string, p scaffoldParams) error {
 	if err := os.WriteFile(path, b, 0o600); err != nil {
 		return fmt.Errorf("writing %s: %w", path, err)
 	}
-	if err := materializeSkills(claudeDir); err != nil {
+	if err := materializeSkills(claudeDir, p.Project); err != nil {
 		return err
 	}
-	return materializeAgent(claudeDir, p.NoRefuse)
+	// Wire operator skill templates into the scaffold (materialized + {{PROJECT}}
+	// substituted), then preload them into the built-in agent. On-demand skill
+	// loading is not guaranteed (only the description is in context until the model
+	// invokes it), so preloading via the agent's `skills:` is the reliable path for
+	// a single-domain bot.
+	wired, err := wireSkills(claudeDir, p.Project, p.WireSkills)
+	if err != nil {
+		return err
+	}
+	return materializeAgent(claudeDir, p.NoRefuse, p.Project, wired)
+}
+
+// projectPlaceholder is replaced with the project path when an agent or skill
+// template is materialized: the Read/Grep tools do not shell-expand $VARS in
+// their path arguments, so a wired skill hard-codes {{PROJECT}}/notes/… and gets
+// a literal absolute path. Absent placeholder => a no-op, so ordinary skills and
+// the built-in assets pass through unchanged.
+const projectPlaceholder = "{{PROJECT}}"
+
+// materializeFile writes data to dst (creating parent dirs), substituting the
+// project placeholder. It is the single copy path for every agent/skill file,
+// embedded or wired. An empty project leaves the placeholder untouched, so an
+// unmaterialized {{PROJECT}} is visible rather than becoming a broken path.
+func materializeFile(dst string, data []byte, project string) error {
+	if project != "" {
+		data = []byte(strings.ReplaceAll(string(data), projectPlaceholder, project))
+	}
+	if err := os.MkdirAll(filepath.Dir(dst), 0o700); err != nil {
+		return err
+	}
+	return os.WriteFile(dst, data, 0o600)
 }
 
 // materializeSkills copies the embedded skills tree into <cwd>/.claude/skills.
-func materializeSkills(claudeDir string) error {
+func materializeSkills(claudeDir, project string) error {
 	return fs.WalkDir(scaffoldAssets, "assets/skills", func(p string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
@@ -230,10 +262,70 @@ func materializeSkills(claudeDir string) error {
 		if err != nil {
 			return err
 		}
-		if err := os.MkdirAll(filepath.Dir(dst), 0o700); err != nil {
+		return materializeFile(dst, data, project)
+	})
+}
+
+// wireSkills materializes each operator skill template into
+// <cwd>/.claude/skills/<name> (substituting {{PROJECT}}) and returns the skill
+// names, so they can be preloaded into the built-in agent. A path may be a skill
+// DIRECTORY (its basename is the skill name; the whole tree is copied, so bundled
+// resources come along) or a bare SKILL.md FILE (the parent dir's basename is the
+// name; only that file is copied). The name must match the skill's frontmatter
+// `name:` for the preload reference to resolve.
+func wireSkills(claudeDir, project string, paths []string) ([]string, error) {
+	var names []string
+	for _, p := range paths {
+		info, err := os.Stat(p)
+		if err != nil {
+			return nil, fmt.Errorf("wire skill %s: %w", p, err)
+		}
+		var name string
+		if info.IsDir() {
+			name = filepath.Base(p)
+			if err := copyTreeMaterialize(p, filepath.Join(claudeDir, "skills", name), project); err != nil {
+				return nil, fmt.Errorf("wire skill %s: %w", p, err)
+			}
+		} else {
+			name = filepath.Base(filepath.Dir(p))
+			data, err := os.ReadFile(p)
+			if err != nil {
+				return nil, fmt.Errorf("wire skill %s: %w", p, err)
+			}
+			dst := filepath.Join(claudeDir, "skills", name, filepath.Base(p))
+			if err := materializeFile(dst, data, project); err != nil {
+				return nil, fmt.Errorf("wire skill %s: %w", p, err)
+			}
+		}
+		names = append(names, name)
+	}
+	return names, nil
+}
+
+// copyTreeMaterialize recursively copies srcDir into dstDir, substituting
+// {{PROJECT}} in every file. A nested .git (e.g. when the template lives in its
+// own repo and the path points at the repo root) is skipped.
+func copyTreeMaterialize(srcDir, dstDir, project string) error {
+	return filepath.WalkDir(srcDir, func(p string, d fs.DirEntry, err error) error {
+		if err != nil {
 			return err
 		}
-		return os.WriteFile(dst, data, 0o600)
+		if d.IsDir() && d.Name() == ".git" && p != srcDir {
+			return filepath.SkipDir
+		}
+		rel, err := filepath.Rel(srcDir, p)
+		if err != nil {
+			return err
+		}
+		dst := filepath.Join(dstDir, rel)
+		if d.IsDir() {
+			return os.MkdirAll(dst, 0o700)
+		}
+		data, err := os.ReadFile(p)
+		if err != nil {
+			return err
+		}
+		return materializeFile(dst, data, project)
 	})
 }
 
@@ -242,8 +334,9 @@ func materializeSkills(claudeDir string) error {
 // (so --agent selection is unchanged); noRefuse swaps the persona from a scoped
 // FAQ that declines off-topic to a do-what-you're-asked assistant. Machine
 // guards (sandbox, token deny-read, per-invocation write, pinned route) hold
-// either way, so the relaxed persona cannot exceed them.
-func materializeAgent(claudeDir string, noRefuse bool) error {
+// either way, so the relaxed persona cannot exceed them. wiredSkills are appended
+// to the agent's `skills:` frontmatter so their bodies are preloaded at startup.
+func materializeAgent(claudeDir string, noRefuse bool, project string, wiredSkills []string) error {
 	src := "assets/agents/faq-responder.md"
 	if noRefuse {
 		src = "assets/agents/faq-responder.norefuse.md"
@@ -252,11 +345,61 @@ func materializeAgent(claudeDir string, noRefuse bool) error {
 	if err != nil {
 		return err
 	}
-	dir := filepath.Join(claudeDir, "agents")
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return err
+	data = appendAgentSkills(data, wiredSkills)
+	dst := filepath.Join(claudeDir, "agents", "faq-responder.md")
+	return materializeFile(dst, data, project)
+}
+
+// appendAgentSkills adds skill names to the inline `skills: [a, b]` list in an
+// agent markdown's YAML frontmatter (order-preserving, de-duplicated), so wired
+// skills are preloaded into the agent's context at startup. It handles the inline
+// form the shipped agents use, inserting a `skills:` line before the closing
+// frontmatter fence if none exists. Data without frontmatter is returned as-is.
+func appendAgentSkills(data []byte, add []string) []byte {
+	if len(add) == 0 {
+		return data
 	}
-	return os.WriteFile(filepath.Join(dir, "faq-responder.md"), data, 0o600)
+	lines := strings.Split(string(data), "\n")
+	if len(lines) == 0 || strings.TrimSpace(lines[0]) != "---" {
+		return data // no frontmatter
+	}
+	end := -1
+	for i := 1; i < len(lines); i++ {
+		if strings.TrimSpace(lines[i]) == "---" {
+			end = i
+			break
+		}
+	}
+	if end == -1 {
+		return data // unterminated frontmatter
+	}
+	merge := func(existing []string) string {
+		seen := map[string]bool{}
+		var out []string
+		for _, n := range append(existing, add...) {
+			if n = strings.TrimSpace(n); n != "" && !seen[n] {
+				seen[n] = true
+				out = append(out, n)
+			}
+		}
+		return "skills: [" + strings.Join(out, ", ") + "]"
+	}
+	for i := 1; i < end; i++ {
+		if strings.HasPrefix(strings.TrimSpace(lines[i]), "skills:") {
+			var existing []string
+			if l, r := strings.IndexByte(lines[i], '['), strings.LastIndexByte(lines[i], ']'); l >= 0 && r > l {
+				existing = strings.Split(lines[i][l+1:r], ",")
+			}
+			lines[i] = merge(existing)
+			return []byte(strings.Join(lines, "\n"))
+		}
+	}
+	// No skills: line — insert one just before the closing fence.
+	out := make([]string, 0, len(lines)+1)
+	out = append(out, lines[:end]...)
+	out = append(out, merge(nil))
+	out = append(out, lines[end:]...)
+	return []byte(strings.Join(out, "\n"))
 }
 
 // buildInvocationSettings returns the per-invocation --settings JSON that scopes
@@ -319,6 +462,8 @@ func runScaffold(args []string) {
 		OutboxRoot: outboxRoot,
 		TokenFile:  cfg.ConfigPath,
 		NoRefuse:   cfg.NoRefuse,
+		Project:    cfg.Project,
+		WireSkills: cfg.WireSkills,
 	}); err != nil {
 		fmt.Fprintf(os.Stderr, "ak-tgclaude: scaffold: %v\n", err)
 		os.Exit(1)
@@ -332,6 +477,9 @@ func runScaffold(args []string) {
 	fmt.Printf("  cwd:      %s\n", cfg.Cwd)
 	fmt.Printf("  settings: %s\n", filepath.Join(cfg.Cwd, ".claude", "settings.json"))
 	fmt.Printf("  agent:    %s\n", agentVariant)
+	if len(cfg.WireSkills) > 0 {
+		fmt.Printf("  wired:    %s (preloaded into the agent)\n", strings.Join(cfg.WireSkills, ", "))
+	}
 	fmt.Printf("  outbox:   %s\n", outboxRoot)
 	if cfg.ConfigPath == "" {
 		fmt.Printf("  (no --config given: the token guard has no deny-read path)\n")
