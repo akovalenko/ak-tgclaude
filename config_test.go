@@ -93,6 +93,29 @@ func TestParseConfigDenyRead(t *testing.T) {
 	}
 }
 
+func TestParseConfigResolvesRelativePaths(t *testing.T) {
+	// Every path field is absolutized against the launch cwd, so it is
+	// unambiguous once the responder consumes it from the scaffold cwd.
+	c, err := parseConfig([]string{
+		"--project", "code/proj",
+		"--wire-skill", "lib/skill",
+		"--deny-read", "sec/env",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	wd, _ := os.Getwd()
+	if want := filepath.Join(wd, "code/proj"); c.Project != want {
+		t.Errorf("Project = %q, want %q", c.Project, want)
+	}
+	if want := filepath.Join(wd, "lib/skill"); len(c.WireSkills) != 1 || c.WireSkills[0] != want {
+		t.Errorf("WireSkills = %v, want [%q]", c.WireSkills, want)
+	}
+	if want := filepath.Join(wd, "sec/env"); len(c.DenyRead) != 1 || c.DenyRead[0] != want {
+		t.Errorf("DenyRead = %v, want [%q]", c.DenyRead, want)
+	}
+}
+
 func TestParseConfigAllowUserMergesWithFile(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "bot.toml")
 	if err := os.WriteFile(path, []byte("allowed_users = [1, 2]\n"), 0o600); err != nil {

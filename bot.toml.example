@@ -39,8 +39,8 @@ project = "~/code/example-project"
 # secrets (SSH keys, Claude creds/history, other sessions' transcripts, the token
 # file). Each is denied at BOTH layers: the PreToolUse hook blocks the Read tool
 # (wins even for a path inside the project), and sandbox.filesystem.denyRead blocks
-# the sandboxed Bash (cat/grep). Give absolute or ~-rooted paths. Also --deny-read
-# (repeatable; merged with this list).
+# the sandboxed Bash (cat/grep). Takes ~; a relative path resolves against the
+# launch cwd (like every path here). Also --deny-read (repeatable; merged).
 # deny_read = ["~/code/example-project/secrets.env", "~/.aws"]
 
 # Access control: Telegram user ids allowed to use the bot. Empty (the default)

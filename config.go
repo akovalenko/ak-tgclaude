@@ -125,10 +125,10 @@ type Config struct {
 	// transcripts, the token file). Each path is denied at BOTH layers: the
 	// PreToolUse hook blocks the Read tool (checked before the project-read allow,
 	// so it wins even for a path inside the project), and sandbox.filesystem.denyRead
-	// blocks the sandboxed Bash (`cat`/`grep`). A leading ~ is expanded; give
-	// absolute or ~-rooted paths (a bare relative path is resolved against the
-	// responder cwd at hook time, not what you mean). Repeatable via --deny-read
-	// (additive with this list).
+	// blocks the sandboxed Bash (`cat`/`grep`). A leading ~ is expanded and the
+	// path is made absolute against the launch cwd (like Project/WireSkills), so
+	// the hook's absolute-path match works. Repeatable via --deny-read (additive
+	// with this list).
 	DenyRead []string `toml:"deny_read"`
 
 	// HelpText is the reply to /help and /start. Empty => a generic built-in
@@ -213,7 +213,7 @@ func parseConfig(args []string) (*Config, error) {
 	var wireSkills stringList
 	fs.Var(&wireSkills, "wire-skill", "skill template (dir or SKILL.md) to materialize and preload into the responder (repeatable; merged with wire_skills)")
 	var denyRead stringList
-	fs.Var(&denyRead, "deny-read", "path the responder must never read, at both the Read-tool and sandboxed-Bash layers (repeatable; merged with deny_read; absolute or ~-rooted)")
+	fs.Var(&denyRead, "deny-read", "path the responder must never read, at both the Read-tool and sandboxed-Bash layers (repeatable; merged with deny_read; ~ and relative resolved against the launch cwd)")
 	open := fs.Bool("open", false, "OPEN ACCESS: allow every Telegram user (demo only; overrides the whitelist)")
 	if err := fs.Parse(args); err != nil {
 		return nil, err
@@ -278,15 +278,20 @@ func parseConfig(args []string) (*Config, error) {
 	}
 
 	c.applyDefaults()
-	c.Project = expandTilde(c.Project)
-	c.Cwd = expandTilde(c.Cwd)
-	c.StateDir = expandTilde(c.StateDir)
-	c.RuntimeBase = expandTilde(c.RuntimeBase)
+	// Every path is expanded (~) and made absolute against the launch cwd, so it
+	// is unambiguous once the responder consumes it from the scaffold cwd. This is
+	// also the token file's deny-read path (ConfigPath), so a relative --config
+	// still matches in the hook.
+	c.Project = resolvePath(c.Project)
+	c.Cwd = resolvePath(c.Cwd)
+	c.StateDir = resolvePath(c.StateDir)
+	c.RuntimeBase = resolvePath(c.RuntimeBase)
+	c.ConfigPath = resolvePath(c.ConfigPath)
 	for i := range c.WireSkills {
-		c.WireSkills[i] = expandTilde(c.WireSkills[i])
+		c.WireSkills[i] = resolvePath(c.WireSkills[i])
 	}
 	for i := range c.DenyRead {
-		c.DenyRead[i] = expandTilde(c.DenyRead[i])
+		c.DenyRead[i] = resolvePath(c.DenyRead[i])
 	}
 
 	return &c, nil
@@ -350,6 +355,24 @@ func defaultStateDir() string {
 		return filepath.Join(h, ".local", "state", "ak-tgclaude")
 	}
 	return ".ak-tgclaude-state"
+}
+
+// resolvePath expands a leading ~ and makes the path absolute against the
+// dispatcher's LAUNCH cwd. Every config path is resolved this way so it is
+// unambiguous once the responder consumes it from a different cwd (the scaffold
+// dir) — its hook, sandbox, and {{PROJECT}} substitution all need absolute
+// paths, and a relative path would otherwise resolve against the responder cwd,
+// not where the operator ran the bot. Empty stays empty (an unset optional path
+// must not become the launch cwd).
+func resolvePath(p string) string {
+	if p == "" {
+		return ""
+	}
+	p = expandTilde(p)
+	if abs, err := filepath.Abs(p); err == nil {
+		return abs
+	}
+	return p
 }
 
 // expandTilde expands a leading ~ or ~/ to the user's home directory.

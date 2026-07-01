@@ -58,6 +58,12 @@ ak-tgclaude dispatch --bot-token 123:ABC --profile qa --project ~/code/myproject
   responder's permissions and what its PreToolUse hook allows. `project`/`profile`
   are single for now; they may grow into a `[[project]]` array (per-project profile)
   later.
+- **Paths.** Every path field (`project`, `cwd`, `wire_skills`, `deny_read`,
+  `state_dir`, `runtime_base`, `--config`) takes a leading `~` and is made
+  **absolute against the dispatcher's launch cwd**. The responder consumes them
+  from a different cwd (the scaffold dir), so they are resolved once, up front —
+  a relative path means "relative to where I launched the bot", never the
+  responder's cwd.
 
 ## Runtime layout (directories)
 
@@ -254,8 +260,8 @@ file inside the project, a sibling repo, a mounted volume), list them in
 `wire_skills`/`allowed_users`). Each path is denied at **both** layers: the hook
 blocks the **Read tool** (checked before the project-read allow, so it wins even
 for a path *inside* the project) and `sandbox.filesystem.denyRead` blocks the
-**sandboxed Bash**. Give **absolute or `~`-rooted** paths — a bare relative path
-is resolved against the responder cwd at hook time, not the dir you meant.
+**sandboxed Bash**. Paths take `~` and, like every config path, resolve relative
+entries against the dispatcher's **launch cwd** (see [Configuration](#configuration)).
 
 ## Responder (agent + emission skill)
 
