@@ -189,14 +189,22 @@ a generic one, embedded in the binary and materialized into the scaffold:
   **emission contract**: write the reply body to a file in `$AK_TGCLAUDE_OUTBOX`
   and hand it to `ak-tgclaude send --file`, so message text (quotes, `!`, HTML)
   never hits the command line. Covers plain/HTML text, `send code`, `send doc`,
-  and multiple messages.
+  and multiple messages. The responder ends its turn with a **status word**
+  (`answered` / `problematic` / `refused`) on stdout — not sent to Telegram; the
+  dispatcher extracts it from the JSON output and logs it.
+
+The dispatcher logs one line when it **launches** a responder (`chat` / `user` /
+`msg`) and one when it **finishes** (adding `outcome` and duration), so each
+`claude -p` is visible.
 
 **`--norefuse`** (config `no_refuse`) materializes a second variant of the agent
 (same name) that does **not** decline off-topic messages — it just does what it
 is asked. This is safe because the read-only sandbox, token deny-read,
 per-invocation write grant, and pinned route are all machine-enforced: the
 relaxed persona cannot exceed them (it still can't modify the project, read
-secrets, or message anyone but the sender).
+secrets, or message anyone but the sender). When a tool call *is* denied, it
+relays the concrete technical reason it got back (from the hook or the sandbox)
+rather than a vague refusal.
 
 ## Responder scaffold (generated settings.json)
 

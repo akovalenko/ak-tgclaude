@@ -156,7 +156,8 @@ func (d *Dispatcher) handleUpdate(ctx context.Context, u Update) {
 	}
 	defer os.RemoveAll(outbox)
 
-	log.Printf("ak-tgclaude: launch responder chat=%d user=%s msg=%d", m.Chat.ID, userLabel(m.From), m.MessageID)
+	ulabel := userLabel(m.From)
+	log.Printf("ak-tgclaude: launch responder chat=%d user=%s msg=%d", m.Chat.ID, ulabel, m.MessageID)
 
 	// One drainer for this invocation's outbox, stopped after the responder exits.
 	stop := make(chan struct{})
@@ -166,6 +167,7 @@ func (d *Dispatcher) handleUpdate(ctx context.Context, u Update) {
 		serveOutbox(ctx, outbox, route, d.sender, stop)
 	}()
 
+	start := time.Now()
 	sid, _ := d.store.SessionID(m.Chat.ID)
 	res, err := d.resp.Respond(ctx, RespondRequest{
 		Prompt:    m.Text,
@@ -174,16 +176,28 @@ func (d *Dispatcher) handleUpdate(ctx context.Context, u Update) {
 	})
 	close(stop)
 	<-done
+	dur := time.Since(start).Round(time.Millisecond)
 
 	if err != nil {
-		log.Printf("ak-tgclaude: responder for chat %d: %v", m.Chat.ID, err)
+		log.Printf("ak-tgclaude: responder done chat=%d user=%s msg=%d FAILED in %s: %v",
+			m.Chat.ID, ulabel, m.MessageID, dur, err)
 		return
 	}
+	log.Printf("ak-tgclaude: responder done chat=%d user=%s msg=%d outcome=%s in %s",
+		m.Chat.ID, ulabel, m.MessageID, outcomeLabel(res.Outcome), dur)
 	if res.SessionID != "" {
 		if err := d.store.SetSession(m.Chat.ID, res.SessionID); err != nil {
 			log.Printf("ak-tgclaude: binding chat %d: %v", m.Chat.ID, err)
 		}
 	}
+}
+
+// outcomeLabel renders the responder's outcome word for logs ("?" if absent).
+func outcomeLabel(o string) string {
+	if o == "" {
+		return "?"
+	}
+	return o
 }
 
 // userLabel renders a message sender for logs: the numeric id, plus @username

@@ -76,12 +76,35 @@ func TestStubResponderRepliesFixed(t *testing.T) {
 	}
 }
 
-func TestParseSessionID(t *testing.T) {
-	out := []byte(`{"type":"result","subtype":"success","session_id":"abc-123","total_cost_usd":0.01}`)
-	if got := parseSessionID(out); got != "abc-123" {
-		t.Errorf("session_id = %q, want abc-123", got)
+func TestParseResult(t *testing.T) {
+	out := []byte(`{"type":"result","session_id":"abc-123","result":"Sent the answer.\nanswered"}`)
+	sid, outcome := parseResult(out)
+	if sid != "abc-123" {
+		t.Errorf("session_id = %q, want abc-123", sid)
 	}
-	if got := parseSessionID([]byte("not json")); got != "" {
-		t.Errorf("malformed output should yield empty session id, got %q", got)
+	if outcome != "answered" {
+		t.Errorf("outcome = %q, want answered", outcome)
+	}
+	if s, o := parseResult([]byte("not json")); s != "" || o != "" {
+		t.Errorf("malformed => %q/%q, want empty", s, o)
+	}
+}
+
+func TestParseOutcome(t *testing.T) {
+	// Exact last line wins.
+	if got := parseOutcome("did stuff\nrefused"); got != "refused" {
+		t.Errorf("last-line exact => %q", got)
+	}
+	// Trailing punctuation / markdown tolerated.
+	if got := parseOutcome("ok\n**problematic**"); got != "problematic" {
+		t.Errorf("punctuation-wrapped => %q", got)
+	}
+	// None present.
+	if got := parseOutcome("here is your answer"); got != "" {
+		t.Errorf("no outcome => %q, want empty", got)
+	}
+	// Fallback: last occurrence anywhere when the last line isn't exact.
+	if got := parseOutcome("I answered it fully. Everything is fine now."); got != "answered" {
+		t.Errorf("fallback scan => %q, want answered", got)
 	}
 }

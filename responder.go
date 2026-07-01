@@ -18,10 +18,11 @@ type RespondRequest struct {
 	OutboxDir string // AK_TGCLAUDE_OUTBOX for the responder's `send` calls
 }
 
-// RespondResult reports the session the responder used, so the dispatcher can
-// bind chat→session for continuity.
+// RespondResult reports the session the responder used (so the dispatcher can
+// bind chat→session) and the outcome word the responder ended with (for logs).
 type RespondResult struct {
 	SessionID string
+	Outcome   string // "answered"|"problematic"|"refused"|"" (from the final output)
 }
 
 // Responder answers one update. The dispatcher depends on this interface so the
@@ -55,7 +56,8 @@ func (c *claudeResponder) Respond(ctx context.Context, req RespondRequest) (Resp
 	if err := cmd.Run(); err != nil {
 		return RespondResult{}, fmt.Errorf("claude -p: %w", err)
 	}
-	return RespondResult{SessionID: parseSessionID(out.Bytes())}, nil
+	sid, outcome := parseResult(out.Bytes())
+	return RespondResult{SessionID: sid, Outcome: outcome}, nil
 }
 
 // buildPrompt prepends a small preamble giving the responder the LITERAL
@@ -118,14 +120,44 @@ func (s *stubResponder) Respond(_ context.Context, req RespondRequest) (RespondR
 	if _, err := (&Descriptor{Kind: KindText, Text: reply}).Drop(req.OutboxDir); err != nil {
 		return RespondResult{}, err
 	}
-	return RespondResult{}, nil
+	return RespondResult{Outcome: "answered"}, nil
 }
 
-// parseSessionID extracts session_id from `claude --output-format json` output.
-func parseSessionID(jsonOut []byte) string {
+// parseResult extracts the session id and the outcome word from
+// `claude --output-format json` output (the session_id and the final result
+// text the responder ended with).
+func parseResult(jsonOut []byte) (sessionID, outcome string) {
 	var r struct {
 		SessionID string `json:"session_id"`
+		Result    string `json:"result"`
 	}
 	_ = json.Unmarshal(jsonOut, &r)
-	return r.SessionID
+	return r.SessionID, parseOutcome(r.Result)
+}
+
+// knownOutcomes are the status words the responder ends its output with. The
+// set is intentionally small and may grow.
+var knownOutcomes = []string{"answered", "problematic", "refused"}
+
+// parseOutcome returns the responder's outcome word: the last output line when
+// it is exactly one of knownOutcomes, else the last such word appearing
+// anywhere, else "".
+func parseOutcome(result string) string {
+	lines := strings.Split(strings.TrimSpace(result), "\n")
+	if len(lines) > 0 {
+		last := strings.ToLower(strings.Trim(strings.TrimSpace(lines[len(lines)-1]), ".!?\"'`*"))
+		for _, w := range knownOutcomes {
+			if last == w {
+				return w
+			}
+		}
+	}
+	low := strings.ToLower(result)
+	best, bestAt := "", -1
+	for _, w := range knownOutcomes {
+		if i := strings.LastIndex(low, w); i > bestAt {
+			bestAt, best = i, w
+		}
+	}
+	return best
 }

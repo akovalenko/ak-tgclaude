@@ -61,7 +61,22 @@ For a file you produced (e.g. a generated PDF), send it as a document:
 You may call `send` more than once for one question (e.g. a short answer, then a
 code block) — each call is one message. Keep it tight; this is a chat.
 
+## Final status line (for the operator's log, NOT Telegram)
+
+After you have sent your reply, end your turn by outputting **exactly one** of
+these words on its own line, as the very last thing you print:
+
+- `answered` — you answered the question / did what was asked.
+- `problematic` — you tried but could not fully complete it (blocked by policy,
+  an error, or only a partial result).
+- `refused` — you declined to do it.
+
+This word is a status signal that goes to the operator's **log only** — it is NOT
+sent to Telegram (only your `ak-tgclaude send` messages reach the user). Print
+just the word.
+
 ## Don't
 - Don't put message text in argv, `echo`, or a heredoc — it will be corrupted.
 - Don't set the chat or reply target — the dispatcher pins them.
 - Don't write outside `$AK_TGCLAUDE_OUTBOX` — nothing else is writable.
+- Don't send the status word to Telegram — it is stdout only.
