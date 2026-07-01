@@ -10,8 +10,9 @@ import (
 
 func TestBuildSettingsShape(t *testing.T) {
 	s := buildSettings(scaffoldParams{
-		CacheDir:  "/state/cache",
-		TokenFile: "/cfg/bot.toml",
+		CacheDir:   "/state/cache",
+		OutboxRoot: "/run/out",
+		TokenFile:  "/cfg/bot.toml",
 	})
 
 	if !s.Sandbox.Enabled || !s.Sandbox.AutoAllowBashIfSandboxed || s.Sandbox.AllowUnsandboxedCommands {
@@ -29,6 +30,20 @@ func TestBuildSettingsShape(t *testing.T) {
 		if strings.HasPrefix(a, "Write(") {
 			t.Errorf("static settings must not grant Write, got %v", s.Permissions.Allow)
 		}
+	}
+	// The outbox area is deny-read on both layers (a responder can't read another
+	// chat's pending reply); own outbox is carved back per invocation.
+	if got := s.Sandbox.Filesystem.DenyRead; len(got) != 1 || got[0] != "/run/out" {
+		t.Errorf("sandbox denyRead should be the outbox root, got %v", got)
+	}
+	foundDeny := false
+	for _, d := range s.Permissions.Deny {
+		if d == "Read(/run/out/**)" {
+			foundDeny = true
+		}
+	}
+	if !foundDeny {
+		t.Errorf("permissions.deny should block Read of the outbox root, got %v", s.Permissions.Deny)
 	}
 	if len(s.Sandbox.Credentials.Files) != 1 || s.Sandbox.Credentials.Files[0].Path != "/cfg/bot.toml" ||
 		s.Sandbox.Credentials.Files[0].Mode != "deny" {

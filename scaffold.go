@@ -51,6 +51,8 @@ type networkCfg struct {
 
 type filesystemCfg struct {
 	AllowWrite []string `json:"allowWrite,omitempty"`
+	DenyRead   []string `json:"denyRead,omitempty"`
+	AllowRead  []string `json:"allowRead,omitempty"`
 }
 
 type credentialsCfg struct {
@@ -85,11 +87,14 @@ type hookEntry struct {
 }
 
 // scaffoldParams are the runtime-computed values baked into settings.json.
-// Note: the outbox is NOT granted here — write access to a specific outbox is
-// added per invocation via buildInvocationSettings, so concurrent responders are
-// each confined to their own.
+// Note: WRITE access to a specific outbox is added per invocation via
+// buildInvocationSettings, so concurrent responders are each confined to their
+// own. OutboxRoot here is used only to DENY read of the whole outbox area (a
+// responder cannot read another chat's pending reply); each invocation carves
+// read of just its own outbox back via the same overlay.
 type scaffoldParams struct {
 	CacheDir       string   // isolated Go caches root
+	OutboxRoot     string   // parent of per-invocation outboxes (deny-read as a group)
 	TokenFile      string   // config file holding the token; "" if token came via --bot-token
 	HookBinary     string   // default "ak-tgclaude"
 	DenyEnvVars    []string // secrets to unset in the sandbox
@@ -135,23 +140,35 @@ func buildSettings(p scaffoldParams) *claudeSettings {
 		envVars = append(envVars, credEnv{Name: name, Mode: "deny"})
 	}
 
+	// Read is broad, but the outbox area is denied on both layers so a responder
+	// cannot read another chat's pending reply: the Read tool via permissions,
+	// and sandboxed Bash via sandbox.filesystem.denyRead. Each invocation carves
+	// read of just its OWN outbox back (buildInvocationSettings).
+	var denyReadPerms, denyReadFS []string
+	if p.OutboxRoot != "" {
+		denyReadPerms = []string{"Read(" + p.OutboxRoot + "/**)"}
+		denyReadFS = []string{p.OutboxRoot}
+	}
+
 	s := &claudeSettings{
 		Env: goCacheEnv(p.CacheDir),
 		Permissions: &permissionsCfg{
-			// Read is broad (the token stays protected by the hook + deny-read
-			// below regardless). Write is NOT granted here: each invocation gets
-			// write access to exactly its own outbox via a per-invocation
-			// --settings overlay (buildInvocationSettings), so concurrent
-			// responders cannot write into each other's outbox.
+			// Write is NOT granted here: each invocation gets write access to
+			// exactly its own outbox via a per-invocation --settings overlay, so
+			// concurrent responders cannot write into each other's outbox.
 			Allow: []string{"Read"},
+			Deny:  denyReadPerms,
 		},
 		Sandbox: &sandboxCfg{
 			Enabled:                  true,
 			AutoAllowBashIfSandboxed: true,
 			AllowUnsandboxedCommands: false,
 			Network:                  &networkCfg{AllowedDomains: p.NetworkDomains},
-			Filesystem:               &filesystemCfg{AllowWrite: []string{p.CacheDir}},
-			Credentials:              &credentialsCfg{EnvVars: envVars},
+			Filesystem: &filesystemCfg{
+				AllowWrite: []string{p.CacheDir},
+				DenyRead:   denyReadFS,
+			},
+			Credentials: &credentialsCfg{EnvVars: envVars},
 		},
 	}
 	if p.TokenFile != "" {
@@ -245,12 +262,15 @@ func materializeAgent(claudeDir string, noRefuse bool) error {
 	return os.WriteFile(filepath.Join(dir, "faq-responder.md"), data, 0o600)
 }
 
-// buildInvocationSettings returns the per-invocation --settings JSON that grants
-// write access to exactly one outbox — both the Write tool (permissions.allow)
-// and sandboxed Bash (sandbox.filesystem.allowWrite) — merged on top of the
-// static project settings. This confines each concurrent responder to its own
-// outbox: it can neither Write-tool nor Bash-write (cp / `send --outbox`) into
-// another chat's. Empty outbox => "".
+// buildInvocationSettings returns the per-invocation --settings JSON that scopes
+// access to exactly one outbox, merged on top of the static project settings:
+//   - WRITE (Write tool + sandboxed Bash) — so a responder can't write into
+//     another chat's outbox (cp / `send --outbox`);
+//   - READ of just this outbox (sandbox.filesystem.allowRead) — carving it back
+//     out of the static denyRead so `send --file` can read its own body, while
+//     sibling outboxes stay masked.
+//
+// Empty outbox => "".
 func buildInvocationSettings(outbox string) string {
 	if outbox == "" {
 		return ""
@@ -262,11 +282,13 @@ func buildInvocationSettings(outbox string) string {
 		Sandbox struct {
 			Filesystem struct {
 				AllowWrite []string `json:"allowWrite"`
+				AllowRead  []string `json:"allowRead"`
 			} `json:"filesystem"`
 		} `json:"sandbox"`
 	}
 	s.Permissions.Allow = []string{"Write(" + outbox + "/**)"}
 	s.Sandbox.Filesystem.AllowWrite = []string{outbox}
+	s.Sandbox.Filesystem.AllowRead = []string{outbox}
 	b, _ := json.Marshal(&s)
 	return string(b)
 }
@@ -300,9 +322,10 @@ func runScaffold(args []string) {
 		os.Exit(1)
 	}
 	if err := materializeScaffold(cfg.Cwd, scaffoldParams{
-		CacheDir:  filepath.Join(cfg.Cwd, "cache"),
-		TokenFile: cfg.ConfigPath,
-		NoRefuse:  cfg.NoRefuse,
+		CacheDir:   filepath.Join(cfg.Cwd, "cache"),
+		OutboxRoot: outboxRoot,
+		TokenFile:  cfg.ConfigPath,
+		NoRefuse:   cfg.NoRefuse,
 	}); err != nil {
 		fmt.Fprintf(os.Stderr, "ak-tgclaude: scaffold: %v\n", err)
 		os.Exit(1)

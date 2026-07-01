@@ -224,7 +224,7 @@ deployment, the generated file:
 - points the Go caches (`GOCACHE`/`GOMODCACHE`/…) at an **isolated** dir, and
   allows egress only to `proxy.golang.org`/`sum.golang.org`/`storage.googleapis.com`;
 - grants sandbox writes to only the cache dir — **not** the outbox (that is
-  per-invocation, see below);
+  per-invocation), and **deny-reads** the outbox area (see below);
 - installs the **token guard**: `sandbox.credentials.files` deny-read on the
   config file, `credentials.envVars` deny (unset) for `ANTHROPIC_*`, and the
   PreToolUse hook `ak-tgclaude hook pretooluse --deny-read <token file>` (bare
@@ -239,21 +239,36 @@ sandboxed-inspection-only). Sandboxed Bash is allowed; every other tool call is
 never blanket-allows, which would override the per-invocation `Write(outbox)`
 grant.
 
-### Per-invocation write isolation
+### Per-invocation isolation (write and read)
 
-The static settings above grant **no** outbox write. Instead, each `claude -p` is
-launched with a per-invocation `--settings` overlay that grants write to **exactly
-its own** outbox, on both layers — the Write tool (`permissions.allow:
-Write(<outbox>/**)`) and sandboxed Bash (`sandbox.filesystem.allowWrite:
-[<outbox>]`) — merged on top of the static settings (both arrays merge across
-`--settings` and the project file; verified empirically). Only `hooks` cannot be
-injected via `--settings`, which is why the hook lives in the materialized file.
+The static settings above grant **no** outbox write, and **deny read** of the
+whole outbox area on both layers (`permissions.deny: Read(<outboxRoot>/**)` for
+the Read tool, `sandbox.filesystem.denyRead: [<outboxRoot>]` for sandboxed Bash).
+Each `claude -p` is then launched with a per-invocation `--settings` overlay that
+scopes access to **exactly its own** outbox:
 
-So a concurrent, possibly prompt-injected responder cannot drop a descriptor into
-another chat's outbox: not with the Write tool (permission denies it) and not via
-Bash (`cp`, redirect, or `ak-tgclaude send --outbox <sibling>` — the sandbox
-denies the write). Combined with the dispatcher deciding the route from *which*
+- **write** — the Write tool (`permissions.allow: Write(<outbox>/**)`) and
+  sandboxed Bash (`sandbox.filesystem.allowWrite: [<outbox>]`);
+- **read** — `sandbox.filesystem.allowRead: [<outbox>]`, carving its own outbox
+  back out of the static deny so `send --file` can read its own body.
+
+These merge on top of the static settings (both `permissions.allow/deny` and the
+`sandbox.filesystem` arrays merge across `--settings` and the project file —
+verified empirically, including that a flag `allowRead` overrides a file
+`denyRead` for the carved path). Only `hooks` cannot be injected via `--settings`,
+which is why the hook lives in the materialized file.
+
+So a concurrent, possibly prompt-injected responder cannot **write** into another
+chat's outbox (Write tool denied; Bash `cp` / redirect / `send --outbox <sibling>`
+denied by the sandbox), nor **read** another chat's pending reply (the sibling
+outbox is masked — a Bash `cat`/`ls` sees `No such file or directory`, and the
+Read tool is denied). Combined with the dispatcher deciding the route from *which*
 outbox a descriptor lands in, the cross-chat confused-deputy is closed.
+
+> Residual: the Grep/Glob **tools** are not path-scoped here, so a determined,
+> injected responder could in principle enumerate sibling outbox *names* (not
+> Bash-maskable content) via those tools. Low value (random names; content reads
+> are closed on both the Bash and Read-tool paths) — noted, not yet fenced.
 
 ### Fixed vs ephemeral cwd, and `scaffold`
 

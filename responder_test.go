@@ -38,6 +38,10 @@ func TestBuildInvocationSettings(t *testing.T) {
 	if !strings.Contains(s, `"allow":["Write(/o/x/**)"]`) || !strings.Contains(s, `"allowWrite":["/o/x"]`) {
 		t.Errorf("overlay JSON wrong: %s", s)
 	}
+	// Own outbox is carved back out of the static denyRead so `send` can read it.
+	if !strings.Contains(s, `"allowRead":["/o/x"]`) {
+		t.Errorf("overlay missing per-invocation allowRead: %s", s)
+	}
 	// Must NOT touch sandbox.enabled etc. (would clobber the merged base).
 	if strings.Contains(s, "enabled") {
 		t.Errorf("overlay should only carry allowWrite, got: %s", s)
