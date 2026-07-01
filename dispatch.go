@@ -416,7 +416,7 @@ func runDispatch(args []string) {
 		os.Exit(2)
 	}
 
-	store, err := LoadSessionStore(cfg.StateDir, cfg.EphemeralSessions)
+	store, err := LoadSessionStore(cfg.SessionDir(), cfg.EphemeralSessions)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "ak-tgclaude: dispatch: %v\n", err)
 		os.Exit(1)
@@ -536,7 +536,7 @@ func runDispatch(args []string) {
 		kind = "ephemeral"
 	}
 	log.Printf("ak-tgclaude: dispatch: responder=%s cwd=%s (%s) max_concurrent=%d access=%s state=%s token=%s",
-		cfg.Responder, cwd, kind, cfg.MaxConcurrent, accessDesc, cfg.StateDir, redact(cfg.BotToken))
+		cfg.Responder, cwd, kind, cfg.MaxConcurrent, accessDesc, cfg.SessionDir(), redact(cfg.BotToken))
 
 	runErr := d.Run(ctx)
 

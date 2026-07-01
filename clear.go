@@ -16,7 +16,7 @@ func runClear(args []string) {
 		fmt.Fprintf(os.Stderr, "ak-tgclaude: clear: %v\n", err)
 		os.Exit(2)
 	}
-	store, err := LoadSessionStore(cfg.StateDir, false)
+	store, err := LoadSessionStore(cfg.SessionDir(), false)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "ak-tgclaude: clear: %v\n", err)
 		os.Exit(1)
@@ -26,5 +26,5 @@ func runClear(args []string) {
 		fmt.Fprintf(os.Stderr, "ak-tgclaude: clear: %v\n", err)
 		os.Exit(1)
 	}
-	fmt.Printf("cleared %d chat→session binding(s) in %s\n", n, cfg.StateDir)
+	fmt.Printf("cleared %d chat→session binding(s) in %s\n", n, cfg.SessionDir())
 }

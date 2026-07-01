@@ -395,6 +395,18 @@ func (c *Config) validate() error {
 	return nil
 }
 
+// SessionDir is where the durable session store (getUpdates offset + chat→session
+// map, in sessions.json) lives. With Workdir set it is $Workdir/state (per-bot,
+// beside project); otherwise it is StateDir (the default location). The Go build
+// cache is deliberately NOT here — it stays under StateDir/cache, shared across
+// bots, so it never follows a per-bot workdir.
+func (c *Config) SessionDir() string {
+	if c.Workdir != "" {
+		return filepath.Join(c.Workdir, "state")
+	}
+	return c.StateDir
+}
+
 // defaultStateDir is $XDG_STATE_HOME/ak-tgclaude, else ~/.local/state/ak-tgclaude.
 func defaultStateDir() string {
 	if d := os.Getenv("XDG_STATE_HOME"); d != "" {
