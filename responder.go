@@ -53,11 +53,16 @@ func (c *claudeResponder) Respond(ctx context.Context, req RespondRequest) (Resp
 	return RespondResult{SessionID: parseSessionID(out.Bytes())}, nil
 }
 
-// buildClaudeArgs assembles the `claude -p` argument list. Permission/sandbox
-// settings come from the responder cwd's project settings (loaded via
-// --setting-sources project once the scaffold materializes), not from here.
+// buildClaudeArgs assembles the `claude -p` argument list. It loads only the
+// responder cwd's project settings (--setting-sources project) so the generated
+// scaffold governs sandbox/permissions/hooks, and runs headless deny-by-default
+// (--permission-mode dontAsk) so an unmatched tool is denied, not hung on.
 func buildClaudeArgs(agent, sessionID string) []string {
-	args := []string{"-p", "--output-format", "json"}
+	args := []string{
+		"-p", "--output-format", "json",
+		"--setting-sources", "project",
+		"--permission-mode", "dontAsk",
+	}
 	if agent != "" {
 		args = append(args, "--agent", agent)
 	}

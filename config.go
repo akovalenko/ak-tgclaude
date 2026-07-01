@@ -57,6 +57,11 @@ type Config struct {
 	// StateDir holds durable dispatcher state (chat->session, message->session),
 	// which must survive restarts. Empty => $XDG_STATE_HOME/ak-tgclaude.
 	StateDir string `toml:"state_dir"`
+
+	// ConfigPath is the path of the loaded TOML config, if any. Set at load time
+	// (not a config field). When the token lives in this file, it is registered
+	// for sandbox deny-read in the responder's scaffold.
+	ConfigPath string `toml:"-"`
 }
 
 // loadConfig resolves configuration from an optional TOML file overlaid with CLI
@@ -78,6 +83,7 @@ func loadConfig(args []string) (*Config, error) {
 		if _, err := toml.DecodeFile(*configPath, &c); err != nil {
 			return nil, fmt.Errorf("reading config %s: %w", *configPath, err)
 		}
+		c.ConfigPath = *configPath
 	}
 	// Flags override file values when set.
 	if *botToken != "" {

@@ -24,7 +24,7 @@ type Dispatcher struct {
 	sender      Sender  // sendMessage/sendDocument (= client in production)
 	store       *SessionStore
 	resp        Responder
-	runtimeBase string // where per-invocation outbox dirs are created
+	outboxRoot  string // writable root under which per-invocation outbox dirs are created
 	pollTimeout int
 }
 
@@ -76,7 +76,7 @@ func (d *Dispatcher) handleUpdate(ctx context.Context, u Update) {
 		return
 	}
 
-	outbox, err := os.MkdirTemp(d.runtimeBase, "outbox-")
+	outbox, err := os.MkdirTemp(d.outboxRoot, "outbox-")
 	if err != nil {
 		log.Printf("ak-tgclaude: outbox for chat %d: %v", m.Chat.ID, err)
 		return
@@ -162,16 +162,36 @@ func runDispatch(args []string) {
 
 	client := NewClient(cfg.BotToken)
 
+	runtimeBase := resolveRuntimeBase(cfg.RuntimeBase)
+	outboxRoot, err := os.MkdirTemp(runtimeBase, "ak-tgclaude-out-")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "ak-tgclaude: dispatch: creating outbox root: %v\n", err)
+		os.Exit(1)
+	}
+
 	var resp Responder
 	switch cfg.Responder {
 	case ResponderStub:
 		resp = &stubResponder{}
 	default:
-		// NOTE: the responder cwd (scaffold: generated settings.json + skills) is
-		// provisioned by the `deploy` subcommand / go:embed, which is not wired
-		// yet. Until then a live `claude` run needs a hand-provisioned cwd here.
-		cwd := filepath.Join(cfg.StateDir, "responder-cwd")
+		// Materialize the responder scaffold (generated .claude/settings.json with
+		// the literal runtime paths: sandbox, token deny-read, hook) and launch
+		// the responder there with --setting-sources project.
+		cwd, err := os.MkdirTemp(runtimeBase, "ak-tgclaude-cwd-")
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "ak-tgclaude: dispatch: creating responder cwd: %v\n", err)
+			os.Exit(1)
+		}
+		if err := materializeScaffold(cwd, scaffoldParams{
+			CacheDir:   filepath.Join(cfg.StateDir, "cache"),
+			OutboxRoot: outboxRoot,
+			TokenFile:  cfg.ConfigPath,
+		}); err != nil {
+			fmt.Fprintf(os.Stderr, "ak-tgclaude: dispatch: %v\n", err)
+			os.Exit(1)
+		}
 		resp = &claudeResponder{agent: cfg.Agent, cwd: cwd}
+		log.Printf("ak-tgclaude: dispatch: responder cwd=%s", cwd)
 	}
 
 	d := &Dispatcher{
@@ -179,7 +199,7 @@ func runDispatch(args []string) {
 		sender:      client,
 		store:       store,
 		resp:        resp,
-		runtimeBase: resolveRuntimeBase(cfg.RuntimeBase),
+		outboxRoot:  outboxRoot,
 		pollTimeout: defaultPollTimeout,
 	}
 

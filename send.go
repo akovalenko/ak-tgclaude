@@ -19,13 +19,14 @@ const sendUsage = `ak-tgclaude send — enqueue an outbound Telegram message (ru
 usage: ak-tgclaude send <kind> [flags] [body]
 
 kinds:
-  text  [--html] [--silent] [body|-]        a text message (plain, or Telegram HTML with --html)
-  code  [--lang L] [--caption C] [--silent] [body|-]
-                                            a preformatted block, optionally tagged with a language
+  text  [--html] [--silent] [--file F] [body|-]   a text message (plain, or Telegram HTML with --html)
+  code  [--lang L] [--caption C] [--silent] [--file F] [body|-]
+                                                  a preformatted block, optionally tagged with a language
   doc   [--filename N] [--caption C] [--silent] <path>
-                                            a file attachment
+                                                  a file attachment
 
-The body is the positional argument, or stdin when it is "-" or omitted.
+The body is --file F, the positional argument, or stdin ("-"/omitted). Prefer
+--file for arbitrary text: it keeps message content (quotes, '!', …) out of argv.
 The outbox directory comes from $AK_TGCLAUDE_OUTBOX (override with --outbox).
 No route (chat/reply) is specified here; the dispatcher pins it in-process.
 `
@@ -77,11 +78,12 @@ func parseSendText(args []string) (*Descriptor, string, error) {
 	fs := flag.NewFlagSet("send text", flag.ContinueOnError)
 	html := fs.Bool("html", false, "treat the body as Telegram HTML (parse_mode=HTML)")
 	silent := fs.Bool("silent", false, "send without a notification")
+	file := fs.String("file", "", "read the body from this file (keeps message text out of argv)")
 	outbox := fs.String("outbox", "", "outbox dir (default: $AK_TGCLAUDE_OUTBOX)")
 	if err := fs.Parse(args); err != nil {
 		return nil, "", err
 	}
-	text, err := bodyArg(fs.Args())
+	text, err := resolveBody(*file, fs.Args())
 	if err != nil {
 		return nil, "", err
 	}
@@ -97,11 +99,12 @@ func parseSendCode(args []string) (*Descriptor, string, error) {
 	lang := fs.String("lang", "", "source language tag (e.g. go, python)")
 	caption := fs.String("caption", "", "optional line shown before the block")
 	silent := fs.Bool("silent", false, "send without a notification")
+	file := fs.String("file", "", "read the body from this file (keeps message text out of argv)")
 	outbox := fs.String("outbox", "", "outbox dir (default: $AK_TGCLAUDE_OUTBOX)")
 	if err := fs.Parse(args); err != nil {
 		return nil, "", err
 	}
-	code, err := bodyArg(fs.Args())
+	code, err := resolveBody(*file, fs.Args())
 	if err != nil {
 		return nil, "", err
 	}
@@ -135,6 +138,21 @@ func parseSendDoc(args []string) (*Descriptor, string, error) {
 	}
 	d := &Descriptor{Kind: KindDocument, Path: path, Filename: *filename, Caption: *caption, Silent: *silent}
 	return d, *outbox, nil
+}
+
+// resolveBody returns the message body from --file if set, else from the
+// positional argument/stdin. --file is the responder's path: it writes the body
+// with the Write tool and passes only the filename here, so message text (with
+// shell metacharacters like '!') never reaches the command line.
+func resolveBody(file string, pos []string) (string, error) {
+	if file != "" {
+		b, err := os.ReadFile(file)
+		if err != nil {
+			return "", fmt.Errorf("reading body file: %w", err)
+		}
+		return string(b), nil
+	}
+	return bodyArg(pos)
 }
 
 // bodyArg returns the message body: the single positional argument, or stdin

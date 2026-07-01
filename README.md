@@ -166,6 +166,30 @@ model calls keep working while the shell never sees the secret.
 > is an alternative — the key is fed by a script and stays out of the tool env
 > unless the script itself exports it.)
 
+## Responder scaffold (generated settings.json)
+
+At startup the dispatcher **materializes** the responder's launch dir: it writes
+a generated `.claude/settings.json` and launches `claude -p --setting-sources
+project --permission-mode dontAsk` there, so only that file governs the
+responder (operator-global/local settings are excluded, and an unmatched tool is
+denied rather than left hanging).
+
+The settings are **built from a Go struct and marshaled to JSON** (not a text
+template), so the literal runtime paths are inserted safely — `go:embed` is only
+for static assets (the responder skills). Modeled on a real sandboxed tgbot
+deployment, the generated file:
+
+- enables the sandbox with `autoAllowBashIfSandboxed` (grep/`go`/`ak-tgclaude
+  send` run without prompts) and `allowUnsandboxedCommands: false` (no escape);
+- points the Go caches (`GOCACHE`/`GOMODCACHE`/…) at an **isolated** dir, and
+  allows egress only to `proxy.golang.org`/`sum.golang.org`/`storage.googleapis.com`;
+- grants sandbox writes only to the outbox root and the cache dir;
+- installs the **token guard**: `sandbox.credentials.files` deny-read on the
+  config file, `credentials.envVars` deny (unset) for `ANTHROPIC_*`, and the
+  PreToolUse hook `ak-tgclaude hook pretooluse --deny-read <token file>` (bare
+  PATH name). The hook denies any Read/Bash that touches the token; the
+  deny-read is the authoritative backstop against obfuscation.
+
 ## Responder isolation
 
 - Runs in its **own (ephemeral) cwd**, launched with `--setting-sources project`
@@ -233,10 +257,16 @@ invocation's route). The body is a positional argument, or stdin (`-`/omitted)
 for large content:
 
 ```sh
-ak-tgclaude send text [--html] [--silent] [body|-]
-ak-tgclaude send code [--lang go] [--caption main.go] [--silent] [body|-]
+ak-tgclaude send text [--html] [--silent] [--file F] [body|-]
+ak-tgclaude send code [--lang go] [--caption main.go] [--silent] [--file F] [body|-]
 ak-tgclaude send doc  [--filename report.pdf] [--caption "…"] [--silent] <path>
 ```
+
+The responder emits with **`--file`**: it writes the message body to a file
+(with the Write tool) and passes only the filename, so message content — quotes,
+`!`, arbitrary HTML — never reaches the command line, where a sandboxed shell
+would mangle it. The body can also be a positional argument or stdin (`-`) for
+non-agent callers.
 
 A responder may call `send` several times to emit multiple messages for one
 update (the rich agent facade — text, code, attachments, "think and send more"
@@ -292,8 +322,11 @@ render.go          descriptor -> Telegram text/parse_mode, code wrapping, spill
 telegram.go        Telegram Bot API client (getUpdates / sendMessage / sendDocument)
 drain.go           per-invocation outbox drain (fsnotify watch -> send -> ack)
 session.go         durable state: poll offset + chat->session map
-responder.go       Responder interface + `claude -p` spawn
+responder.go       Responder interface (claude / stub) + `claude -p` spawn
 dispatch.go        the dispatch loop: poll -> route -> respond -> deliver
+scaffold.go        generated .claude/settings.json (sandbox + token guard)
+hook.go            `hook pretooluse`: deny reads of the token file
+deploy.go          `deploy`: PATH self-check + example config
 bot.toml.example   example config
 go.mod / go.sum
 README.md          this design

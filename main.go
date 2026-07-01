@@ -35,8 +35,10 @@ func main() {
 		runDispatch(os.Args[2:])
 	case "send":
 		runSend(os.Args[2:])
-	case "hook", "deploy":
-		todo(cmd)
+	case "hook":
+		runHook(os.Args[2:])
+	case "deploy":
+		runDeploy(os.Args[2:])
 	case "version":
 		fmt.Println("ak-tgclaude (dev)")
 	case "-h", "--help", "help":
@@ -45,9 +47,4 @@ func main() {
 		fmt.Fprintf(os.Stderr, "ak-tgclaude: unknown command %q\n\n%s", cmd, usage)
 		os.Exit(2)
 	}
-}
-
-func todo(cmd string) {
-	fmt.Fprintf(os.Stderr, "ak-tgclaude: %s: not implemented yet\n", cmd)
-	os.Exit(1)
 }

@@ -7,12 +7,12 @@ import (
 )
 
 func TestBuildClaudeArgs(t *testing.T) {
-	got := strings.Join(buildClaudeArgs("", ""), " ")
-	if got != "-p --output-format json" {
+	base := "-p --output-format json --setting-sources project --permission-mode dontAsk"
+	if got := strings.Join(buildClaudeArgs("", ""), " "); got != base {
 		t.Errorf("bare args = %q", got)
 	}
-	got = strings.Join(buildClaudeArgs("eputs-telegram-guide", "sess-7"), " ")
-	want := "-p --output-format json --agent eputs-telegram-guide --resume sess-7"
+	got := strings.Join(buildClaudeArgs("eputs-telegram-guide", "sess-7"), " ")
+	want := base + " --agent eputs-telegram-guide --resume sess-7"
 	if got != want {
 		t.Errorf("full args = %q, want %q", got, want)
 	}

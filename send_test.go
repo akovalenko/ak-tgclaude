@@ -51,6 +51,26 @@ func TestParseSendDocStatsAndAbsolutizes(t *testing.T) {
 	}
 }
 
+func TestParseSendTextFromFile(t *testing.T) {
+	dir := t.TempDir()
+	body := filepath.Join(dir, "reply.html")
+	if err := os.WriteFile(body, []byte("<b>Yes!</b> \"quoted\""), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// --file keeps message text (with ! and quotes) out of argv.
+	d, _, err := parseSendText([]string{"--html", "--file", body})
+	if err != nil {
+		t.Fatalf("parseSendText --file: %v", err)
+	}
+	if d.Text != "<b>Yes!</b> \"quoted\"" || d.Format != FormatHTML {
+		t.Errorf("descriptor from file wrong: %+v", d)
+	}
+
+	if _, _, err := parseSendText([]string{"--file", filepath.Join(dir, "missing")}); err == nil {
+		t.Errorf("missing body file should error")
+	}
+}
+
 func TestResolveOutbox(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv(outboxEnv, "")

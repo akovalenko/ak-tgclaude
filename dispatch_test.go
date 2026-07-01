@@ -35,7 +35,7 @@ func newTestDispatcher(t *testing.T, resp Responder, sender Sender) *Dispatcher 
 		sender:      sender,
 		store:       store,
 		resp:        resp,
-		runtimeBase: t.TempDir(),
+		outboxRoot:  t.TempDir(),
 		pollTimeout: 1,
 	}
 }
