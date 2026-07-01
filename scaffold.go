@@ -514,31 +514,34 @@ func shellQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
-// runScaffold materializes the responder cwd WITHOUT running the dispatcher, so
-// the operator can inspect the generated settings, tweak settings.local.json,
-// and run `claude` there by hand to observe the sandbox. Everything is
-// self-contained under --cwd (settings + outbox), so it can be blown away.
+// runScaffold materializes the responder's workdir/project WITHOUT running the
+// dispatcher, so the operator can inspect the generated settings, tweak
+// settings.local.json, and run `claude` there by hand to observe the sandbox. It
+// materializes what the dispatcher regenerates on startup (minus the contents
+// reset), so point --workdir at a throwaway dir to inspect without touching a live
+// bot's project.
 func runScaffold(args []string) {
 	cfg, err := parseConfig(args)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "ak-tgclaude: scaffold: %v\n", err)
 		os.Exit(2)
 	}
-	if cfg.Cwd == "" {
-		fmt.Fprintln(os.Stderr, "ak-tgclaude: scaffold: --cwd is required (dir to materialize into)")
+	if cfg.Workdir == "" {
+		fmt.Fprintln(os.Stderr, "ak-tgclaude: scaffold: --workdir is required (its project/ is materialized for inspection)")
 		os.Exit(2)
 	}
-	if err := os.MkdirAll(cfg.Cwd, 0o700); err != nil {
+	project := filepath.Join(cfg.Workdir, "project")
+	if err := os.MkdirAll(project, 0o700); err != nil {
 		fmt.Fprintf(os.Stderr, "ak-tgclaude: scaffold: %v\n", err)
 		os.Exit(1)
 	}
-	outboxRoot := filepath.Join(cfg.Cwd, "outbox")
+	outboxRoot := filepath.Join(project, "outbox")
 	if err := os.MkdirAll(outboxRoot, 0o700); err != nil {
 		fmt.Fprintf(os.Stderr, "ak-tgclaude: scaffold: %v\n", err)
 		os.Exit(1)
 	}
-	if err := materializeScaffold(cfg.Cwd, scaffoldParams{
-		CacheDir:   filepath.Join(cfg.Cwd, "cache"),
+	if err := materializeScaffold(project, scaffoldParams{
+		CacheDir:   filepath.Join(cfg.StateDir, "cache"),
 		OutboxRoot: outboxRoot,
 		TokenFile:  cfg.ConfigPath,
 		NoRefuse:   cfg.NoRefuse,
@@ -557,8 +560,8 @@ func runScaffold(args []string) {
 		agentVariant = "norefuse (do-what-you're-asked)"
 	}
 	fmt.Printf("ak-tgclaude: scaffold materialized\n")
-	fmt.Printf("  cwd:      %s\n", cfg.Cwd)
-	fmt.Printf("  settings: %s\n", filepath.Join(cfg.Cwd, ".claude", "settings.json"))
+	fmt.Printf("  project:  %s\n", project)
+	fmt.Printf("  settings: %s\n", filepath.Join(project, ".claude", "settings.json"))
 	fmt.Printf("  agent:    %s\n", agentVariant)
 	if len(cfg.WireSkills) > 0 {
 		fmt.Printf("  wired:    %s (preloaded into the agent)\n", strings.Join(cfg.WireSkills, ", "))
@@ -576,7 +579,7 @@ func runScaffold(args []string) {
 	}
 	fmt.Printf("\nrun claude there by hand to observe the sandbox (the --settings\n")
 	fmt.Printf("overlay grants write to just this outbox, as the dispatcher does per invocation):\n")
-	fmt.Printf("  cd %s\n", cfg.Cwd)
+	fmt.Printf("  cd %s\n", project)
 	fmt.Printf("  AK_TGCLAUDE_OUTBOX=%s claude -p --setting-sources project --permission-mode dontAsk \\\n", outboxRoot)
 	fmt.Printf("    --settings '%s'%s 'hello'\n", buildInvocationSettings(outboxRoot), agentFlag)
 }

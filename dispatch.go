@@ -566,9 +566,9 @@ func runDispatch(args []string) {
 
 // resolveResponderCwd returns the responder launch dir and whether it is
 // ephemeral. A configured Workdir uses its fixed $Workdir/project (created if
-// needed; the caller resets+regenerates its contents from canon each start). A
-// configured Cwd is fixed too (created if needed, kept as-is on exit). Otherwise a
-// pseudo-random dir is created under the runtime base and removed on exit.
+// needed; the caller resets+regenerates its contents from canon each start).
+// Otherwise a pseudo-random dir is created under the runtime base and removed on
+// exit.
 func resolveResponderCwd(cfg *Config) (dir string, ephemeral bool, err error) {
 	if cfg.Workdir != "" {
 		project := filepath.Join(cfg.Workdir, "project")
@@ -576,12 +576,6 @@ func resolveResponderCwd(cfg *Config) (dir string, ephemeral bool, err error) {
 			return "", false, fmt.Errorf("creating responder cwd %s: %w", project, err)
 		}
 		return project, false, nil
-	}
-	if cfg.Cwd != "" {
-		if err := os.MkdirAll(cfg.Cwd, 0o700); err != nil {
-			return "", false, fmt.Errorf("creating responder cwd %s: %w", cfg.Cwd, err)
-		}
-		return cfg.Cwd, false, nil
 	}
 	dir, err = os.MkdirTemp(resolveRuntimeBase(cfg.RuntimeBase), "ak-tgclaude-cwd-")
 	if err != nil {
