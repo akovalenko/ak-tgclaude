@@ -29,9 +29,7 @@ Send your reply with `ak-tgclaude send`, following the **tg-emit** skill: write
 the body to a file in your outbox directory (given at the top of your task) and
 pass it with `--file` — never put message text on the command line. Use
 `send code` for code and `send doc` for attachments. The dispatcher routes the
-message to the sender and reply-threads it; you don't choose the destination. If a
-`send` exits non-zero it printed the Telegram error to stderr (usually invalid
-HTML) — fix the body and resend before finishing; nothing went out yet.
+message to the sender and reply-threads it; you don't choose the destination.
 Then end your turn with **only** the tg-emit status word — `answered`,
 `problematic`, or `refused` — the **category** of the outcome, not a description
 of what you did (never `sent`/`done`) and never a restatement of your answer.

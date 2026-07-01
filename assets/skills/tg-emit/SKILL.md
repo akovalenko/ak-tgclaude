@@ -85,22 +85,28 @@ snippet to a document automatically, which is the right form for a big block.
 
 ## If `send` fails
 
-`send` waits for delivery and **exits non-zero if Telegram rejected the
-message**, printing the reason to stderr. The usual cause is invalid HTML in
-`--html` — an unescaped `<` or `&`, or a tag Telegram does not allow — which
-comes back as a "can't parse entities" error. When a `send` command fails:
+`send` waits for delivery and **exits non-zero if the message did not get
+through**, printing the reason to stderr. Read that stderr line, then split on
+what it says:
 
-1. **Read the stderr message** — it carries Telegram's own description of what
-   was wrong.
-2. **Fix and resend**: correct the body file (escape the offending character,
-   drop the disallowed tag, or fall back to plain `send text` without `--html`)
-   and run `send` again. Nothing went out yet, so there is no duplicate.
-3. If you genuinely cannot produce a sendable message, emit `problematic` as your
-   final status word.
+- **Invalid HTML — the one case you can fix.** A `--html` body with an unescaped
+  `<`/`&`, or a tag Telegram does not allow, comes back as a "can't parse
+  entities" error. **Fix and resend**: escape the offending character, drop the
+  disallowed tag, or fall back to plain `send text` without `--html`, then run
+  `send` again. Nothing went out yet, so there is no duplicate.
+- **Anything else** (blocked chat, chat-not-found, an attachment over Telegram's
+  size limit, network trouble that exhausted retries): you **cannot** fix the
+  transport. Don't keep retrying — just note the reply did not get through and
+  emit `problematic` as your final status word.
 
-A `send` that prints `queued; delivery outcome unknown after 5s` and exits `0` is
-**not** a failure — the dispatcher was just slow to confirm; the message is queued
-and will go out. No action needed.
+Two things that are **not** failures — don't treat them as such:
+
+- A message past Telegram's 4096-char limit is **not** rejected: the dispatcher
+  automatically spills an over-long `text`/`code` to a document (you still
+  prefer to split long prose yourself — see "Several messages & length").
+- A `send` that prints `queued; delivery outcome unknown after 5s` and exits `0`
+  is fine — the dispatcher was just slow to confirm; the message is queued and
+  will go out.
 
 ## Final output — output ONLY a status word (it is a signal, not your answer)
 
