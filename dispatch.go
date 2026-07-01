@@ -424,6 +424,7 @@ func runDispatch(args []string) {
 			NoRefuse:   cfg.NoRefuse,
 			Project:    cfg.Project,
 			WireSkills: cfg.WireSkills,
+			BangBug:    cfg.BangBug,
 		}); err != nil {
 			fmt.Fprintf(os.Stderr, "ak-tgclaude: dispatch: %v\n", err)
 			os.Exit(1)

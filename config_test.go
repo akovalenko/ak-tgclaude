@@ -20,7 +20,7 @@ func TestParseConfigAccessFlags(t *testing.T) {
 }
 
 func TestParseConfigEphemeralAndBillFlags(t *testing.T) {
-	c, err := parseConfig([]string{"--ephemeral-sessions", "--bill"})
+	c, err := parseConfig([]string{"--ephemeral-sessions", "--bill", "--bang-bug"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -30,10 +30,13 @@ func TestParseConfigEphemeralAndBillFlags(t *testing.T) {
 	if !c.Bill {
 		t.Error("--bill should set Bill")
 	}
-	// Both default off when unset.
+	if !c.BangBug {
+		t.Error("--bang-bug should set BangBug")
+	}
+	// All default off when unset.
 	d, _ := parseConfig(nil)
-	if d.EphemeralSessions || d.Bill {
-		t.Errorf("defaults should be off: ephemeral=%v bill=%v", d.EphemeralSessions, d.Bill)
+	if d.EphemeralSessions || d.Bill || d.BangBug {
+		t.Errorf("defaults should be off: ephemeral=%v bill=%v bang=%v", d.EphemeralSessions, d.Bill, d.BangBug)
 	}
 }
 

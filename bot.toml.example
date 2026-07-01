@@ -76,6 +76,14 @@ project = "~/code/example-project"
 # `clear` subcommand instead.
 # ephemeral_sessions = false
 
+# Workaround for Claude Code bug #64301: sandboxed Bash blind-escapes `!`->`\!`,
+# silently corrupting the command/output. With this on, the PreToolUse hook denies
+# any sandboxed Bash whose command contains `\!` and tells the model to write the
+# script to a file instead (which the sandbox runs verbatim). Default false —
+# it's a workaround, and a legitimate `\!` (e.g. `find . \!`) is caught too. Also
+# --bang-bug.
+# bang_bug = false
+
 # Materialize the do-what-you're-asked responder variant (does not decline
 # off-topic messages). Machine guards (read-only sandbox, token deny, per-chat
 # route) still apply, so it can't exceed the read-only contract. Also --norefuse.

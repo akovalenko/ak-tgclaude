@@ -66,6 +66,19 @@ func TestBuildSettingsShape(t *testing.T) {
 	}
 }
 
+func TestBuildSettingsBangBug(t *testing.T) {
+	// Off by default: no --bang-bug in the hook command.
+	off := buildSettings(scaffoldParams{CacheDir: "/c"})
+	if strings.Contains(off.Hooks.PreToolUse[0].Hooks[0].Command, "--bang-bug") {
+		t.Errorf("default should not pass --bang-bug: %q", off.Hooks.PreToolUse[0].Hooks[0].Command)
+	}
+	// On: the flag is appended to the generated hook command.
+	on := buildSettings(scaffoldParams{CacheDir: "/c", BangBug: true})
+	if !strings.Contains(on.Hooks.PreToolUse[0].Hooks[0].Command, "--bang-bug") {
+		t.Errorf("BangBug should pass --bang-bug: %q", on.Hooks.PreToolUse[0].Hooks[0].Command)
+	}
+}
+
 func TestBuildSettingsNoTokenFile(t *testing.T) {
 	s := buildSettings(scaffoldParams{CacheDir: "/c"})
 	// Even without a bot token, the host secrets are always denied; only the bot

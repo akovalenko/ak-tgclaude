@@ -60,6 +60,7 @@ type filePolicy struct {
 	deny       []string // protected paths (token); highest priority
 	readRoots  []string // Read allowed under these (project + writeRoots)
 	writeRoots []string // Edit/Write/NotebookEdit allowed under these
+	bangBug    bool     // deny sandboxed Bash whose command contains `\!` (bug #64301)
 }
 
 // envFilePolicy resolves the policy from the responder's env at hook time:
@@ -72,7 +73,8 @@ func envFilePolicy(deny []string) filePolicy {
 }
 
 // runHookPreToolUse gates the responder's tool calls: it path-scopes the file
-// tools per filePolicy, allows sandboxed Bash / denies unsandboxed Bash, and
+// tools per filePolicy, allows sandboxed Bash / denies unsandboxed Bash (and,
+// with --bang-bug, sandboxed Bash whose command carries the corrupted `\!`), and
 // DEFERS everything else (Grep/Glob/Skill/…) to the permission layer. A Bash
 // read of the token is masked by the sandbox's credentials.files deny-read, not
 // by this hook.
@@ -80,6 +82,7 @@ func runHookPreToolUse(args []string) {
 	fs := flag.NewFlagSet("hook pretooluse", flag.ContinueOnError)
 	var deny multiFlag
 	fs.Var(&deny, "deny-read", "path the responder must not read (repeatable)")
+	bangBug := fs.Bool("bang-bug", false, `deny sandboxed Bash whose command contains \! (bug #64301: the sandbox corrupts the bang char)`)
 	if err := fs.Parse(args); err != nil {
 		os.Exit(2)
 	}
@@ -91,7 +94,9 @@ func runHookPreToolUse(args []string) {
 		return
 	}
 
-	switch decision, reason := decidePreToolUse(&in, envFilePolicy(deny)); decision {
+	pol := envFilePolicy(deny)
+	pol.bangBug = *bangBug
+	switch decision, reason := decidePreToolUse(&in, pol); decision {
 	case "":
 		os.Exit(0) // defer: no output => normal permission/sandbox flow applies
 	default:
@@ -111,6 +116,12 @@ func decidePreToolUse(in *preToolUseInput, pol filePolicy) (decision, reason str
 	case "Bash":
 		if in.ToolInput.DangerouslyDisableSandbox {
 			return "deny", "ak-tgclaude hook: unsandboxed Bash is not permitted (read-only, sandboxed inspection only)"
+		}
+		// bug #64301: sandboxed Bash blind-escapes `!`→`\!`, silently corrupting
+		// the command/output. The corrupted `\!` is the detectable signature; push
+		// such work to a file (heredoc included), which the sandbox runs verbatim.
+		if pol.bangBug && strings.Contains(in.ToolInput.Command, `\!`) {
+			return "deny", "ak-tgclaude hook: sandboxed Bash corrupts the bang char (bug #64301) — write the script to a file and run the file"
 		}
 		return "allow", "ak-tgclaude hook: sandboxed Bash allowed"
 

@@ -2,6 +2,7 @@ package main
 
 import (
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -78,6 +79,28 @@ func TestDecideBash(t *testing.T) {
 	}
 	if d, _ := decidePreToolUse(bashInput("git pull", true), testPolicy); d != "deny" {
 		t.Errorf("unsandboxed Bash => %q, want deny", d)
+	}
+}
+
+func TestDecideBashBangBug(t *testing.T) {
+	bangPol := testPolicy
+	bangPol.bangBug = true
+
+	// With the guard on, a corrupted `\!` in a sandboxed command is denied.
+	if d, r := decidePreToolUse(bashInput(`echo "done\!"`, false), bangPol); d != "deny" || !strings.Contains(r, "#64301") {
+		t.Errorf("bang command => %q / %q, want deny citing #64301", d, r)
+	}
+	// A plain command with no bang is still allowed.
+	if d, _ := decidePreToolUse(bashInput("go build ./...", false), bangPol); d != "allow" {
+		t.Errorf("no-bang command => %q, want allow", d)
+	}
+	// A bare `!` (not the corrupted `\!`) is not the signature — only `\!` trips it.
+	if d, _ := decidePreToolUse(bashInput("test ! -f x", false), bangPol); d != "allow" {
+		t.Errorf("bare bang => %q, want allow (only \\! is the signature)", d)
+	}
+	// Guard off (default): the same corrupted command is allowed through.
+	if d, _ := decidePreToolUse(bashInput(`echo "done\!"`, false), testPolicy); d != "allow" {
+		t.Errorf("bang with guard off => %q, want allow", d)
 	}
 }
 

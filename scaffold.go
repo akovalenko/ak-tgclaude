@@ -102,6 +102,7 @@ type scaffoldParams struct {
 	NoRefuse       bool     // materialize the do-what-you're-asked agent variant
 	Project        string   // knowledge root; substituted for {{PROJECT}} in agent/skill templates
 	WireSkills     []string // operator skill templates (dir or SKILL.md) to materialize + preload
+	BangBug        bool     // pass --bang-bug to the hook (deny sandboxed Bash with the corrupted `\!`)
 }
 
 // defaultDenyEnvVars are the ambient secrets scrubbed from the responder's
@@ -206,6 +207,9 @@ func buildSettings(p scaffoldParams) *claudeSettings {
 	hookCmd := p.HookBinary + " hook pretooluse"
 	if p.TokenFile != "" {
 		hookCmd += " --deny-read " + shellQuote(p.TokenFile)
+	}
+	if p.BangBug {
+		hookCmd += " --bang-bug"
 	}
 	s.Hooks = &hooksCfg{PreToolUse: []hookMatcher{{
 		Matcher: "*",
@@ -493,6 +497,7 @@ func runScaffold(args []string) {
 		NoRefuse:   cfg.NoRefuse,
 		Project:    cfg.Project,
 		WireSkills: cfg.WireSkills,
+		BangBug:    cfg.BangBug,
 	}); err != nil {
 		fmt.Fprintf(os.Stderr, "ak-tgclaude: scaffold: %v\n", err)
 		os.Exit(1)

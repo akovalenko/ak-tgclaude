@@ -350,9 +350,14 @@ path-scoped from the responder's env:
   token happens to sit under the project.
 
 It also **allows sandboxed** Bash / **denies unsandboxed** Bash, and **defers**
-everything else (Grep/Glob/Skill/…) to the permission layer. Because the hook is
-the file-tool authority, the static `permissions.allow` lists only those deferred
-tools (no Read/Write). A Bash read of the token is masked by the sandbox's
+everything else (Grep/Glob/Skill/…) to the permission layer. With `bang_bug`
+(`--bang-bug`, off by default) it additionally denies sandboxed Bash whose command
+carries a `\!` — the signature of Claude Code bug #64301, where the sandbox
+blind-escapes `!`→`\!` and silently corrupts the command/output; the model is told
+to write the script to a file (heredoc included), which the sandbox runs verbatim.
+A legitimate `\!` (e.g. `find … \!`) is caught too, hence opt-in. Because the hook
+is the file-tool authority, the static `permissions.allow` lists only those
+deferred tools (no Read/Write). A Bash read of the token is masked by the sandbox's
 `credentials.files` deny-read, not the hook (obfuscation-proof; no command
 string-matching). The hook reads the project/outbox from env, which the
 dispatcher sets on the responder process and the (unsandboxed) hook inherits.

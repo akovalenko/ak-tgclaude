@@ -102,6 +102,14 @@ type Config struct {
 	// exceed the read-only sandboxed contract.
 	NoRefuse bool `toml:"no_refuse"`
 
+	// BangBug makes the PreToolUse hook deny sandboxed Bash whose command contains
+	// a `\!` — the signature of Claude Code bug #64301, where the sandbox
+	// blind-escapes `!`→`\!` and silently corrupts the command/output. The denied
+	// call is pushed to "write the script to a file". Default false (opt-in); it is
+	// a workaround, and a legitimate `\!` (e.g. `find … \!`) would be caught too.
+	// Also --bang-bug.
+	BangBug bool `toml:"bang_bug"`
+
 	// Bill sends the responder's dollar cost (total_cost_usd from `claude -p`) as a
 	// bare "$n.nnn" message to the chat after each answer, but only when that cost
 	// is present and non-zero. Under a subscription the figure is notional (what the
@@ -188,6 +196,7 @@ func parseConfig(args []string) (*Config, error) {
 	noRefuse := fs.Bool("norefuse", false, "materialize the do-what-you're-asked responder (does not decline off-topic; machine guards still apply)")
 	ephemeralSessions := fs.Bool("ephemeral-sessions", false, "keep chat→session bindings in memory only (never persisted; offset still persists; each restart starts fresh)")
 	bill := fs.Bool("bill", false, "after each answer, send the run's dollar cost as a bare \"$n.nnn\" message (only when present and non-zero)")
+	bangBug := fs.Bool("bang-bug", false, `deny sandboxed Bash containing \! (workaround for bug #64301 corrupting the bang char); the responder writes such commands to a file instead`)
 	var allowUsers int64List
 	fs.Var(&allowUsers, "allow-user", "authorize a Telegram user id (repeatable; merged with allowed_users)")
 	var wireSkills stringList
@@ -234,6 +243,9 @@ func parseConfig(args []string) (*Config, error) {
 	}
 	if *bill {
 		c.Bill = true
+	}
+	if *bangBug {
+		c.BangBug = true
 	}
 	// allowed_users is additive: --allow-user appends to the file list (rather
 	// than overriding it) so the CLI can grant one-off access on top of config.
