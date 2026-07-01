@@ -175,3 +175,52 @@ func materializeScaffold(cwd string, p scaffoldParams) error {
 func shellQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
+
+// runScaffold materializes the responder cwd WITHOUT running the dispatcher, so
+// the operator can inspect the generated settings, tweak settings.local.json,
+// and run `claude` there by hand to observe the sandbox. Everything is
+// self-contained under --cwd (settings + outbox), so it can be blown away.
+func runScaffold(args []string) {
+	cfg, err := parseConfig(args)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "ak-tgclaude: scaffold: %v\n", err)
+		os.Exit(2)
+	}
+	if cfg.Cwd == "" {
+		fmt.Fprintln(os.Stderr, "ak-tgclaude: scaffold: --cwd is required (dir to materialize into)")
+		os.Exit(2)
+	}
+	if err := os.MkdirAll(cfg.Cwd, 0o700); err != nil {
+		fmt.Fprintf(os.Stderr, "ak-tgclaude: scaffold: %v\n", err)
+		os.Exit(1)
+	}
+	outboxRoot := filepath.Join(cfg.Cwd, "outbox")
+	if err := os.MkdirAll(outboxRoot, 0o700); err != nil {
+		fmt.Fprintf(os.Stderr, "ak-tgclaude: scaffold: %v\n", err)
+		os.Exit(1)
+	}
+	if err := materializeScaffold(cfg.Cwd, scaffoldParams{
+		CacheDir:   filepath.Join(cfg.Cwd, "cache"),
+		OutboxRoot: outboxRoot,
+		TokenFile:  cfg.ConfigPath,
+	}); err != nil {
+		fmt.Fprintf(os.Stderr, "ak-tgclaude: scaffold: %v\n", err)
+		os.Exit(1)
+	}
+
+	fmt.Printf("ak-tgclaude: scaffold materialized\n")
+	fmt.Printf("  cwd:      %s\n", cfg.Cwd)
+	fmt.Printf("  settings: %s\n", filepath.Join(cfg.Cwd, ".claude", "settings.json"))
+	fmt.Printf("  outbox:   %s\n", outboxRoot)
+	if cfg.ConfigPath == "" {
+		fmt.Printf("  (no --config given: the token guard has no deny-read path)\n")
+	}
+	agentFlag := ""
+	if cfg.Agent != "" {
+		agentFlag = " --agent " + cfg.Agent
+	}
+	fmt.Printf("\nrun claude there by hand to observe the sandbox:\n")
+	fmt.Printf("  cd %s\n", cfg.Cwd)
+	fmt.Printf("  AK_TGCLAUDE_OUTBOX=%s claude -p --setting-sources project --permission-mode dontAsk%s 'hello'\n",
+		outboxRoot, agentFlag)
+}

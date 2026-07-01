@@ -19,6 +19,8 @@ commands:
              by dropping a descriptor into the outbox spool
   hook       PreToolUse hook mode (e.g. "hook pretooluse"): gate the
              responder's tool calls (deny reads of the token file, ...)
+  scaffold   materialize a responder cwd (generated settings.json) without
+             running the dispatcher, to inspect it and run claude by hand
   deploy     provision the project tree, example config, and skills.
              Assumes the binary is already on PATH (e.g. via "go install");
              it does NOT copy itself.
@@ -37,6 +39,8 @@ func main() {
 		runSend(os.Args[2:])
 	case "hook":
 		runHook(os.Args[2:])
+	case "scaffold":
+		runScaffold(os.Args[2:])
 	case "deploy":
 		runDeploy(os.Args[2:])
 	case "version":

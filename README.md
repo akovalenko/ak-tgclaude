@@ -19,6 +19,7 @@ sprawl, one thing to put on `PATH`:
 | `dispatch` | host (trusted) | holds the bot token in memory, polls Telegram `getUpdates`, routes each update to a responder, watches the outbox spool and sends queued messages |
 | `send` | inside the responder's sandbox | enqueues an outbound Telegram message by dropping a descriptor into the outbox spool (no token, no network) |
 | `hook pretooluse` | as the responder's PreToolUse hook | gates the responder's tool calls (e.g. denies reads of the token file) |
+| `scaffold` | host | materializes a responder cwd (generated settings.json) without running the dispatcher, to inspect it and run `claude` by hand |
 | `deploy` | host, once | provisions the project tree, example config, and skills |
 
 ## Configuration
@@ -189,6 +190,23 @@ deployment, the generated file:
   PreToolUse hook `ak-tgclaude hook pretooluse --deny-read <token file>` (bare
   PATH name). The hook denies any Read/Bash that touches the token; the
   deny-read is the authoritative backstop against obfuscation.
+
+### Fixed vs ephemeral cwd, and `scaffold`
+
+By default the responder cwd is **ephemeral** — a pseudo-random dir the
+dispatcher removes on shutdown (SIGINT/SIGTERM). Set **`cwd`** (config or
+`--cwd`) to pin a **fixed** dir instead: it is materialized there and kept, so
+you can read the generated settings, drop a `settings.local.json` override, or
+run `claude` in it by hand. The per-invocation outboxes live under `<cwd>/outbox`
+(so a fixed cwd is self-contained).
+
+The **`scaffold`** subcommand materializes such a cwd **without** running the
+dispatcher — for inspecting the sandbox in isolation:
+
+```sh
+ak-tgclaude scaffold --cwd ~/qa-inspect --config bot.toml
+# then run claude there by hand (the command is printed) to watch the sandbox
+```
 
 ## Responder isolation
 

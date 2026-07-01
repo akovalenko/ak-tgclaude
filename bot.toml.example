@@ -31,6 +31,12 @@ project = "~/code/example-project"
 
 # --- optional overrides (defaults shown) ---
 
+# Fixed responder cwd. When set, the generated .claude/settings.json is
+# materialized here and kept (inspect it, drop a settings.local.json, run claude
+# by hand). Default: an ephemeral dir removed on shutdown. See also the
+# `scaffold` subcommand, which materializes this without running the dispatcher.
+# cwd = "~/qa-cwd"
+
 # Base directory under which the ephemeral responder cwd is created (a
 # pseudo-random subdir is made inside it). Default: $XDG_RUNTIME_DIR, else a
 # temp dir. The cwd holds only a generated settings.json + skills; it is

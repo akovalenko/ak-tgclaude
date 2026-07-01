@@ -162,10 +162,14 @@ func runDispatch(args []string) {
 
 	client := NewClient(cfg.BotToken)
 
-	runtimeBase := resolveRuntimeBase(cfg.RuntimeBase)
-	outboxRoot, err := os.MkdirTemp(runtimeBase, "ak-tgclaude-out-")
+	cwd, ephemeral, err := resolveResponderCwd(cfg)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "ak-tgclaude: dispatch: creating outbox root: %v\n", err)
+		fmt.Fprintf(os.Stderr, "ak-tgclaude: dispatch: %v\n", err)
+		os.Exit(1)
+	}
+	outboxRoot := filepath.Join(cwd, "outbox")
+	if err := os.MkdirAll(outboxRoot, 0o700); err != nil {
+		fmt.Fprintf(os.Stderr, "ak-tgclaude: dispatch: %v\n", err)
 		os.Exit(1)
 	}
 
@@ -177,11 +181,6 @@ func runDispatch(args []string) {
 		// Materialize the responder scaffold (generated .claude/settings.json with
 		// the literal runtime paths: sandbox, token deny-read, hook) and launch
 		// the responder there with --setting-sources project.
-		cwd, err := os.MkdirTemp(runtimeBase, "ak-tgclaude-cwd-")
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "ak-tgclaude: dispatch: creating responder cwd: %v\n", err)
-			os.Exit(1)
-		}
 		if err := materializeScaffold(cwd, scaffoldParams{
 			CacheDir:   filepath.Join(cfg.StateDir, "cache"),
 			OutboxRoot: outboxRoot,
@@ -191,7 +190,6 @@ func runDispatch(args []string) {
 			os.Exit(1)
 		}
 		resp = &claudeResponder{agent: cfg.Agent, cwd: cwd}
-		log.Printf("ak-tgclaude: dispatch: responder cwd=%s", cwd)
 	}
 
 	d := &Dispatcher{
@@ -206,10 +204,41 @@ func runDispatch(args []string) {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	log.Printf("ak-tgclaude: dispatch: responder=%s profile=%s project=%s state=%s token=%s",
-		cfg.Responder, cfg.Profile, cfg.Project, cfg.StateDir, redact(cfg.BotToken))
-	if err := d.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
-		fmt.Fprintf(os.Stderr, "ak-tgclaude: dispatch: %v\n", err)
+	kind := "fixed"
+	if ephemeral {
+		kind = "ephemeral"
+	}
+	log.Printf("ak-tgclaude: dispatch: responder=%s cwd=%s (%s) state=%s token=%s",
+		cfg.Responder, cwd, kind, cfg.StateDir, redact(cfg.BotToken))
+
+	runErr := d.Run(ctx)
+
+	// An ephemeral cwd is disposable: remove it (and its outbox) on shutdown. A
+	// fixed cwd is kept for inspection.
+	if ephemeral {
+		if err := os.RemoveAll(cwd); err != nil {
+			log.Printf("ak-tgclaude: dispatch: removing ephemeral cwd %s: %v", cwd, err)
+		}
+	}
+	if runErr != nil && !errors.Is(runErr, context.Canceled) {
+		fmt.Fprintf(os.Stderr, "ak-tgclaude: dispatch: %v\n", runErr)
 		os.Exit(1)
 	}
+}
+
+// resolveResponderCwd returns the responder launch dir and whether it is
+// ephemeral. A configured Cwd is fixed (created if needed, kept on exit);
+// otherwise a pseudo-random dir is created under the runtime base.
+func resolveResponderCwd(cfg *Config) (dir string, ephemeral bool, err error) {
+	if cfg.Cwd != "" {
+		if err := os.MkdirAll(cfg.Cwd, 0o700); err != nil {
+			return "", false, fmt.Errorf("creating responder cwd %s: %w", cfg.Cwd, err)
+		}
+		return cfg.Cwd, false, nil
+	}
+	dir, err = os.MkdirTemp(resolveRuntimeBase(cfg.RuntimeBase), "ak-tgclaude-cwd-")
+	if err != nil {
+		return "", false, fmt.Errorf("creating ephemeral cwd: %w", err)
+	}
+	return dir, true, nil
 }

@@ -50,6 +50,11 @@ type Config struct {
 	// The sandbox and PreToolUse confine the responder's reads here.
 	Project string `toml:"project"`
 
+	// Cwd is a fixed responder launch dir. When set, the scaffold is materialized
+	// there and kept (inspect the generated settings, tweak settings.local, run
+	// claude by hand). Empty => an ephemeral cwd the dispatcher removes on exit.
+	Cwd string `toml:"cwd"`
+
 	// RuntimeBase is the base dir under which the ephemeral responder cwd (a
 	// pseudo-random subdir) is created. Empty => $XDG_RUNTIME_DIR, else a temp dir.
 	RuntimeBase string `toml:"runtime_base"`
@@ -64,9 +69,23 @@ type Config struct {
 	ConfigPath string `toml:"-"`
 }
 
-// loadConfig resolves configuration from an optional TOML file overlaid with CLI
-// flags (flags > file > defaults), then validates it.
+// loadConfig resolves configuration (parseConfig) and validates it for the
+// dispatcher (bot token, project, ...).
 func loadConfig(args []string) (*Config, error) {
+	c, err := parseConfig(args)
+	if err != nil {
+		return nil, err
+	}
+	if err := c.validate(); err != nil {
+		return nil, err
+	}
+	return c, nil
+}
+
+// parseConfig resolves configuration from an optional TOML file overlaid with
+// CLI flags (flags > file > defaults), without dispatcher-specific validation.
+// The scaffold subcommand reuses it (it needs a cwd, not a token).
+func parseConfig(args []string) (*Config, error) {
 	fs := flag.NewFlagSet("ak-tgclaude", flag.ContinueOnError)
 	configPath := fs.String("config", "", "path to a TOML config file (optional; flags override it)")
 	botToken := fs.String("bot-token", "", "Telegram bot token (overrides config; visible in host ps — prefer the config file in production)")
@@ -74,6 +93,7 @@ func loadConfig(args []string) (*Config, error) {
 	project := fs.String("project", "", "path to the project the responder consults on (read-only)")
 	agent := fs.String("agent", "", "responder agent name for `claude -p --agent` (default: cwd's default agent)")
 	responder := fs.String("responder", "", "responder implementation: claude|stub (default claude; stub replies a fixed line for Telegram I/O tests)")
+	cwd := fs.String("cwd", "", "fixed responder cwd to materialize into and keep (default: ephemeral, removed on exit)")
 	if err := fs.Parse(args); err != nil {
 		return nil, err
 	}
@@ -101,15 +121,16 @@ func loadConfig(args []string) (*Config, error) {
 	if *responder != "" {
 		c.Responder = *responder
 	}
+	if *cwd != "" {
+		c.Cwd = *cwd
+	}
 
 	c.applyDefaults()
 	c.Project = expandTilde(c.Project)
+	c.Cwd = expandTilde(c.Cwd)
 	c.StateDir = expandTilde(c.StateDir)
 	c.RuntimeBase = expandTilde(c.RuntimeBase)
 
-	if err := c.validate(); err != nil {
-		return nil, err
-	}
 	return &c, nil
 }
 
