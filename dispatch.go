@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -184,7 +185,7 @@ func (d *Dispatcher) handleUpdate(ctx context.Context, u Update) {
 		return
 	}
 	log.Printf("ak-tgclaude: responder done chat=%d user=%s msg=%d outcome=%s in %s",
-		m.Chat.ID, ulabel, m.MessageID, outcomeLabel(res.Outcome), dur)
+		m.Chat.ID, ulabel, m.MessageID, outcomeField(res), dur)
 	if res.SessionID != "" {
 		if err := d.store.SetSession(m.Chat.ID, res.SessionID); err != nil {
 			log.Printf("ak-tgclaude: binding chat %d: %v", m.Chat.ID, err)
@@ -192,12 +193,26 @@ func (d *Dispatcher) handleUpdate(ctx context.Context, u Update) {
 	}
 }
 
-// outcomeLabel renders the responder's outcome word for logs ("?" if absent).
-func outcomeLabel(o string) string {
-	if o == "" {
-		return "?"
+// outcomeField renders the outcome for the done log: the recognized word, or
+// "?" plus a quoted snippet of the raw final text when the responder ended with
+// something unrecognized (so the operator can see what it actually said).
+func outcomeField(res RespondResult) string {
+	if res.Outcome != "" {
+		return res.Outcome
 	}
-	return o
+	if text := strings.TrimSpace(res.FinalText); text != "" {
+		return "? result=" + strconv.Quote(snippet(text, 100))
+	}
+	return "?"
+}
+
+// snippet returns s truncated to at most n runes, with an ellipsis if cut.
+func snippet(s string, n int) string {
+	r := []rune(s)
+	if len(r) > n {
+		return string(r[:n]) + "…"
+	}
+	return s
 }
 
 // userLabel renders a message sender for logs: the numeric id, plus @username
@@ -281,16 +296,23 @@ func runDispatch(args []string) {
 	default:
 		// Materialize the responder scaffold (generated .claude/settings.json with
 		// the literal runtime paths: sandbox, token deny-read, hook) and launch
-		// the responder there with --setting-sources project.
+		// the responder there with --setting-sources project. The cache dir is
+		// pre-created (the sandbox can write under it but not create it, since its
+		// parent is not writable) and injected into the responder's env.
+		cacheDir := filepath.Join(cfg.StateDir, "cache")
+		if err := os.MkdirAll(cacheDir, 0o700); err != nil {
+			fmt.Fprintf(os.Stderr, "ak-tgclaude: dispatch: %v\n", err)
+			os.Exit(1)
+		}
 		if err := materializeScaffold(cwd, scaffoldParams{
-			CacheDir:  filepath.Join(cfg.StateDir, "cache"),
+			CacheDir:  cacheDir,
 			TokenFile: cfg.ConfigPath,
 			NoRefuse:  cfg.NoRefuse,
 		}); err != nil {
 			fmt.Fprintf(os.Stderr, "ak-tgclaude: dispatch: %v\n", err)
 			os.Exit(1)
 		}
-		resp = &claudeResponder{agent: cfg.Agent, cwd: cwd, project: cfg.Project}
+		resp = &claudeResponder{agent: cfg.Agent, cwd: cwd, project: cfg.Project, cacheDir: cacheDir}
 	}
 
 	d := &Dispatcher{

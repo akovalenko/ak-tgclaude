@@ -19,10 +19,12 @@ type RespondRequest struct {
 }
 
 // RespondResult reports the session the responder used (so the dispatcher can
-// bind chat→session) and the outcome word the responder ended with (for logs).
+// bind chat→session), the outcome word the responder ended with, and the raw
+// final text (logged when the outcome is unrecognized).
 type RespondResult struct {
 	SessionID string
 	Outcome   string // "answered"|"problematic"|"refused"|"" (from the final output)
+	FinalText string // the responder's final result text (for diagnostics)
 }
 
 // Responder answers one update. The dispatcher depends on this interface so the
@@ -37,9 +39,10 @@ const projectEnv = "AK_TGCLAUDE_PROJECT"
 
 // claudeResponder spawns a headless `claude -p` for each update.
 type claudeResponder struct {
-	agent   string // --agent <name>; empty => the configured default agent
-	cwd     string // responder cwd (the materialized scaffold: settings.json + skills)
-	project string // the project the agent answers about ($AK_TGCLAUDE_PROJECT)
+	agent    string // --agent <name>; empty => the configured default agent
+	cwd      string // responder cwd (the materialized scaffold: settings.json + skills)
+	project  string // the project the agent answers about ($AK_TGCLAUDE_PROJECT)
+	cacheDir string // isolated Go cache root, injected into the process env
 }
 
 // Respond runs `claude -p [--agent] [--resume] --output-format json`, feeding
@@ -49,6 +52,13 @@ func (c *claudeResponder) Respond(ctx context.Context, req RespondRequest) (Resp
 	cmd := exec.CommandContext(ctx, "claude", buildClaudeArgs(c.agent, req.SessionID, req.OutboxDir)...)
 	cmd.Dir = c.cwd
 	cmd.Env = append(os.Environ(), outboxEnv+"="+req.OutboxDir, projectEnv+"="+c.project)
+	if c.cacheDir != "" {
+		// Inject the isolated Go cache so the sandboxed `go` inherits it (the
+		// settings-file env block does not reach tools under --setting-sources).
+		for k, v := range goCacheEnv(c.cacheDir) {
+			cmd.Env = append(cmd.Env, k+"="+v)
+		}
+	}
 	cmd.Stdin = strings.NewReader(buildPrompt(c.project, req.OutboxDir, req.Prompt))
 	var out bytes.Buffer
 	cmd.Stdout = &out
@@ -56,8 +66,8 @@ func (c *claudeResponder) Respond(ctx context.Context, req RespondRequest) (Resp
 	if err := cmd.Run(); err != nil {
 		return RespondResult{}, fmt.Errorf("claude -p: %w", err)
 	}
-	sid, outcome := parseResult(out.Bytes())
-	return RespondResult{SessionID: sid, Outcome: outcome}, nil
+	sid, outcome, final := parseResult(out.Bytes())
+	return RespondResult{SessionID: sid, Outcome: outcome, FinalText: final}, nil
 }
 
 // buildPrompt prepends a small preamble giving the responder the LITERAL
@@ -123,16 +133,15 @@ func (s *stubResponder) Respond(_ context.Context, req RespondRequest) (RespondR
 	return RespondResult{Outcome: "answered"}, nil
 }
 
-// parseResult extracts the session id and the outcome word from
-// `claude --output-format json` output (the session_id and the final result
-// text the responder ended with).
-func parseResult(jsonOut []byte) (sessionID, outcome string) {
+// parseResult extracts the session id, the outcome word, and the raw final text
+// from `claude --output-format json` output.
+func parseResult(jsonOut []byte) (sessionID, outcome, finalText string) {
 	var r struct {
 		SessionID string `json:"session_id"`
 		Result    string `json:"result"`
 	}
 	_ = json.Unmarshal(jsonOut, &r)
-	return r.SessionID, parseOutcome(r.Result)
+	return r.SessionID, parseOutcome(r.Result), r.Result
 }
 
 // knownOutcomes are the status words the responder ends its output with. The

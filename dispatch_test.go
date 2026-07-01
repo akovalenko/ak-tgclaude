@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"strings"
 	"testing"
 )
 
@@ -105,6 +106,25 @@ func TestHandleClearDropsSessionAndSkipsResponder(t *testing.T) {
 	calls := sender.snapshot()
 	if len(calls) != 1 || calls[0].route.ChatID != 42 {
 		t.Errorf("clear ack not sent: %+v", calls)
+	}
+}
+
+func TestOutcomeField(t *testing.T) {
+	if got := outcomeField(RespondResult{Outcome: "answered"}); got != "answered" {
+		t.Errorf("known outcome => %q", got)
+	}
+	// Unrecognized: "?" + a quoted snippet of the final text.
+	long := strings.Repeat("x", 250)
+	got := outcomeField(RespondResult{FinalText: long})
+	if !strings.HasPrefix(got, `? result="`) || !strings.Contains(got, "…") {
+		t.Errorf("unknown outcome should include a quoted, truncated snippet: %q", got)
+	}
+	if len([]rune(got)) > 130 { // 100-rune snippet + quoting/ellipsis, not the full 250
+		t.Errorf("snippet not truncated: %q", got)
+	}
+	// Unknown with no final text => bare "?".
+	if got := outcomeField(RespondResult{}); got != "?" {
+		t.Errorf("empty => %q, want ?", got)
 	}
 }
 

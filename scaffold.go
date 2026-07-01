@@ -104,6 +104,20 @@ var defaultDenyEnvVars = []string{"ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"}
 // defaultNetworkDomains is the egress the responder needs to build Go code.
 var defaultNetworkDomains = []string{"proxy.golang.org", "sum.golang.org", "storage.googleapis.com"}
 
+// goCacheEnv is the isolated Go cache environment for the responder. It is both
+// written into settings.json and injected into the `claude -p` process env — the
+// latter is what actually reaches the sandboxed `go` (a project settings-file
+// `env` block does not propagate to tools under --setting-sources project; the
+// sandbox does not strip the process env, so inheritance is the reliable path).
+func goCacheEnv(cacheDir string) map[string]string {
+	return map[string]string{
+		"GOCACHE":             filepath.Join(cacheDir, "go-build"),
+		"GOMODCACHE":          filepath.Join(cacheDir, "go-mod"),
+		"GOLANGCI_LINT_CACHE": filepath.Join(cacheDir, "golangci-lint"),
+		"GOPATH":              filepath.Join(cacheDir, "gopath"),
+	}
+}
+
 // buildSettings assembles the responder's .claude/settings.json.
 func buildSettings(p scaffoldParams) *claudeSettings {
 	if p.HookBinary == "" {
@@ -122,12 +136,7 @@ func buildSettings(p scaffoldParams) *claudeSettings {
 	}
 
 	s := &claudeSettings{
-		Env: map[string]string{
-			"GOCACHE":             filepath.Join(p.CacheDir, "go-build"),
-			"GOMODCACHE":          filepath.Join(p.CacheDir, "go-mod"),
-			"GOLANGCI_LINT_CACHE": filepath.Join(p.CacheDir, "golangci-lint"),
-			"GOPATH":              filepath.Join(p.CacheDir, "gopath"),
-		},
+		Env: goCacheEnv(p.CacheDir),
 		Permissions: &permissionsCfg{
 			// Read is broad (the token stays protected by the hook + deny-read
 			// below regardless). Write is NOT granted here: each invocation gets
