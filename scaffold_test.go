@@ -36,11 +36,12 @@ func TestBuildSettingsShape(t *testing.T) {
 	if len(s.Permissions.Deny) != 0 {
 		t.Errorf("static settings should carry no permissions.deny, got %v", s.Permissions.Deny)
 	}
-	// denyRead masks host history plus the sibling-outbox root (Bash isn't
-	// hook-scoped); own outbox is carved back per invocation.
-	if got := s.Sandbox.Filesystem.DenyRead; len(got) != 2 ||
-		got[0] != "~/.claude/history.jsonl" || got[1] != "/run/out" {
-		t.Errorf("sandbox denyRead = %v, want [~/.claude/history.jsonl /run/out]", got)
+	// denyRead masks host history + other sessions' transcripts, plus the
+	// sibling-outbox root (Bash isn't hook-scoped); own outbox is carved back per
+	// invocation.
+	if got := s.Sandbox.Filesystem.DenyRead; len(got) != 3 ||
+		got[0] != "~/.claude/history.jsonl" || got[1] != "~/.claude/projects" || got[2] != "/run/out" {
+		t.Errorf("sandbox denyRead = %v, want [~/.claude/history.jsonl ~/.claude/projects /run/out]", got)
 	}
 	// credentials.files: the host secrets (SSH keys, Claude token) always, then
 	// the bot's config file since the token lives there.

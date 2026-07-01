@@ -236,8 +236,9 @@ shell could otherwise read the operator's own secrets. The generated
 
 - **`~/.ssh`** and **`~/.claude/.credentials.json`** (the user's SSH keys and
   Claude Code's own auth token) via `sandbox.credentials.files` (`mode: "deny"`);
-- **`~/.claude/history.jsonl`** (cross-session prompt/command history) via
-  `sandbox.filesystem.denyRead`.
+- **`~/.claude/history.jsonl`** (cross-session prompt/command history) and
+  **`~/.claude/projects`** (transcripts of the operator's other sessions, which
+  may quote secrets from that work) via `sandbox.filesystem.denyRead`.
 
 This is the **Bash layer** only — the file tools (`Read`/`Grep`/`Glob`) are
 already confined to the project by the PreToolUse hook (default-closed allowlist),

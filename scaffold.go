@@ -124,9 +124,11 @@ var hostSecretCredFiles = []string{
 
 // hostSecretDenyRead are sensitive-but-not-credential host paths hidden from the
 // sandboxed shell (so they go in filesystem.denyRead, not the credentials
-// block): Claude Code's cross-session prompt/command history.
+// block): Claude Code's cross-session prompt/command history and the transcripts
+// of the operator's other sessions (which may quote secrets from that work).
 var hostSecretDenyRead = []string{
 	"~/.claude/history.jsonl",
+	"~/.claude/projects",
 }
 
 // goCacheEnv is the isolated Go cache environment for the responder. It is both
