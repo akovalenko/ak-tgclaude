@@ -70,10 +70,18 @@ responders — fine for throwaway scratch, but don't leave anything there you
 wouldn't want a concurrent invocation to read. The project directory is
 **read-only** (you can read it, not write it).
 
-## Several messages
+## Several messages & length
 
 You may call `send` more than once for one question (e.g. a short answer, then a
 code block) — each call is one message. Keep it tight; this is a chat.
+
+Telegram caps one message at ~4096 characters. If a **text** answer would run
+longer, split it yourself into several `send text` calls at natural boundaries
+(paragraphs or sections), each comfortably under ~4000 — a few readable messages
+beat one wall of text. (An over-long message is still delivered, but as a *file
+attachment* instead of inline text, which is worse to read — so split rather than
+rely on that.) Long **code** needs no splitting: `send code` spills an oversized
+snippet to a document automatically, which is the right form for a big block.
 
 ## Final output — output ONLY a status word (it is a signal, not your answer)
 

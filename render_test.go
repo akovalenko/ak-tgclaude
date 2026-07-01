@@ -48,6 +48,19 @@ func TestFitsAndSpill(t *testing.T) {
 		t.Errorf("oversized text should not fit")
 	}
 
+	// Astral chars count as two UTF-16 units each: half-the-limit-plus-one emoji
+	// is under the rune limit but over the UTF-16 limit — must NOT fit (a rune
+	// count would wrongly pass it and let Telegram reject it).
+	astral := strings.Repeat("😀", telegramTextLimit/2+1)
+	if fits(astral) {
+		t.Errorf("emoji string over the UTF-16 limit should not fit (runes=%d, utf16=%d)",
+			len([]rune(astral)), utf16Len(astral))
+	}
+	// Exactly at the limit fits.
+	if !fits(strings.Repeat("x", telegramTextLimit)) {
+		t.Errorf("text exactly at the limit should fit")
+	}
+
 	if n := spillName(&Descriptor{Kind: KindCode, Language: "py"}); n != "snippet.py" {
 		t.Errorf("spillName code = %q", n)
 	}

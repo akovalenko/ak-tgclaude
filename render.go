@@ -3,11 +3,10 @@ package main
 import (
 	"html"
 	"strings"
-	"unicode/utf8"
 )
 
-// telegramTextLimit is Telegram's per-message text cap. A rendered text/code
-// message longer than this spills to a document instead.
+// telegramTextLimit is Telegram's per-message text cap, in UTF-16 code units. A
+// rendered text/code message longer than this spills to a document instead.
 const telegramTextLimit = 4096
 
 // renderMessage turns a text/code descriptor into the (text, parse_mode) pair
@@ -41,9 +40,29 @@ func renderMessage(d *Descriptor) (text, parseMode string) {
 	return "", ""
 }
 
-// fits reports whether s is within Telegram's text limit.
+// fits reports whether s is within Telegram's per-message text limit. Telegram
+// measures length in UTF-16 code units (an astral char — emoji, etc. — counts as
+// two), so we count those, not runes: a rune count undercounts an emoji-heavy
+// message and would let it through to a 400 instead of spilling. Counting the
+// rendered string (markup included) is a safe overestimate — Telegram applies
+// the cap to the text after entity parsing, and markup only adds units, so if
+// the raw string fits, the parsed message fits too.
 func fits(s string) bool {
-	return utf8.RuneCountInString(s) <= telegramTextLimit
+	return utf16Len(s) <= telegramTextLimit
+}
+
+// utf16Len returns the number of UTF-16 code units in s — how Telegram counts a
+// message's length. Runes above the BMP encode as a surrogate pair (two units).
+func utf16Len(s string) int {
+	n := 0
+	for _, r := range s {
+		if r > 0xFFFF {
+			n += 2
+		} else {
+			n++
+		}
+	}
+	return n
 }
 
 // spillName is the document filename for an oversized text/code message.
