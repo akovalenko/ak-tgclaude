@@ -63,7 +63,10 @@ ak-tgclaude dispatch --bot-token 123:ABC --profile qa --project ~/code/myproject
   **absolute against the dispatcher's launch cwd**. The responder consumes them
   from a different cwd (the scaffold dir), so they are resolved once, up front —
   a relative path means "relative to where I launched the bot", never the
-  responder's cwd.
+  responder's cwd. Paths must be **literal**: a glob metacharacter (`* ? [ ] \`)
+  or control character is **rejected at startup**, because the sandbox filesystem
+  rules glob-match and would otherwise silently protect/expose the wrong files
+  (spaces and quotes are fine). Rename or symlink around such a path.
 
 ## Runtime layout (directories)
 

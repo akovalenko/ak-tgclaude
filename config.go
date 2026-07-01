@@ -294,6 +294,31 @@ func parseConfig(args []string) (*Config, error) {
 		c.DenyRead[i] = resolvePath(c.DenyRead[i])
 	}
 
+	// Fail fast on a path we cannot represent literally in the sandbox glob rules
+	// or the hook shell command, rather than silently mis-match (dangerous for a
+	// deny-read).
+	for _, pv := range []struct{ field, path string }{
+		{"project", c.Project},
+		{"cwd", c.Cwd},
+		{"state_dir", c.StateDir},
+		{"runtime_base", c.RuntimeBase},
+		{"config", c.ConfigPath},
+	} {
+		if err := validatePath(pv.field, pv.path); err != nil {
+			return nil, err
+		}
+	}
+	for i, s := range c.WireSkills {
+		if err := validatePath(fmt.Sprintf("wire_skills[%d]", i), s); err != nil {
+			return nil, err
+		}
+	}
+	for i, s := range c.DenyRead {
+		if err := validatePath(fmt.Sprintf("deny_read[%d]", i), s); err != nil {
+			return nil, err
+		}
+	}
+
 	return &c, nil
 }
 
@@ -355,6 +380,33 @@ func defaultStateDir() string {
 		return filepath.Join(h, ".local", "state", "ak-tgclaude")
 	}
 	return ".ak-tgclaude-state"
+}
+
+// pathGlobMeta are the fnmatch/gitignore glob metacharacters (plus the `\`
+// escape) that must not appear literally in a configured path: the sandbox
+// filesystem rules (denyRead/allowWrite/credentials) glob-match, so a literal
+// `*` in a deny-read would match as a pattern and silently protect the wrong
+// files. We reject rather than escape (no portable literal-escape across the
+// shell, fnmatch, and JSON sinks). Spaces and quotes are allowed — shellQuote
+// handles the shell command and fnmatch treats them literally.
+const pathGlobMeta = `*?[]\`
+
+// validatePath fails fast on a resolved config path we cannot represent
+// literally downstream (glob metacharacter or control character). field names
+// the offending config key for the error.
+func validatePath(field, p string) error {
+	if p == "" {
+		return nil
+	}
+	for i := 0; i < len(p); i++ {
+		if b := p[i]; b < 0x20 || b == 0x7f {
+			return fmt.Errorf("%s path %q contains a control character (0x%02x) — not supported", field, p, b)
+		}
+	}
+	if i := strings.IndexAny(p, pathGlobMeta); i >= 0 {
+		return fmt.Errorf("%s path %q contains %q, a glob metacharacter the sandbox would treat as a pattern — use a literal path (symlink or rename to avoid it)", field, p, p[i:i+1])
+	}
+	return nil
 }
 
 // resolvePath expands a leading ~ and makes the path absolute against the

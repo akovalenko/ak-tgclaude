@@ -116,6 +116,45 @@ func TestParseConfigResolvesRelativePaths(t *testing.T) {
 	}
 }
 
+func TestParseConfigRejectsGlobPaths(t *testing.T) {
+	// A glob metacharacter (or control char) in any path field is rejected up
+	// front: the sandbox filesystem rules glob-match, so it would silently protect
+	// the wrong files. Covers project, wire_skills, deny_read.
+	cases := [][]string{
+		{"--project", "/code/*"},
+		{"--project", "/a[b]/c"},
+		{"--deny-read", "/secrets/*.env"},
+		{"--deny-read", "/x?y"},
+		{"--deny-read", `/back\slash`},
+		{"--wire-skill", "/lib/skill[1]"},
+		{"--project", "/code/\tnasty"},
+	}
+	for _, args := range cases {
+		if _, err := parseConfig(args); err == nil {
+			t.Errorf("parseConfig(%v) should reject an exotic path", args)
+		}
+	}
+}
+
+func TestParseConfigAllowsSpacesAndQuotes(t *testing.T) {
+	// Spaces and single quotes are NOT glob metacharacters — shellQuote handles the
+	// hook command and fnmatch treats them literally, so they must be accepted (a
+	// path like /Users/o'brien/My Project is legitimate).
+	c, err := parseConfig([]string{
+		"--project", "/home/o'brien/my project",
+		"--deny-read", "/vault/api key.txt",
+	})
+	if err != nil {
+		t.Fatalf("legit path with space/quote rejected: %v", err)
+	}
+	if c.Project != "/home/o'brien/my project" {
+		t.Errorf("project mangled: %q", c.Project)
+	}
+	if len(c.DenyRead) != 1 || c.DenyRead[0] != "/vault/api key.txt" {
+		t.Errorf("deny-read mangled: %v", c.DenyRead)
+	}
+}
+
 func TestParseConfigAllowUserMergesWithFile(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "bot.toml")
 	if err := os.WriteFile(path, []byte("allowed_users = [1, 2]\n"), 0o600); err != nil {
