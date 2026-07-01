@@ -49,16 +49,26 @@ type preToolUseDecision struct {
 // filePolicy is the responder's file-tool access policy. The hook is the single
 // authority for the file tools (permissions carry only the deferred tools):
 //
-//	Read           -> allow under readRoots (the project), else deny
+//	Read           -> allow under readRoots, else deny
 //	Edit/Write/...  -> allow under writeRoots (the outbox + tmp), else deny
 //	deny (token)    -> deny for any file tool (checked first, wins over the above)
 //
-// readRoots/writeRoots are resolved from the responder's env at hook time
-// ($AK_TGCLAUDE_PROJECT, $AK_TGCLAUDE_OUTBOX) plus the computed sandbox tmp dir.
+// readRoots is a superset of writeRoots — the responder can read anything it can
+// write (so it can iterate on files it authored) plus the project; writeRoots is
+// the outbox + tmp (the project stays read-only). See envFilePolicy.
 type filePolicy struct {
 	deny       []string // protected paths (token); highest priority
-	readRoots  []string // Read allowed under these
+	readRoots  []string // Read allowed under these (project + writeRoots)
 	writeRoots []string // Edit/Write/NotebookEdit allowed under these
+}
+
+// envFilePolicy resolves the policy from the responder's env at hook time:
+// writeRoots = $AK_TGCLAUDE_OUTBOX + the sandbox tmp dir; readRoots =
+// $AK_TGCLAUDE_PROJECT + writeRoots (read what you can write, plus the project).
+func envFilePolicy(deny []string) filePolicy {
+	writeRoots := append(envRoots(outboxEnv), sandboxTmpDir())
+	readRoots := append(envRoots(projectEnv), writeRoots...)
+	return filePolicy{deny: deny, readRoots: readRoots, writeRoots: writeRoots}
 }
 
 // runHookPreToolUse gates the responder's tool calls: it path-scopes the file
@@ -81,12 +91,7 @@ func runHookPreToolUse(args []string) {
 		return
 	}
 
-	pol := filePolicy{
-		deny:       deny,
-		readRoots:  envRoots(projectEnv),
-		writeRoots: append(envRoots(outboxEnv), sandboxTmpDir()),
-	}
-	switch decision, reason := decidePreToolUse(&in, pol); decision {
+	switch decision, reason := decidePreToolUse(&in, envFilePolicy(deny)); decision {
 	case "":
 		os.Exit(0) // defer: no output => normal permission/sandbox flow applies
 	default:
@@ -116,7 +121,7 @@ func decidePreToolUse(in *preToolUseInput, pol filePolicy) (decision, reason str
 		return "deny", "ak-tgclaude hook: read is limited to the project " +
 			fmtRoots(pol.readRoots) + " — read other locations with sandboxed Bash"
 
-	case "Edit", "Write", "NotebookEdit":
+	case "Edit", "MultiEdit", "Write", "NotebookEdit":
 		if _, ok := underAny(in.ToolInput.FilePath, pol.writeRoots); ok {
 			return "allow", "ak-tgclaude hook: write within the outbox/tmp"
 		}

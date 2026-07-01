@@ -1,7 +1,7 @@
 ---
 name: faq-responder
 description: A do-what-you're-asked assistant for a Telegram bot built on ak-tgclaude. Acts on each incoming message directly — no off-topic refusals — with read-only access to the project, and replies over Telegram. It still cannot modify anything, read secrets, or message anyone but the sender (all machine-enforced).
-tools: Read, Grep, Glob, Bash, Write, Skill
+tools: Read, Grep, Glob, Bash, Write, Edit, Skill
 skills: [tg-emit]
 ---
 

@@ -46,9 +46,11 @@ func TestDecideWriteScopedToOutboxAndTmp(t *testing.T) {
 			t.Errorf("write %q => %q, want allow", p, d)
 		}
 	}
-	// Edit and NotebookEdit follow the same write policy.
-	if d, _ := decidePreToolUse(fileInput("Edit", "/run/out/outbox-A1/x"), testPolicy); d != "allow" {
-		t.Errorf("edit in outbox => %q, want allow", d)
+	// Edit / MultiEdit / NotebookEdit follow the same write policy.
+	for _, tool := range []string{"Edit", "MultiEdit", "NotebookEdit"} {
+		if d, _ := decidePreToolUse(fileInput(tool, "/run/out/outbox-A1/x"), testPolicy); d != "allow" {
+			t.Errorf("%s in outbox => %q, want allow", tool, d)
+		}
 	}
 	// Writing into the project (read-only) or anywhere else is denied.
 	for _, p := range []string{"/proj/main.go", "/etc/cron.d/x"} {
@@ -84,6 +86,35 @@ func TestDecideDefersOtherTools(t *testing.T) {
 		if d, _ := decidePreToolUse(&preToolUseInput{ToolName: tool}, testPolicy); d != "" {
 			t.Errorf("%s => %q, want defer (empty)", tool, d)
 		}
+	}
+}
+
+func TestEnvFilePolicy(t *testing.T) {
+	t.Setenv(projectEnv, "/proj")
+	t.Setenv(outboxEnv, "/run/out/o1")
+	pol := envFilePolicy([]string{"/cfg/bot.toml"})
+	tmp := sandboxTmpDir()
+
+	// Read is allowed in the project AND the writable areas (read what you write,
+	// so authoring can iterate).
+	for _, p := range []string{"/proj/main.go", "/run/out/o1/draft.md", tmp + "/scratch.txt"} {
+		if d, _ := decidePreToolUse(fileInput("Read", p), pol); d != "allow" {
+			t.Errorf("read %q => %q, want allow", p, d)
+		}
+	}
+	// Write is allowed only in the writable areas, not the (read-only) project.
+	if d, _ := decidePreToolUse(fileInput("Write", "/run/out/o1/draft.md"), pol); d != "allow" {
+		t.Errorf("write outbox => %q, want allow", d)
+	}
+	if d, _ := decidePreToolUse(fileInput("Edit", tmp+"/scratch.txt"), pol); d != "allow" {
+		t.Errorf("edit tmp => %q, want allow", d)
+	}
+	if d, _ := decidePreToolUse(fileInput("Write", "/proj/main.go"), pol); d != "deny" {
+		t.Errorf("write project => %q, want deny (read-only)", d)
+	}
+	// Token denied first even though it isn't under any root.
+	if d, _ := decidePreToolUse(fileInput("Read", "/cfg/bot.toml"), pol); d != "deny" {
+		t.Errorf("token read => %q, want deny", d)
 	}
 }
 

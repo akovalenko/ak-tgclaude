@@ -233,10 +233,12 @@ deployment, the generated file:
 The **PreToolUse hook** is the single authority for the **file tools**,
 path-scoped from the responder's env:
 
-- **Read** → allowed under the project (`$AK_TGCLAUDE_PROJECT`), else denied (read
+- **Read** → allowed under the project (`$AK_TGCLAUDE_PROJECT`) **and the writable
+  areas** (so the responder can read back what it authored), else denied (read
   elsewhere with sandboxed Bash);
 - **Edit/Write/NotebookEdit** → allowed under this invocation's outbox
-  (`$AK_TGCLAUDE_OUTBOX`) or the sandbox tmp (`/tmp/claude-<uid>`), else denied;
+  (`$AK_TGCLAUDE_OUTBOX`) or the sandbox tmp (`/tmp/claude-<uid>`), else denied
+  (so the project stays read-only but the responder can author/iterate on files);
 - a **token-file** touch (`--deny-read`) is denied first — it wins even if the
   token happens to sit under the project.
 

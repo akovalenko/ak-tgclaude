@@ -56,6 +56,20 @@ For a file you produced (e.g. a generated PDF), send it as a document:
 
     ak-tgclaude send doc "$AK_TGCLAUDE_OUTBOX/report.pdf" --caption "summary"
 
+## Authoring / scratch files
+
+For non-trivial work — drafting a document, iterating on a long answer, preparing
+an attachment — you can **write, read, and edit** files in your writable areas:
+your **outbox** directory or the sandbox tmp (`/tmp/claude-<uid>`). A normal cycle
+is Write a draft → Read it back → Edit it (the Edit tool requires you to have Read
+the file first) → repeat, then send the result (`send --file` or `send doc`).
+
+Prefer the **outbox** for anything private: it is per-invocation and isolated, so
+no other responder can see it. The tmp dir is **shared** across concurrent
+responders — fine for throwaway scratch, but don't leave anything there you
+wouldn't want a concurrent invocation to read. The project directory is
+**read-only** (you can read it, not write it).
+
 ## Several messages
 
 You may call `send` more than once for one question (e.g. a short answer, then a
