@@ -15,12 +15,16 @@ reply target.**
 A sandboxed shell corrupts `!` and quotes, so message content must not appear as
 a shell argument. For every message:
 
-1. Write the body to a file **inside the outbox** with the **Write tool**. The
-   outbox is `$AK_TGCLAUDE_OUTBOX` — the only directory you can write to. Learn
-   its literal path first with Bash: `echo "$AK_TGCLAUDE_OUTBOX"`, then Write to
-   `<that path>/reply.txt`.
-2. Hand the file to `send --file`. The command line then carries only flags and
-   a filename — no message text.
+1. Write the body to a file **in your outbox directory** with the **Write tool**.
+   The outbox path is given at the top of your task (the "Outbox directory"
+   line) — it is the only directory you can write to. Use that **literal path**
+   in the Write tool: the tool does NOT expand `$AK_TGCLAUDE_OUTBOX` in its
+   `file_path` (only the shell does), so writing to `"$AK_TGCLAUDE_OUTBOX/reply.txt"`
+   as a tool path would create a file named literally that.
+2. Hand the file to `send --file`. This is a **shell** command, so here
+   `$AK_TGCLAUDE_OUTBOX` DOES expand — either form works:
+   `--file "$AK_TGCLAUDE_OUTBOX/reply.txt"` or the literal path from step 1.
+   The command line carries only flags and a filename — no message text.
 
 Never build the message with `echo`/`printf`/`cat <<EOF` or pass it as a `send`
 positional argument.

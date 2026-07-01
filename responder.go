@@ -48,7 +48,7 @@ func (c *claudeResponder) Respond(ctx context.Context, req RespondRequest) (Resp
 	cmd := exec.CommandContext(ctx, "claude", buildClaudeArgs(c.agent, req.SessionID, req.OutboxDir)...)
 	cmd.Dir = c.cwd
 	cmd.Env = append(os.Environ(), outboxEnv+"="+req.OutboxDir, projectEnv+"="+c.project)
-	cmd.Stdin = strings.NewReader(req.Prompt)
+	cmd.Stdin = strings.NewReader(buildPrompt(c.project, req.OutboxDir, req.Prompt))
 	var out bytes.Buffer
 	cmd.Stdout = &out
 	cmd.Stderr = os.Stderr
@@ -56,6 +56,24 @@ func (c *claudeResponder) Respond(ctx context.Context, req RespondRequest) (Resp
 		return RespondResult{}, fmt.Errorf("claude -p: %w", err)
 	}
 	return RespondResult{SessionID: parseSessionID(out.Bytes())}, nil
+}
+
+// buildPrompt prepends a small preamble giving the responder the LITERAL
+// project and outbox paths, then the incoming (untrusted) message. Literal paths
+// matter because the Write/Read tools do not expand env vars in their arguments
+// (only the shell does), so the agent must not rely on $AK_TGCLAUDE_* there.
+func buildPrompt(project, outbox, message string) string {
+	var b strings.Builder
+	b.WriteString("Project directory (read-only): ")
+	b.WriteString(project)
+	b.WriteString("\nOutbox directory (write your reply body files here): ")
+	b.WriteString(outbox)
+	b.WriteString("\nThese are literal paths — pass them verbatim to the Write/Read tools " +
+		"(tool arguments are not shell-expanded); in shell commands the same paths are in " +
+		"$AK_TGCLAUDE_PROJECT / $AK_TGCLAUDE_OUTBOX.\n\n")
+	b.WriteString("Incoming Telegram message to answer:\n")
+	b.WriteString(message)
+	return b.String()
 }
 
 // buildClaudeArgs assembles the `claude -p` argument list. It loads only the

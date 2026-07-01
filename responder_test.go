@@ -44,6 +44,23 @@ func TestBuildInvocationSettings(t *testing.T) {
 	}
 }
 
+func TestBuildPrompt(t *testing.T) {
+	p := buildPrompt("/home/bot/code", "/run/out/outbox-A1", "how does foo work?")
+	if !strings.Contains(p, "Project directory (read-only): /home/bot/code") {
+		t.Errorf("missing literal project path: %q", p)
+	}
+	if !strings.Contains(p, "Outbox directory (write your reply body files here): /run/out/outbox-A1") {
+		t.Errorf("missing literal outbox path: %q", p)
+	}
+	if !strings.Contains(p, "not shell-expanded") {
+		t.Errorf("missing the tool-vs-shell caveat: %q", p)
+	}
+	// The message comes last, after the preamble.
+	if !strings.HasSuffix(p, "how does foo work?") {
+		t.Errorf("message should be appended last: %q", p)
+	}
+}
+
 func TestStubResponderRepliesFixed(t *testing.T) {
 	dir := t.TempDir()
 	res, err := (&stubResponder{}).Respond(context.Background(), RespondRequest{OutboxDir: dir, Prompt: "any question"})
