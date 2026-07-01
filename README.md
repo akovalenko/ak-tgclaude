@@ -5,9 +5,12 @@ long-lived **dispatcher** that receives Telegram updates and routes each one to 
 **project-bound responder** — a headless `claude -p` session that answers from a
 codebase and its notes — then sends the reply back to Telegram.
 
-> Status: **design phase**. This README is the design of record; there is no
-> working prototype yet. The code in this repo is a skeleton (command dispatch +
-> config loading).
+> Status: **implemented, under active development**. The dispatcher, the
+> project-bound responder (`claude -p`, plus a `stub` for Telegram-I/O smoke
+> tests), the outbox transport with blocking delivery feedback, and the
+> supporting subcommands (`send` / `scaffold` / `clear` / `deploy` / `hook`) are
+> built and unit-tested. This README remains the design of record; the non-QA
+> profiles are reserved but not wired yet.
 
 ## Why one binary (multitool)
 
