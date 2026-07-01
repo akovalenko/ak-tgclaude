@@ -47,11 +47,12 @@ type preToolUseDecision struct {
 }
 
 // runHookPreToolUse gates the responder's tool calls. It DENIES the two things
-// that are out of contract — reading the token file (any tool) and running an
-// unsandboxed Bash command — and DEFERS everything else to the normal
-// permission + sandbox flow (so the per-invocation Write grant, the static Read
-// allow, and dontAsk decide). It never blanket-"allow"s, which would override
-// those layers.
+// that are out of contract — a file tool (Read/Edit/Write) reading the token
+// file, and an unsandboxed Bash command — and DEFERS everything else to the
+// normal permission + sandbox flow (so the per-invocation Write grant, the
+// static Read allow + outbox deny, and dontAsk decide). It never blanket-"allow"s,
+// which would override those layers. (A Bash read of the token is masked by the
+// sandbox's credentials.files deny-read, not by this hook.)
 func runHookPreToolUse(args []string) {
 	fs := flag.NewFlagSet("hook pretooluse", flag.ContinueOnError)
 	var deny multiFlag
@@ -75,9 +76,9 @@ func runHookPreToolUse(args []string) {
 	}
 }
 
-// decidePreToolUse returns "deny", "allow", or "" (defer). It denies a
-// token-file touch (any tool) and an unsandboxed Bash command; it explicitly
-// allows sandboxed Bash; everything else defers.
+// decidePreToolUse returns "deny", "allow", or "" (defer). It denies a file tool
+// reading the token and an unsandboxed Bash command; it explicitly allows
+// sandboxed Bash; everything else defers.
 func decidePreToolUse(in *preToolUseInput, deny []string) (decision, reason string) {
 	if path, blocked := denyReason(in, deny); blocked {
 		return "deny", "ak-tgclaude hook: access to a protected path is denied: " + path
@@ -91,7 +92,11 @@ func decidePreToolUse(in *preToolUseInput, deny []string) (decision, reason stri
 	return "", ""
 }
 
-// denyReason reports whether the tool call touches a protected path.
+// denyReason reports whether a file-touching tool call reads a protected path.
+// Only the file tools are gated: a Bash read of the token is masked by the
+// sandbox's credentials.files deny-read (authoritative and obfuscation-proof),
+// which the hook does not — and should not — reimplement by string-matching the
+// command.
 func denyReason(in *preToolUseInput, deny []string) (string, bool) {
 	if len(deny) == 0 {
 		return "", false
@@ -100,13 +105,6 @@ func denyReason(in *preToolUseInput, deny []string) (string, bool) {
 	case "Read", "Edit", "Write", "NotebookEdit":
 		if p := matchDenied(in.ToolInput.FilePath, deny); p != "" {
 			return p, true
-		}
-	case "Bash":
-		// Best-effort: block a command that mentions a protected path by name.
-		for _, d := range deny {
-			if d != "" && strings.Contains(in.ToolInput.Command, d) {
-				return d, true
-			}
 		}
 	}
 	return "", false

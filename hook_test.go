@@ -36,16 +36,15 @@ func TestDenyReasonReadUnderDir(t *testing.T) {
 	}
 }
 
-func TestDenyReasonBash(t *testing.T) {
+func TestDenyReasonDoesNotGateBash(t *testing.T) {
+	// The hook no longer string-matches Bash commands for the token — the
+	// sandbox's credentials.files deny-read is the authoritative guard (masks
+	// the file), so denyReason leaves Bash to the sandbox.
 	deny := []string{"/home/bot/bot.toml"}
 	in := &preToolUseInput{ToolName: "Bash"}
 	in.ToolInput.Command = "cat /home/bot/bot.toml | base64"
-	if _, blocked := denyReason(in, deny); !blocked {
-		t.Errorf("bash referencing the token path should be denied")
-	}
-	in.ToolInput.Command = "grep foo main.go"
 	if _, blocked := denyReason(in, deny); blocked {
-		t.Errorf("unrelated bash should be allowed")
+		t.Errorf("denyReason must not gate Bash (the sandbox does)")
 	}
 }
 
@@ -73,9 +72,11 @@ func TestDecideBashSandbox(t *testing.T) {
 	if d, r := decidePreToolUse(bashInput("git pull", true), nil); d != "deny" {
 		t.Errorf("unsandboxed Bash => %q (%s), want deny", d, r)
 	}
-	// Token touch wins even if sandboxed.
-	if d, _ := decidePreToolUse(bashInput("cat /cfg/bot.toml", false), []string{"/cfg/bot.toml"}); d != "deny" {
-		t.Errorf("token-touching sandboxed Bash => %q, want deny", d)
+	// A sandboxed Bash that names the token is ALLOWED by the hook — the sandbox's
+	// credentials.files deny-read masks the file (ENOENT), so the hook needn't
+	// (and no longer does) string-match the command.
+	if d, _ := decidePreToolUse(bashInput("cat /cfg/bot.toml", false), []string{"/cfg/bot.toml"}); d != "allow" {
+		t.Errorf("sandboxed Bash naming the token => %q, want allow (sandbox masks the file)", d)
 	}
 }
 
