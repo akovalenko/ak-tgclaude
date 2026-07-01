@@ -94,6 +94,7 @@ type scaffoldParams struct {
 	HookBinary     string   // default "ak-tgclaude"
 	DenyEnvVars    []string // secrets to unset in the sandbox
 	NetworkDomains []string // sandbox egress allowlist
+	NoRefuse       bool     // materialize the do-what-you're-asked agent variant
 }
 
 // defaultDenyEnvVars are the ambient secrets scrubbed from the responder's
@@ -182,21 +183,21 @@ func materializeScaffold(cwd string, p scaffoldParams) error {
 	if err := os.WriteFile(path, b, 0o600); err != nil {
 		return fmt.Errorf("writing %s: %w", path, err)
 	}
-	return materializeAssets(claudeDir)
+	if err := materializeSkills(claudeDir); err != nil {
+		return err
+	}
+	return materializeAgent(claudeDir, p.NoRefuse)
 }
 
-// materializeAssets copies the embedded agents/skills tree into <cwd>/.claude.
-func materializeAssets(claudeDir string) error {
-	return fs.WalkDir(scaffoldAssets, "assets", func(p string, d fs.DirEntry, err error) error {
+// materializeSkills copies the embedded skills tree into <cwd>/.claude/skills.
+func materializeSkills(claudeDir string) error {
+	return fs.WalkDir(scaffoldAssets, "assets/skills", func(p string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
 		rel, err := filepath.Rel("assets", p)
 		if err != nil {
 			return err
-		}
-		if rel == "." {
-			return nil
 		}
 		dst := filepath.Join(claudeDir, rel)
 		if d.IsDir() {
@@ -211,6 +212,28 @@ func materializeAssets(claudeDir string) error {
 		}
 		return os.WriteFile(dst, data, 0o600)
 	})
+}
+
+// materializeAgent writes the chosen responder agent variant into
+// <cwd>/.claude/agents/faq-responder.md. Both variants carry the same agent name
+// (so --agent selection is unchanged); noRefuse swaps the persona from a scoped
+// FAQ that declines off-topic to a do-what-you're-asked assistant. Machine
+// guards (sandbox, token deny-read, per-invocation write, pinned route) hold
+// either way, so the relaxed persona cannot exceed them.
+func materializeAgent(claudeDir string, noRefuse bool) error {
+	src := "assets/agents/faq-responder.md"
+	if noRefuse {
+		src = "assets/agents/faq-responder.norefuse.md"
+	}
+	data, err := scaffoldAssets.ReadFile(src)
+	if err != nil {
+		return err
+	}
+	dir := filepath.Join(claudeDir, "agents")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return err
+	}
+	return os.WriteFile(filepath.Join(dir, "faq-responder.md"), data, 0o600)
 }
 
 // buildInvocationSettings returns the per-invocation --settings JSON that grants
@@ -270,14 +293,20 @@ func runScaffold(args []string) {
 	if err := materializeScaffold(cfg.Cwd, scaffoldParams{
 		CacheDir:  filepath.Join(cfg.Cwd, "cache"),
 		TokenFile: cfg.ConfigPath,
+		NoRefuse:  cfg.NoRefuse,
 	}); err != nil {
 		fmt.Fprintf(os.Stderr, "ak-tgclaude: scaffold: %v\n", err)
 		os.Exit(1)
 	}
 
+	agentVariant := "faq (declines off-topic)"
+	if cfg.NoRefuse {
+		agentVariant = "norefuse (do-what-you're-asked)"
+	}
 	fmt.Printf("ak-tgclaude: scaffold materialized\n")
 	fmt.Printf("  cwd:      %s\n", cfg.Cwd)
 	fmt.Printf("  settings: %s\n", filepath.Join(cfg.Cwd, ".claude", "settings.json"))
+	fmt.Printf("  agent:    %s\n", agentVariant)
 	fmt.Printf("  outbox:   %s\n", outboxRoot)
 	if cfg.ConfigPath == "" {
 		fmt.Printf("  (no --config given: the token guard has no deny-read path)\n")

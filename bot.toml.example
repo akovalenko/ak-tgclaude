@@ -41,6 +41,11 @@ project = "~/code/example-project"
 # different chats run concurrently up to this bound.
 # max_concurrent = 4
 
+# Materialize the do-what-you're-asked responder variant (does not decline
+# off-topic messages). Machine guards (read-only sandbox, token deny, per-chat
+# route) still apply, so it can't exceed the read-only contract. Also --norefuse.
+# no_refuse = false
+
 # Fixed responder cwd. When set, the generated .claude/settings.json is
 # materialized here and kept (inspect it, drop a settings.local.json, run claude
 # by hand). Default: an ephemeral dir removed on shutdown. See also the

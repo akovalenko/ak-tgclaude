@@ -82,3 +82,37 @@ func TestMaterializeScaffoldWritesValidJSON(t *testing.T) {
 		}
 	}
 }
+
+func agentBody(t *testing.T, noRefuse bool) string {
+	t.Helper()
+	cwd := t.TempDir()
+	if err := materializeScaffold(cwd, scaffoldParams{CacheDir: "/c", NoRefuse: noRefuse}); err != nil {
+		t.Fatal(err)
+	}
+	b, err := os.ReadFile(filepath.Join(cwd, ".claude", "agents", defaultAgent+".md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(b)
+}
+
+func TestMaterializeAgentVariant(t *testing.T) {
+	// Same agent NAME either way (so --agent selection is unchanged).
+	def := agentBody(t, false)
+	nr := agentBody(t, true)
+	for _, body := range []string{def, nr} {
+		if !strings.Contains(body, "name: "+defaultAgent) {
+			t.Errorf("variant lost the agent name:\n%s", body)
+		}
+	}
+	// Default declines off-topic; --norefuse does not.
+	if !strings.Contains(def, "out of scope") {
+		t.Errorf("default agent should mention scope: %q", def)
+	}
+	if !strings.Contains(nr, "Do NOT decline") {
+		t.Errorf("norefuse agent should say not to decline: %q", nr)
+	}
+	if strings.Contains(nr, "untrusted input") {
+		t.Errorf("norefuse agent should not carry the untrusted-input refusal framing")
+	}
+}

@@ -191,6 +191,13 @@ a generic one, embedded in the binary and materialized into the scaffold:
   never hits the command line. Covers plain/HTML text, `send code`, `send doc`,
   and multiple messages.
 
+**`--norefuse`** (config `no_refuse`) materializes a second variant of the agent
+(same name) that does **not** decline off-topic messages — it just does what it
+is asked. This is safe because the read-only sandbox, token deny-read,
+per-invocation write grant, and pinned route are all machine-enforced: the
+relaxed persona cannot exceed them (it still can't modify the project, read
+secrets, or message anyone but the sender).
+
 ## Responder scaffold (generated settings.json)
 
 At startup the dispatcher **materializes** the responder's launch dir: it writes

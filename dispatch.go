@@ -271,6 +271,7 @@ func runDispatch(args []string) {
 		if err := materializeScaffold(cwd, scaffoldParams{
 			CacheDir:  filepath.Join(cfg.StateDir, "cache"),
 			TokenFile: cfg.ConfigPath,
+			NoRefuse:  cfg.NoRefuse,
 		}); err != nil {
 			fmt.Fprintf(os.Stderr, "ak-tgclaude: dispatch: %v\n", err)
 			os.Exit(1)

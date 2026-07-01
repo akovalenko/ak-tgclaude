@@ -53,6 +53,11 @@ type Config struct {
 	// per chat, but different chats run concurrently up to this bound. Default 4.
 	MaxConcurrent int `toml:"max_concurrent"`
 
+	// NoRefuse materializes the do-what-you're-asked responder variant (does not
+	// decline off-topic messages). Machine guards still apply, so it cannot
+	// exceed the read-only sandboxed contract.
+	NoRefuse bool `toml:"no_refuse"`
+
 	// Project is the codebase the responder consults on (read-only under "qa").
 	// The sandbox and PreToolUse confine the responder's reads here.
 	Project string `toml:"project"`
@@ -102,6 +107,7 @@ func parseConfig(args []string) (*Config, error) {
 	responder := fs.String("responder", "", "responder implementation: claude|stub (default claude; stub replies a fixed line for Telegram I/O tests)")
 	cwd := fs.String("cwd", "", "fixed responder cwd to materialize into and keep (default: ephemeral, removed on exit)")
 	maxConcurrent := fs.Int("max-concurrent", 0, "max responders running at once (per-chat is always serialized; default 4)")
+	noRefuse := fs.Bool("norefuse", false, "materialize the do-what-you're-asked responder (does not decline off-topic; machine guards still apply)")
 	if err := fs.Parse(args); err != nil {
 		return nil, err
 	}
@@ -134,6 +140,9 @@ func parseConfig(args []string) (*Config, error) {
 	}
 	if *maxConcurrent != 0 {
 		c.MaxConcurrent = *maxConcurrent
+	}
+	if *noRefuse {
+		c.NoRefuse = true
 	}
 
 	c.applyDefaults()
