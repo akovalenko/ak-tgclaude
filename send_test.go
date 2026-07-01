@@ -1,9 +1,12 @@
 package main
 
 import (
+	"bytes"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+	"time"
 )
 
 func TestParseSendText(t *testing.T) {
@@ -93,5 +96,64 @@ func TestResolveOutbox(t *testing.T) {
 	}
 	if _, err := resolveOutbox(file); err == nil {
 		t.Errorf("expected error when outbox is a file")
+	}
+}
+
+func TestWaitForResultFound(t *testing.T) {
+	dir := t.TempDir()
+	base := "00000000000000000001-1-00000000000000000001.json"
+	if err := writeResult(dir, base, Result{OK: true, MessageID: 9}); err != nil {
+		t.Fatal(err)
+	}
+	res, ok := waitForResult(dir, base, resultWaitTimeout)
+	if !ok {
+		t.Fatalf("waitForResult: result not found")
+	}
+	if !res.OK || res.MessageID != 9 {
+		t.Errorf("result = %+v, want OK with message_id 9", res)
+	}
+}
+
+func TestWaitForResultTimeout(t *testing.T) {
+	dir := t.TempDir()
+	res, ok := waitForResult(dir, "nope.json", 10*time.Millisecond)
+	if ok || res != nil {
+		t.Errorf("want (nil, false) on timeout, got (%+v, %v)", res, ok)
+	}
+}
+
+func TestReportResult(t *testing.T) {
+	var buf bytes.Buffer
+
+	// Success is silent and exits 0.
+	if code := reportResult(&buf, &Result{OK: true, MessageID: 1}, false); code != 0 {
+		t.Errorf("success code = %d, want 0", code)
+	}
+	if buf.Len() != 0 {
+		t.Errorf("success should be silent, got %q", buf.String())
+	}
+
+	// A permanent reject exits non-zero and surfaces the Telegram description.
+	buf.Reset()
+	if code := reportResult(&buf, &Result{OK: false, Permanent: true, Error: "Bad Request: can't parse entities"}, false); code == 0 {
+		t.Errorf("permanent reject should exit non-zero")
+	}
+	if !strings.Contains(buf.String(), "can't parse entities") {
+		t.Errorf("permanent output should carry the description, got %q", buf.String())
+	}
+
+	// A give-up exits non-zero.
+	buf.Reset()
+	if code := reportResult(&buf, &Result{OK: false, Permanent: false, Error: "network down"}, false); code == 0 {
+		t.Errorf("give-up should exit non-zero")
+	}
+
+	// A timeout degrades to fire-and-forget: exit 0 with a "queued" note.
+	buf.Reset()
+	if code := reportResult(&buf, nil, true); code != 0 {
+		t.Errorf("timeout code = %d, want 0", code)
+	}
+	if !strings.Contains(buf.String(), "queued") {
+		t.Errorf("timeout output should mention queued, got %q", buf.String())
 	}
 }

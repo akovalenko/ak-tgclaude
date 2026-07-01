@@ -68,9 +68,47 @@ func runSend(args []string) {
 		fmt.Fprintf(os.Stderr, "ak-tgclaude: send: %v\n", err)
 		os.Exit(1)
 	}
-	if _, err := d.Drop(dir); err != nil {
+	path, err := d.Drop(dir)
+	if err != nil {
 		fmt.Fprintf(os.Stderr, "ak-tgclaude: send: %v\n", err)
 		os.Exit(1)
+	}
+	// Block on the dispatcher's delivery result so the responder sees a Telegram
+	// rejection (bad HTML, blocked chat, …) as a non-zero exit and can fix and
+	// resend in the same turn. There are deliberately no flags to skip or retune
+	// this — the responder is not to be burdened with delivery options.
+	base := filepath.Base(path)
+	res, ok := waitForResult(dir, base, resultWaitTimeout)
+	if ok {
+		// Cosmetic: retire our own result file promptly (teardown's RemoveAll
+		// would sweep it regardless); the write is covered by the outbox grant.
+		_ = os.Remove(filepath.Join(dir, resultsSubdir, base))
+	}
+	os.Exit(reportResult(os.Stderr, res, !ok))
+}
+
+// reportResult maps a delivery outcome to an exit code, writing any diagnostic
+// to w. A timeout degrades to fire-and-forget (exit 0; the drop stays queued and
+// drain finishes in the background). A successful delivery is silent (exit 0). A
+// permanent reject prints the Telegram error plus a fix-and-resend hint, and a
+// give-up prints the failure — both exit non-zero so the responder's shell sees
+// the send fail. res is nil exactly when timedOut is true.
+func reportResult(w io.Writer, res *Result, timedOut bool) int {
+	// Writes to w (stderr) are diagnostics; a failed write cannot change the
+	// outcome, so the error is deliberately discarded.
+	switch {
+	case timedOut:
+		_, _ = fmt.Fprintf(w, "ak-tgclaude: send: queued; delivery outcome unknown after %s\n", resultWaitTimeout)
+		return 0
+	case res.OK:
+		return 0
+	case res.Permanent:
+		_, _ = fmt.Fprintf(w, "ak-tgclaude: send: Telegram rejected the message: %s\n", res.Error)
+		_, _ = fmt.Fprintln(w, "ak-tgclaude: send: fix the HTML and resend.")
+		return 1
+	default:
+		_, _ = fmt.Fprintf(w, "ak-tgclaude: send: delivery failed after retries: %s\n", res.Error)
+		return 1
 	}
 }
 

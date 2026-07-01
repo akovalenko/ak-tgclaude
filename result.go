@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"time"
 )
 
 // resultVersion is the on-disk schema version for a delivery Result. Bump only
@@ -58,4 +59,47 @@ func writeResult(outboxDir, base string, res Result) error {
 		return fmt.Errorf("publishing result: %w", err)
 	}
 	return nil
+}
+
+// resultPollInterval is how often a waiting send re-checks for its result file.
+const resultPollInterval = 50 * time.Millisecond
+
+// resultWaitTimeout bounds how long send blocks on a delivery result before
+// degrading to fire-and-forget. It is a hardcoded constant, not a flag: send
+// takes no delivery options (the responder must not be burdened with them). 5s
+// comfortably covers the ~1-RTT permanent-reject path this feature exists for,
+// and stays under the client's 60s HTTP timeout.
+const resultWaitTimeout = 5 * time.Second
+
+// readResult loads and decodes one result file.
+func readResult(path string) (*Result, error) {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	var res Result
+	if err := json.Unmarshal(b, &res); err != nil {
+		return nil, fmt.Errorf("malformed result: %w", err)
+	}
+	return &res, nil
+}
+
+// waitForResult polls <outboxDir>/results/<base> until the dispatcher publishes
+// a delivery result or timeout elapses, returning (result, true) on a result or
+// (nil, false) on timeout. Polling (not fsnotify) is deliberate: send is
+// short-lived, the result lands within ~1 RTT, and polling sidesteps the
+// watch-registered-after-create race with no catch-up logic. A not-yet-present
+// (or momentarily unreadable) file just keeps polling.
+func waitForResult(outboxDir, base string, timeout time.Duration) (*Result, bool) {
+	path := filepath.Join(outboxDir, resultsSubdir, base)
+	deadline := time.Now().Add(timeout)
+	for {
+		if res, err := readResult(path); err == nil {
+			return res, true
+		}
+		if !time.Now().Before(deadline) {
+			return nil, false
+		}
+		time.Sleep(resultPollInterval)
+	}
 }
