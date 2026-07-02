@@ -309,6 +309,89 @@ func TestWireSkillPreservesExecBit(t *testing.T) {
 	}
 }
 
+func TestAddSkillVerbatimNoPreload(t *testing.T) {
+	// A generic skill is copied verbatim: {{PROJECT}} is NOT substituted (it is
+	// project-agnostic), an executable bundled file keeps +x, and — crucially — the
+	// skill is NOT preloaded into the agent's skills: (it is on-demand).
+	src := writeSkill(t, t.TempDir(), "generic-tool",
+		"---\nname: generic-tool\n---\nRefs {{PROJECT}}/x and ${CLAUDE_SKILL_DIR}/run.sh\n")
+	if err := os.WriteFile(filepath.Join(src, "run.sh"), []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	cwd := t.TempDir()
+	if err := materializeScaffold(cwd, scaffoldParams{
+		CacheDir:  "/c",
+		Project:   "/home/me/thoughts",
+		AddSkills: []string{src},
+	}); err != nil {
+		t.Fatalf("materializeScaffold: %v", err)
+	}
+
+	// Copied verbatim — {{PROJECT}} stays literal (no substitution for generics).
+	got, err := os.ReadFile(filepath.Join(cwd, ".claude", "skills", "generic-tool", "SKILL.md"))
+	if err != nil {
+		t.Fatalf("added skill not materialized: %v", err)
+	}
+	if !strings.Contains(string(got), "{{PROJECT}}/x") {
+		t.Errorf("add-skill must NOT substitute {{PROJECT}}:\n%s", got)
+	}
+	// Bundled executable keeps +x.
+	fi, err := os.Stat(filepath.Join(cwd, ".claude", "skills", "generic-tool", "run.sh"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fi.Mode()&0o100 == 0 {
+		t.Errorf("added skill lost +x: %v", fi.Mode())
+	}
+	// NOT preloaded: the agent's skills: must not list it (only built-in tg-emit).
+	agent, err := os.ReadFile(filepath.Join(cwd, ".claude", "agents", defaultAgent+".md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(agent), "generic-tool") {
+		t.Errorf("add-skill must NOT be preloaded into the agent:\n%s", agent)
+	}
+}
+
+func TestAddSkillRequiresDir(t *testing.T) {
+	skillDir := writeSkill(t, t.TempDir(), "g", "---\nname: g\n---\nbody")
+	err := addSkills(filepath.Join(t.TempDir(), ".claude"), []string{filepath.Join(skillDir, "SKILL.md")})
+	if err == nil {
+		t.Fatal("addSkills should reject a bare SKILL.md file")
+	}
+	if !strings.Contains(err.Error(), "must be a skill DIRECTORY") {
+		t.Errorf("unexpected error: %v", err)
+	}
+}
+
+func TestAddAgentCopiesFileRejectsDir(t *testing.T) {
+	dir := t.TempDir()
+	agentFile := filepath.Join(dir, "helper.md")
+	if err := os.WriteFile(agentFile, []byte("---\nname: helper\n---\nagent body {{PROJECT}}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	claudeDir := filepath.Join(t.TempDir(), ".claude")
+	if err := addAgents(claudeDir, []string{agentFile}); err != nil {
+		t.Fatalf("addAgents(file): %v", err)
+	}
+	got, err := os.ReadFile(filepath.Join(claudeDir, "agents", "helper.md"))
+	if err != nil {
+		t.Fatalf("agent not copied: %v", err)
+	}
+	// Verbatim: {{PROJECT}} left untouched (generic agent).
+	if !strings.Contains(string(got), "{{PROJECT}}") {
+		t.Errorf("add-agent must copy verbatim:\n%s", got)
+	}
+	// A directory is rejected (agents are single .md files).
+	if err := addAgents(filepath.Join(t.TempDir(), ".claude"), []string{dir}); err == nil {
+		t.Error("addAgents should reject a directory")
+	} else if !strings.Contains(err.Error(), "must be an agent .md FILE") {
+		t.Errorf("unexpected error: %v", err)
+	}
+}
+
 func TestWireSkillDedupsAndInsertsWhenAbsent(t *testing.T) {
 	// Merging into an existing list de-duplicates.
 	got := string(appendAgentSkills([]byte("---\nname: x\nskills: [tg-emit]\n---\nbody"), []string{"tg-emit", "d"}))

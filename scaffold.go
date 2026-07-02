@@ -102,6 +102,8 @@ type scaffoldParams struct {
 	NoRefuse       bool     // materialize the do-what-you're-asked agent variant
 	Project        string   // knowledge root; substituted for {{PROJECT}} in agent/skill templates
 	WireSkills     []string // operator skill template DIRECTORIES to materialize + preload
+	AddSkills      []string // generic skill DIRECTORIES copied verbatim, NOT preloaded (on-demand)
+	AddAgents      []string // generic agent .md FILES copied verbatim, NOT preloaded (on-demand)
 	DenyRead       []string // operator paths denied at BOTH layers (Read-tool hook + sandbox Bash)
 	BangBug        bool     // pass --bang-bug to the hook (deny sandboxed Bash with the corrupted `\!`)
 }
@@ -300,6 +302,15 @@ func materializeScaffold(cwd string, p scaffoldParams) error {
 	if err != nil {
 		return err
 	}
+	// Generic skills/agents are copied verbatim (no {{PROJECT}}) and NOT preloaded:
+	// they live in the scaffold for on-demand use — the responder sees their
+	// descriptions and pulls one in via the Skill tool / subagent delegation.
+	if err := addSkills(claudeDir, p.AddSkills); err != nil {
+		return err
+	}
+	if err := addAgents(claudeDir, p.AddAgents); err != nil {
+		return err
+	}
 	return materializeAgent(claudeDir, p.NoRefuse, p.Project, wired)
 }
 
@@ -392,6 +403,58 @@ func wireSkills(claudeDir, project string, paths []string) ([]string, error) {
 		names = append(names, name)
 	}
 	return names, nil
+}
+
+// addSkills copies each GENERIC skill DIRECTORY verbatim into
+// <cwd>/.claude/skills/<name> — no {{PROJECT}} substitution (empty project) and
+// no agent preload. The skill is left for on-demand use: its description sits in
+// the responder's context (the skill "table of contents") and it invokes the
+// skill via the Skill tool when relevant. Like wireSkills, a bare SKILL.md file is
+// rejected — the whole tree is copied so bundled resources (and +x) come along.
+func addSkills(claudeDir string, paths []string) error {
+	for _, p := range paths {
+		info, err := os.Stat(p)
+		if err != nil {
+			return fmt.Errorf("add skill %s: %w", p, err)
+		}
+		if !info.IsDir() {
+			return fmt.Errorf("add skill %s: must be a skill DIRECTORY, not a file "+
+				"(the whole skill tree is copied so bundled resources come along) — pass %s instead",
+				p, filepath.Dir(p))
+		}
+		name := filepath.Base(p)
+		if err := copyTreeMaterialize(p, filepath.Join(claudeDir, "skills", name), ""); err != nil {
+			return fmt.Errorf("add skill %s: %w", p, err)
+		}
+	}
+	return nil
+}
+
+// addAgents copies each GENERIC agent .md FILE verbatim into
+// <cwd>/.claude/agents/<basename> — no substitution, no preload. Claude Code
+// agents are single markdown files (no bundled subtree), so a directory is
+// rejected. The copied agent becomes a subagent the responder may delegate to on
+// demand.
+func addAgents(claudeDir string, paths []string) error {
+	for _, p := range paths {
+		info, err := os.Stat(p)
+		if err != nil {
+			return fmt.Errorf("add agent %s: %w", p, err)
+		}
+		if info.IsDir() {
+			return fmt.Errorf("add agent %s: must be an agent .md FILE, not a directory "+
+				"(Claude Code agents are single markdown files)", p)
+		}
+		data, err := os.ReadFile(p)
+		if err != nil {
+			return fmt.Errorf("add agent %s: %w", p, err)
+		}
+		dst := filepath.Join(claudeDir, "agents", filepath.Base(p))
+		if err := materializeFile(dst, data, "", scaffoldFileMode(info.Mode())); err != nil {
+			return fmt.Errorf("add agent %s: %w", p, err)
+		}
+	}
+	return nil
 }
 
 // copyTreeMaterialize recursively copies srcDir into dstDir, substituting
@@ -564,6 +627,8 @@ func runScaffold(args []string) {
 		NoRefuse:   cfg.NoRefuse,
 		Project:    cfg.Project,
 		WireSkills: cfg.WireSkills,
+		AddSkills:  cfg.AddSkills,
+		AddAgents:  cfg.AddAgents,
 		DenyRead:   cfg.DenyRead,
 		HookBinary: selfExePath(),
 		BangBug:    cfg.BangBug,
@@ -582,6 +647,12 @@ func runScaffold(args []string) {
 	fmt.Printf("  agent:    %s\n", agentVariant)
 	if len(cfg.WireSkills) > 0 {
 		fmt.Printf("  wired:    %s (preloaded into the agent)\n", strings.Join(cfg.WireSkills, ", "))
+	}
+	if len(cfg.AddSkills) > 0 {
+		fmt.Printf("  added skills: %s (verbatim, on-demand — not preloaded)\n", strings.Join(cfg.AddSkills, ", "))
+	}
+	if len(cfg.AddAgents) > 0 {
+		fmt.Printf("  added agents: %s (verbatim, on-demand)\n", strings.Join(cfg.AddAgents, ", "))
 	}
 	if len(cfg.DenyRead) > 0 {
 		fmt.Printf("  deny-read: %s (Read-tool + sandboxed Bash)\n", strings.Join(cfg.DenyRead, ", "))

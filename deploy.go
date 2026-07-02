@@ -76,5 +76,7 @@ bot_token = "123456789:AA...replace-me..."
 profile   = "qa"
 project   = "~/code/example-project"
 # responder = "claude"   # or "stub" to smoke-test Telegram I/O without a model
-# wire_skills = ["~/lib/my-domain-skill"]  # skill(s) preloaded into the responder for domain knowledge
+# wire_skills = ["~/lib/my-domain-skill"]  # domain skill DIR, preloaded into the responder (always in context)
+# add_skills  = ["~/lib/some-generic-skill"]  # generic skill DIR(s), copied verbatim for on-demand use (not preloaded)
+# add_agents  = ["~/lib/some-agent.md"]        # generic agent .md FILE(s), copied verbatim as on-demand subagents
 `

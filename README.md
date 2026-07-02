@@ -342,6 +342,33 @@ bot; preloading via `skills:` guarantees it is always in context.
 - Wiring is read at **startup**, so changing a skill takes effect on the next
   dispatcher restart.
 
+### Generic skills & agents (on-demand, not preloaded)
+
+For **project-agnostic** helpers — a reusable skill or a specialist subagent that
+isn't the bot's core domain — use `add_skills` / `add_agents` instead of `wire`:
+
+```toml
+add_skills = ["~/lib/md-export"]      # generic skill DIRECTORY(ies)
+add_agents = ["~/lib/code-reviewer.md"]  # generic agent .md FILE(s)
+```
+
+(or `--add-skill <dir>` / `--add-agent <file.md>`, repeatable and additive.) The
+difference from `wire_skills` is deliberate:
+
+- **Copied verbatim** — no `{{PROJECT}}` substitution (these don't reference your
+  project). A skill is a **directory** (whole tree copied, executable bits
+  preserved, bundled resources come along); an agent is a single **`.md` file**.
+- **Not preloaded** — they land in `.claude/skills/` and `.claude/agents/` for
+  **on-demand** use. The responder sees their descriptions (the skill "table of
+  contents") and pulls one in via the `Skill` tool / subagent delegation only when
+  relevant. This is the right trade for a toolbox: `wire` guarantees a domain skill
+  is *always* in context; `add` keeps generics out of context until needed.
+
+Symlinking a shared canon instead of copying is **not** viable yet — Claude Code's
+skill/agent discovery does not follow a symlinked directory (upstream bug), so
+`add_*` copies. Since the scaffold is regenerated from source on every restart, an
+edit to the canonical skill still propagates on the next restart.
+
 ## Responder scaffold (generated settings.json)
 
 At startup the dispatcher **materializes** the responder's launch dir: it writes

@@ -69,6 +69,24 @@ func TestParseConfigWireSkills(t *testing.T) {
 	}
 }
 
+func TestParseConfigAddSkillsAndAgents(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "bot.toml")
+	if err := os.WriteFile(path, []byte("add_skills = [\"/lib/s\"]\nadd_agents = [\"/lib/a.md\"]\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	c, err := parseConfig([]string{"--config", path, "--add-skill", "/lib/s2", "--add-agent", "/lib/a2.md"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Both are additive (file list + repeatable flags), like wire_skills.
+	if len(c.AddSkills) != 2 || c.AddSkills[0] != "/lib/s" || c.AddSkills[1] != "/lib/s2" {
+		t.Errorf("AddSkills merge wrong: %v", c.AddSkills)
+	}
+	if len(c.AddAgents) != 2 || c.AddAgents[0] != "/lib/a.md" || c.AddAgents[1] != "/lib/a2.md" {
+		t.Errorf("AddAgents merge wrong: %v", c.AddAgents)
+	}
+}
+
 func TestParseConfigDenyRead(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "bot.toml")
 	if err := os.WriteFile(path, []byte("deny_read = [\"/etc/secret\"]\n"), 0o600); err != nil {

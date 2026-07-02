@@ -486,6 +486,8 @@ func runDispatch(args []string) {
 			NoRefuse:   cfg.NoRefuse,
 			Project:    cfg.Project,
 			WireSkills: cfg.WireSkills,
+			AddSkills:  cfg.AddSkills,
+			AddAgents:  cfg.AddAgents,
 			DenyRead:   cfg.DenyRead,
 			HookBinary: selfExePath(),
 			BangBug:    cfg.BangBug,

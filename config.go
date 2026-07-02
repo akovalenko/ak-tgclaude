@@ -90,6 +90,21 @@ type Config struct {
 	// via --wire-skill (additive with this list).
 	WireSkills []string `toml:"wire_skills"`
 
+	// AddSkills lists GENERIC skill directories to copy verbatim into the scaffold
+	// (no {{PROJECT}} substitution, not preloaded into the agent). Unlike wire_skills
+	// — which bind a single domain skill always into context — these sit in
+	// .claude/skills/ for on-demand use: the responder sees their descriptions (the
+	// skill "table of contents") and pulls one in via the Skill tool when relevant.
+	// Same path rules as wire_skills (~ expanded, relative to launch cwd; may live
+	// outside the project). Repeatable via --add-skill (additive with this list).
+	AddSkills []string `toml:"add_skills"`
+
+	// AddAgents lists GENERIC agent .md FILES to copy verbatim into the scaffold's
+	// .claude/agents/ (no substitution, not preloaded). They become subagent types
+	// the responder may delegate to on demand. Same path rules as add_skills.
+	// Repeatable via --add-agent (additive with this list).
+	AddAgents []string `toml:"add_agents"`
+
 	// Responder selects the responder implementation: "claude" (default) spawns
 	// `claude -p`; "stub" replies with a fixed line, for smoke-testing the
 	// Telegram I/O path without a model or scaffold.
@@ -220,6 +235,10 @@ func parseConfig(args []string) (*Config, error) {
 	fs.Var(&allowUsers, "allow-user", "authorize a Telegram user id (repeatable; merged with allowed_users)")
 	var wireSkills stringList
 	fs.Var(&wireSkills, "wire-skill", "skill template DIRECTORY to materialize and preload into the responder (repeatable; merged with wire_skills)")
+	var addSkills stringList
+	fs.Var(&addSkills, "add-skill", "generic skill DIRECTORY to copy verbatim for on-demand use (not preloaded; repeatable; merged with add_skills)")
+	var addAgents stringList
+	fs.Var(&addAgents, "add-agent", "generic agent .md FILE to copy verbatim as a subagent (not preloaded; repeatable; merged with add_agents)")
 	var denyRead stringList
 	fs.Var(&denyRead, "deny-read", "path the responder must never read, at both the Read-tool and sandboxed-Bash layers (repeatable; merged with deny_read; ~ and relative resolved against the launch cwd)")
 	open := fs.Bool("open", false, "OPEN ACCESS: allow every Telegram user (demo only; overrides the whitelist)")
@@ -277,6 +296,13 @@ func parseConfig(args []string) (*Config, error) {
 	if len(wireSkills) > 0 {
 		c.WireSkills = append(c.WireSkills, wireSkills...)
 	}
+	// add_skills / add_agents are additive as well (drop in one generic ad-hoc).
+	if len(addSkills) > 0 {
+		c.AddSkills = append(c.AddSkills, addSkills...)
+	}
+	if len(addAgents) > 0 {
+		c.AddAgents = append(c.AddAgents, addAgents...)
+	}
 	// deny_read is additive too (protect one more path ad-hoc).
 	if len(denyRead) > 0 {
 		c.DenyRead = append(c.DenyRead, denyRead...)
@@ -298,6 +324,12 @@ func parseConfig(args []string) (*Config, error) {
 	for i := range c.WireSkills {
 		c.WireSkills[i] = resolvePath(c.WireSkills[i])
 	}
+	for i := range c.AddSkills {
+		c.AddSkills[i] = resolvePath(c.AddSkills[i])
+	}
+	for i := range c.AddAgents {
+		c.AddAgents[i] = resolvePath(c.AddAgents[i])
+	}
 	for i := range c.DenyRead {
 		c.DenyRead[i] = resolvePath(c.DenyRead[i])
 	}
@@ -318,6 +350,16 @@ func parseConfig(args []string) (*Config, error) {
 	}
 	for i, s := range c.WireSkills {
 		if err := validatePath(fmt.Sprintf("wire_skills[%d]", i), s); err != nil {
+			return nil, err
+		}
+	}
+	for i, s := range c.AddSkills {
+		if err := validatePath(fmt.Sprintf("add_skills[%d]", i), s); err != nil {
+			return nil, err
+		}
+	}
+	for i, s := range c.AddAgents {
+		if err := validatePath(fmt.Sprintf("add_agents[%d]", i), s); err != nil {
 			return nil, err
 		}
 	}
