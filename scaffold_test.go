@@ -180,7 +180,7 @@ func TestMaterializeSubstitutesProjectRoot(t *testing.T) {
 	dir := t.TempDir()
 	// Placeholder replaced when a project is set.
 	p := filepath.Join(dir, "a.md")
-	if err := materializeFile(p, []byte("root={{PROJECT}}/x"), "/proj"); err != nil {
+	if err := materializeFile(p, []byte("root={{PROJECT}}/x"), "/proj", 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if b, _ := os.ReadFile(p); string(b) != "root=/proj/x" {
@@ -188,7 +188,7 @@ func TestMaterializeSubstitutesProjectRoot(t *testing.T) {
 	}
 	// Empty project leaves the placeholder visible (not a broken empty path).
 	q := filepath.Join(dir, "b.md")
-	if err := materializeFile(q, []byte("root={{PROJECT}}/x"), ""); err != nil {
+	if err := materializeFile(q, []byte("root={{PROJECT}}/x"), "", 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if b, _ := os.ReadFile(q); string(b) != "root={{PROJECT}}/x" {
@@ -245,23 +245,67 @@ func TestWireSkillMaterializesAndPreloads(t *testing.T) {
 	}
 }
 
-func TestWireSkillAcceptsFileOrDir(t *testing.T) {
+func TestWireSkillRequiresDir(t *testing.T) {
 	src := t.TempDir()
 	skillDir := writeSkill(t, src, "my-skill", "---\nname: my-skill\n---\nbody")
-	skillFile := filepath.Join(skillDir, "SKILL.md")
 
-	for _, path := range []string{skillDir, skillFile} {
-		claudeDir := filepath.Join(t.TempDir(), ".claude")
-		names, err := wireSkills(claudeDir, "/proj", []string{path})
-		if err != nil {
-			t.Fatalf("wireSkills(%s): %v", path, err)
-		}
-		if len(names) != 1 || names[0] != "my-skill" {
-			t.Errorf("path %s: names = %v, want [my-skill]", path, names)
-		}
-		if _, err := os.Stat(filepath.Join(claudeDir, "skills", "my-skill", "SKILL.md")); err != nil {
-			t.Errorf("path %s: skill not materialized: %v", path, err)
-		}
+	// A directory wires fine (its basename is the skill name).
+	claudeDir := filepath.Join(t.TempDir(), ".claude")
+	names, err := wireSkills(claudeDir, "/proj", []string{skillDir})
+	if err != nil {
+		t.Fatalf("wireSkills(dir): %v", err)
+	}
+	if len(names) != 1 || names[0] != "my-skill" {
+		t.Errorf("names = %v, want [my-skill]", names)
+	}
+	if _, err := os.Stat(filepath.Join(claudeDir, "skills", "my-skill", "SKILL.md")); err != nil {
+		t.Errorf("skill not materialized: %v", err)
+	}
+
+	// A bare SKILL.md file is rejected — copying only it would drop the skill's
+	// siblings. The error points the operator at the parent directory.
+	skillFile := filepath.Join(skillDir, "SKILL.md")
+	if _, err := wireSkills(filepath.Join(t.TempDir(), ".claude"), "/proj", []string{skillFile}); err == nil {
+		t.Errorf("wireSkills(file) should reject a bare SKILL.md, got nil error")
+	} else if !strings.Contains(err.Error(), "must be a skill DIRECTORY") {
+		t.Errorf("unexpected error for file input: %v", err)
+	}
+}
+
+func TestWireSkillPreservesExecBit(t *testing.T) {
+	// A skill with a bundled executable (e.g. selftest.sh) must arrive runnable —
+	// materializeFile used to hardcode 0o600, silently stripping +x.
+	src := writeSkill(t, t.TempDir(), "toolful",
+		"---\nname: toolful\n---\nRun ${CLAUDE_SKILL_DIR}/selftest.sh\n")
+	script := filepath.Join(src, "selftest.sh")
+	if err := os.WriteFile(script, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	plain := filepath.Join(src, "notes.md")
+	if err := os.WriteFile(plain, []byte("plain"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	claudeDir := filepath.Join(t.TempDir(), ".claude")
+	if _, err := wireSkills(claudeDir, "/proj", []string{src}); err != nil {
+		t.Fatalf("wireSkills: %v", err)
+	}
+
+	dstScript := filepath.Join(claudeDir, "skills", "toolful", "selftest.sh")
+	fi, err := os.Stat(dstScript)
+	if err != nil {
+		t.Fatalf("bundled script not materialized: %v", err)
+	}
+	if fi.Mode()&0o100 == 0 {
+		t.Errorf("executable bit lost: mode = %v, want owner-exec set", fi.Mode())
+	}
+	// A plain sibling stays non-executable (owner-only 0o600).
+	dfi, err := os.Stat(filepath.Join(claudeDir, "skills", "toolful", "notes.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if dfi.Mode()&0o111 != 0 {
+		t.Errorf("plain file should not be executable: mode = %v", dfi.Mode())
 	}
 }
 

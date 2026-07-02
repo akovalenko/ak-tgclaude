@@ -101,7 +101,7 @@ type scaffoldParams struct {
 	NetworkDomains []string // sandbox egress allowlist
 	NoRefuse       bool     // materialize the do-what-you're-asked agent variant
 	Project        string   // knowledge root; substituted for {{PROJECT}} in agent/skill templates
-	WireSkills     []string // operator skill templates (dir or SKILL.md) to materialize + preload
+	WireSkills     []string // operator skill template DIRECTORIES to materialize + preload
 	DenyRead       []string // operator paths denied at BOTH layers (Read-tool hook + sandbox Bash)
 	BangBug        bool     // pass --bang-bug to the hook (deny sandboxed Bash with the corrupted `\!`)
 }
@@ -310,18 +310,36 @@ func materializeScaffold(cwd string, p scaffoldParams) error {
 // the built-in assets pass through unchanged.
 const projectPlaceholder = "{{PROJECT}}"
 
-// materializeFile writes data to dst (creating parent dirs), substituting the
-// project placeholder. It is the single copy path for every agent/skill file,
-// embedded or wired. An empty project leaves the placeholder untouched, so an
-// unmaterialized {{PROJECT}} is visible rather than becoming a broken path.
-func materializeFile(dst string, data []byte, project string) error {
+// materializeFile writes data to dst (creating parent dirs) with mode,
+// substituting the project placeholder. It is the single copy path for every
+// agent/skill file, embedded or wired. An empty project leaves the placeholder
+// untouched, so an unmaterialized {{PROJECT}} is visible rather than becoming a
+// broken path. mode is owner-only by scaffold convention (0o600, or 0o700 for a
+// bundled executable — see scaffoldFileMode); an explicit chmod after the write
+// makes it deterministic regardless of umask and of a pre-existing dst.
+func materializeFile(dst string, data []byte, project string, mode os.FileMode) error {
 	if project != "" {
 		data = []byte(strings.ReplaceAll(string(data), projectPlaceholder, project))
 	}
 	if err := os.MkdirAll(filepath.Dir(dst), 0o700); err != nil {
 		return err
 	}
-	return os.WriteFile(dst, data, 0o600)
+	if err := os.WriteFile(dst, data, mode); err != nil {
+		return err
+	}
+	return os.Chmod(dst, mode)
+}
+
+// scaffoldFileMode maps a source file's permissions onto the scaffold's
+// owner-only convention while preserving executability: an executable source
+// (any x bit) becomes 0o700, a plain file 0o600. The scaffold is single-user, so
+// group/other bits are intentionally dropped; all we must carry across is
+// whether a bundled file (e.g. selftest.sh) has to stay runnable.
+func scaffoldFileMode(src os.FileMode) os.FileMode {
+	if src&0o111 != 0 {
+		return 0o700
+	}
+	return 0o600
 }
 
 // materializeSkills copies the embedded skills tree into <cwd>/.claude/skills.
@@ -342,17 +360,19 @@ func materializeSkills(claudeDir, project string) error {
 		if err != nil {
 			return err
 		}
-		return materializeFile(dst, data, project)
+		// Embedded files carry no exec bit (embed.FS is always 0444), so 0o600.
+		return materializeFile(dst, data, project, 0o600)
 	})
 }
 
 // wireSkills materializes each operator skill template into
 // <cwd>/.claude/skills/<name> (substituting {{PROJECT}}) and returns the skill
-// names, so they can be preloaded into the built-in agent. A path may be a skill
-// DIRECTORY (its basename is the skill name; the whole tree is copied, so bundled
-// resources come along) or a bare SKILL.md FILE (the parent dir's basename is the
-// name; only that file is copied). The name must match the skill's frontmatter
-// `name:` for the preload reference to resolve.
+// names, so they can be preloaded into the built-in agent. Each path must be a
+// skill DIRECTORY (its basename is the skill name): the whole tree is copied, so
+// bundled resources (reference.md, scripts, selftest) come along and executable
+// bits are preserved. A bare SKILL.md file is rejected — copying only it would
+// silently drop the skill's siblings (least surprise). The directory basename
+// must match the skill's frontmatter `name:` for the preload reference to resolve.
 func wireSkills(claudeDir, project string, paths []string) ([]string, error) {
 	var names []string
 	for _, p := range paths {
@@ -360,22 +380,14 @@ func wireSkills(claudeDir, project string, paths []string) ([]string, error) {
 		if err != nil {
 			return nil, fmt.Errorf("wire skill %s: %w", p, err)
 		}
-		var name string
-		if info.IsDir() {
-			name = filepath.Base(p)
-			if err := copyTreeMaterialize(p, filepath.Join(claudeDir, "skills", name), project); err != nil {
-				return nil, fmt.Errorf("wire skill %s: %w", p, err)
-			}
-		} else {
-			name = filepath.Base(filepath.Dir(p))
-			data, err := os.ReadFile(p)
-			if err != nil {
-				return nil, fmt.Errorf("wire skill %s: %w", p, err)
-			}
-			dst := filepath.Join(claudeDir, "skills", name, filepath.Base(p))
-			if err := materializeFile(dst, data, project); err != nil {
-				return nil, fmt.Errorf("wire skill %s: %w", p, err)
-			}
+		if !info.IsDir() {
+			return nil, fmt.Errorf("wire skill %s: must be a skill DIRECTORY, not a file "+
+				"(the whole skill tree is copied so bundled resources come along) — pass %s instead",
+				p, filepath.Dir(p))
+		}
+		name := filepath.Base(p)
+		if err := copyTreeMaterialize(p, filepath.Join(claudeDir, "skills", name), project); err != nil {
+			return nil, fmt.Errorf("wire skill %s: %w", p, err)
 		}
 		names = append(names, name)
 	}
@@ -383,8 +395,9 @@ func wireSkills(claudeDir, project string, paths []string) ([]string, error) {
 }
 
 // copyTreeMaterialize recursively copies srcDir into dstDir, substituting
-// {{PROJECT}} in every file. A nested .git (e.g. when the template lives in its
-// own repo and the path points at the repo root) is skipped.
+// {{PROJECT}} in every file and preserving executability (a bundled selftest.sh
+// stays runnable — see scaffoldFileMode). A nested .git (e.g. when the template
+// lives in its own repo and the path points at the repo root) is skipped.
 func copyTreeMaterialize(srcDir, dstDir, project string) error {
 	return filepath.WalkDir(srcDir, func(p string, d fs.DirEntry, err error) error {
 		if err != nil {
@@ -401,11 +414,15 @@ func copyTreeMaterialize(srcDir, dstDir, project string) error {
 		if d.IsDir() {
 			return os.MkdirAll(dst, 0o700)
 		}
+		info, err := d.Info()
+		if err != nil {
+			return err
+		}
 		data, err := os.ReadFile(p)
 		if err != nil {
 			return err
 		}
-		return materializeFile(dst, data, project)
+		return materializeFile(dst, data, project, scaffoldFileMode(info.Mode()))
 	})
 }
 
@@ -427,7 +444,7 @@ func materializeAgent(claudeDir string, noRefuse bool, project string, wiredSkil
 	}
 	data = appendAgentSkills(data, wiredSkills)
 	dst := filepath.Join(claudeDir, "agents", "faq-responder.md")
-	return materializeFile(dst, data, project)
+	return materializeFile(dst, data, project, 0o600)
 }
 
 // appendAgentSkills adds skill names to the inline `skills: [a, b]` list in an

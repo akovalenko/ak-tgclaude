@@ -310,13 +310,17 @@ To turn the generic bot into a **domain expert**, you don't write a custom agent
 — you **wire a skill** into the built-in `faq-responder`:
 
 ```toml
-wire_skills = ["~/lib/eputs-qa-knowledge"]   # a skill dir, or a SKILL.md file
+wire_skills = ["~/lib/eputs-qa-knowledge"]   # a skill DIRECTORY
 ```
 
-(or `--wire-skill <path>`, repeatable and additive with the file list). At startup
-each wired skill is **materialized** into the scaffold's `.claude/skills/<name>/`
-and its name is appended to `faq-responder`'s `skills:` frontmatter, so its **full
-body is preloaded** into the responder's context. This is deliberate: a skill
+(or `--wire-skill <path>`, repeatable and additive with the file list). Each entry
+is a skill **directory** (its basename is the skill name): the whole tree is
+copied, so bundled resources (reference material, scripts, a `selftest.sh`) come
+along and their executable bits are preserved. A bare `SKILL.md` file is rejected
+— copying only it would silently drop the skill's siblings. At startup each wired
+skill is **materialized** into the scaffold's `.claude/skills/<name>/` and its name
+is appended to `faq-responder`'s `skills:` frontmatter, so its **full body is
+preloaded** into the responder's context. This is deliberate: a skill
 merely present in `.claude/skills/` is loaded only **on-demand** (the model sees
 its description and *may* invoke it), which is not reliable for a single-domain
 bot; preloading via `skills:` guarantees it is always in context.
