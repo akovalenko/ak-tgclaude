@@ -115,6 +115,19 @@ var defaultDenyEnvVars = []string{"ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"}
 // defaultNetworkDomains is the egress the responder needs to build Go code.
 var defaultNetworkDomains = []string{"proxy.golang.org", "sum.golang.org", "storage.googleapis.com"}
 
+// dedupStrings returns in with duplicates removed, order preserved.
+func dedupStrings(in []string) []string {
+	seen := make(map[string]bool, len(in))
+	out := make([]string, 0, len(in))
+	for _, s := range in {
+		if !seen[s] {
+			seen[s] = true
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
 // hostSecretCredFiles are host credential paths the sandboxed shell must never
 // read: SSH private keys and Claude Code's own auth token. `~/` is expanded by
 // the sandbox to the responder's home. Denying them does NOT break the
@@ -169,15 +182,15 @@ func buildSettings(p scaffoldParams) *claudeSettings {
 		// pointing at this binary.
 		p.HookBinary = "ak-tgclaude"
 	}
-	if len(p.DenyEnvVars) == 0 {
-		p.DenyEnvVars = defaultDenyEnvVars
-	}
 	if len(p.NetworkDomains) == 0 {
 		p.NetworkDomains = defaultNetworkDomains
 	}
 
-	envVars := make([]credEnv, 0, len(p.DenyEnvVars))
-	for _, name := range p.DenyEnvVars {
+	// The built-in secrets are ALWAYS scrubbed; operator DenyEnvVars are ADDITIVE
+	// (a naive replace would drop the ANTHROPIC keys). De-duplicated, order kept.
+	denyEnv := dedupStrings(append(append([]string{}, defaultDenyEnvVars...), p.DenyEnvVars...))
+	envVars := make([]credEnv, 0, len(denyEnv))
+	for _, name := range denyEnv {
 		envVars = append(envVars, credEnv{Name: name, Mode: "deny"})
 	}
 
@@ -621,17 +634,18 @@ func runScaffold(args []string) {
 		os.Exit(1)
 	}
 	if err := materializeScaffold(project, scaffoldParams{
-		CacheDir:   filepath.Join(cfg.StateDir, "cache"),
-		OutboxRoot: outboxRoot,
-		TokenFile:  cfg.ConfigPath,
-		NoRefuse:   cfg.NoRefuse,
-		Project:    cfg.Project,
-		WireSkills: cfg.WireSkills,
-		AddSkills:  cfg.AddSkills,
-		AddAgents:  cfg.AddAgents,
-		DenyRead:   cfg.DenyRead,
-		HookBinary: selfExePath(),
-		BangBug:    cfg.BangBug,
+		CacheDir:    filepath.Join(cfg.StateDir, "cache"),
+		OutboxRoot:  outboxRoot,
+		TokenFile:   cfg.ConfigPath,
+		NoRefuse:    cfg.NoRefuse,
+		Project:     cfg.Project,
+		WireSkills:  cfg.WireSkills,
+		AddSkills:   cfg.AddSkills,
+		AddAgents:   cfg.AddAgents,
+		DenyRead:    cfg.DenyRead,
+		DenyEnvVars: cfg.DenyEnvs,
+		HookBinary:  selfExePath(),
+		BangBug:     cfg.BangBug,
 	}); err != nil {
 		fmt.Fprintf(os.Stderr, "ak-tgclaude: scaffold: %v\n", err)
 		os.Exit(1)

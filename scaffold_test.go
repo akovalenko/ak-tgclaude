@@ -122,6 +122,33 @@ func TestBuildSettingsDenyRead(t *testing.T) {
 	}
 }
 
+func TestBuildSettingsDenyEnvsAdditive(t *testing.T) {
+	// The default secrets are ALWAYS scrubbed; operator DenyEnvVars are additive
+	// and de-duplicated (denying an already-default var must not double it).
+	s := buildSettings(scaffoldParams{
+		CacheDir:    "/c",
+		DenyEnvVars: []string{"MY_SECRET", "ANTHROPIC_API_KEY"},
+	})
+	var names []string
+	for _, e := range s.Sandbox.Credentials.EnvVars {
+		if e.Mode != "deny" {
+			t.Errorf("env var not deny: %+v", e)
+		}
+		names = append(names, e.Name)
+	}
+	// defaults first (2), then the new MY_SECRET; the duplicate ANTHROPIC_API_KEY
+	// is dropped.
+	want := []string{"ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "MY_SECRET"}
+	if len(names) != len(want) {
+		t.Fatalf("deny env names = %v, want %v", names, want)
+	}
+	for i := range want {
+		if names[i] != want[i] {
+			t.Errorf("deny env[%d] = %q, want %q (full %v)", i, names[i], want[i], names)
+		}
+	}
+}
+
 func TestBuildSettingsNoTokenFile(t *testing.T) {
 	s := buildSettings(scaffoldParams{CacheDir: "/c"})
 	// Even without a bot token, the host secrets are always denied; only the bot

@@ -37,7 +37,8 @@ bot_token = "123456789:AA..."   # secret; kept in dispatcher memory, never in en
 profile   = "qa"                # qa (read-only, default) | dev | ops (reserved)
 project   = "~/code/myproject"  # the codebase consulted on (read-only under qa)
 # wire_skills = ["~/lib/eputs-qa-knowledge"]  # domain skill(s) preloaded into the responder
-# deny_read = ["~/code/myproject/secrets.env"]  # extra paths the responder must never read
+# deny_reads = ["~/code/myproject/secrets.env"]  # extra paths the responder must never read
+# deny_envs  = ["MY_SECRET"]     # extra env-var names to scrub (ANTHROPIC keys are always scrubbed)
 # runtime_base = ""             # base for the ephemeral cwd (default: $XDG_RUNTIME_DIR)
 # state_dir    = ""             # durable state (default: $XDG_STATE_HOME/ak-tgclaude)
 ```
@@ -61,8 +62,9 @@ ak-tgclaude dispatch --bot-token 123:ABC --profile qa --project ~/code/myproject
   responder's permissions and what its PreToolUse hook allows. `project`/`profile`
   are single for now; they may grow into a `[[project]]` array (per-project profile)
   later.
-- **Paths.** Every path field (`project`, `workdir`, `wire_skills`, `deny_read`,
-  `state_dir`, `runtime_base`, `--config`) takes a leading `~` and is made
+- **Paths.** Every path field (`project`, `workdir`, `wire_skills`, `add_skills`,
+  `add_agents`, `deny_reads`, `state_dir`, `runtime_base`, `--config`) takes a
+  leading `~` and is made
   **absolute against the dispatcher's launch cwd**. The responder consumes them
   from a different cwd (the scaffold dir), so they are resolved once, up front —
   a relative path means "relative to where I launched the bot", never the
@@ -263,14 +265,22 @@ so they can't reach these paths either. Denying `~/.claude/.credentials.json` do
 credentials **unsandboxed**; only the Bash tools it spawns are confined. (`~/` is
 expanded by the sandbox to the responder's home.)
 
-**Extra paths — `deny_read` / `--deny-read`.** To hide more paths (a secrets
+**Extra paths — `deny_reads` / `--deny-read`.** To hide more paths (a secrets
 file inside the project, a sibling repo, a mounted volume), list them in
-`deny_read` (or repeat `--deny-read <path>`; the two merge, like
+`deny_reads` (or repeat `--deny-read <path>`; the two merge, like
 `wire_skills`/`allowed_users`). Each path is denied at **both** layers: the hook
 blocks the **Read tool** (checked before the project-read allow, so it wins even
 for a path *inside* the project) and `sandbox.filesystem.denyRead` blocks the
 **sandboxed Bash**. Paths take `~` and, like every config path, resolve relative
 entries against the dispatcher's **launch cwd** (see [Configuration](#configuration)).
+
+**Extra env vars — `deny_envs` / `--deny-env`.** `ANTHROPIC_API_KEY` and
+`ANTHROPIC_AUTH_TOKEN` are **always** scrubbed from the responder's sandboxed
+shell. To scrub more host secrets that leak through the environment, list their
+**names** in `deny_envs` (or repeat `--deny-env <NAME>`; additive). They are
+variable names, not paths — no `~`/relative resolution — and are added on top of
+the defaults (never replacing them; duplicates are ignored). Each becomes a
+`sandbox.credentials.envVars` deny entry.
 
 ## Responder (agent + emission skill)
 
@@ -405,7 +415,7 @@ path-scoped from the responder's env:
   (`$AK_TGCLAUDE_OUTBOX`) or the sandbox tmp (`/tmp/claude-<uid>`), else denied
   (so the project stays read-only but the responder can author/iterate on files);
 - a **protected-path** touch (`--deny-read`: the token file, plus any operator
-  `deny_read`/`--deny-read`) is denied first — it wins even if that path happens to
+  `deny_reads`/`--deny-read`) is denied first — it wins even if that path happens to
   sit under the project.
 
 It also **allows sandboxed** Bash / **denies unsandboxed** Bash, and **defers**
@@ -658,7 +668,7 @@ responder.go       Responder interface (claude / stub) + `claude -p` spawn
 dispatch.go        the dispatch loop: poll -> route -> respond -> deliver (+ startup binary-on-PATH check)
 scaffold.go        generated .claude/settings.json + materialize embedded assets (hook pinned to os.Executable())
 assets/            embedded responder agent + emission skill (go:embed)
-hook.go            `hook pretooluse`: path-scope the file tools; deny protected reads (token + deny_read)
+hook.go            `hook pretooluse`: path-scope the file tools; deny protected reads (token + deny_reads)
 deploy.go          `deploy`: binary-on-PATH check (warning) + example config
 bot.toml.example   example config
 go.mod / go.sum

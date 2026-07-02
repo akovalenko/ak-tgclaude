@@ -146,7 +146,15 @@ type Config struct {
 	// path is made absolute against the launch cwd (like Project/WireSkills), so
 	// the hook's absolute-path match works. Repeatable via --deny-read (additive
 	// with this list).
-	DenyRead []string `toml:"deny_read"`
+	DenyRead []string `toml:"deny_reads"`
+
+	// DenyEnvs lists additional environment-variable NAMES to scrub from the
+	// responder's sandboxed shell, on top of the always-denied defaults
+	// (ANTHROPIC_API_KEY, ANTHROPIC_AUTH_TOKEN). Use it for extra host secrets that
+	// would otherwise leak via the environment. These are variable names, not
+	// paths — no ~/relative resolution or path validation. Repeatable via
+	// --deny-env (additive with this list).
+	DenyEnvs []string `toml:"deny_envs"`
 
 	// HelpText is the reply to /help and /start. Empty => a generic built-in
 	// blurb (defaultHelpText). Keeps the dispatcher domain-blind: any
@@ -240,7 +248,9 @@ func parseConfig(args []string) (*Config, error) {
 	var addAgents stringList
 	fs.Var(&addAgents, "add-agent", "generic agent .md FILE to copy verbatim as a subagent (not preloaded; repeatable; merged with add_agents)")
 	var denyRead stringList
-	fs.Var(&denyRead, "deny-read", "path the responder must never read, at both the Read-tool and sandboxed-Bash layers (repeatable; merged with deny_read; ~ and relative resolved against the launch cwd)")
+	fs.Var(&denyRead, "deny-read", "path the responder must never read, at both the Read-tool and sandboxed-Bash layers (repeatable; merged with deny_reads; ~ and relative resolved against the launch cwd)")
+	var denyEnvs stringList
+	fs.Var(&denyEnvs, "deny-env", "environment-variable NAME to scrub from the responder's sandbox, on top of the ANTHROPIC defaults (repeatable; merged with deny_envs)")
 	open := fs.Bool("open", false, "OPEN ACCESS: allow every Telegram user (demo only; overrides the whitelist)")
 	if err := fs.Parse(args); err != nil {
 		return nil, err
@@ -303,9 +313,13 @@ func parseConfig(args []string) (*Config, error) {
 	if len(addAgents) > 0 {
 		c.AddAgents = append(c.AddAgents, addAgents...)
 	}
-	// deny_read is additive too (protect one more path ad-hoc).
+	// deny_reads is additive too (protect one more path ad-hoc).
 	if len(denyRead) > 0 {
 		c.DenyRead = append(c.DenyRead, denyRead...)
+	}
+	// deny_envs is additive too (scrub one more secret env var ad-hoc).
+	if len(denyEnvs) > 0 {
+		c.DenyEnvs = append(c.DenyEnvs, denyEnvs...)
 	}
 	if *open {
 		c.Open = true
@@ -364,7 +378,7 @@ func parseConfig(args []string) (*Config, error) {
 		}
 	}
 	for i, s := range c.DenyRead {
-		if err := validatePath(fmt.Sprintf("deny_read[%d]", i), s); err != nil {
+		if err := validatePath(fmt.Sprintf("deny_reads[%d]", i), s); err != nil {
 			return nil, err
 		}
 	}

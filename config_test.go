@@ -89,7 +89,7 @@ func TestParseConfigAddSkillsAndAgents(t *testing.T) {
 
 func TestParseConfigDenyRead(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "bot.toml")
-	if err := os.WriteFile(path, []byte("deny_read = [\"/etc/secret\"]\n"), 0o600); err != nil {
+	if err := os.WriteFile(path, []byte("deny_reads = [\"/etc/secret\"]\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	c, err := parseConfig([]string{"--config", path, "--deny-read", "~/priv", "--deny-read", "/var/token"})
@@ -108,6 +108,21 @@ func TestParseConfigDenyRead(t *testing.T) {
 	home, _ := os.UserHomeDir()
 	if c.DenyRead[1] != filepath.Join(home, "priv") {
 		t.Errorf("tilde not expanded: %q", c.DenyRead[1])
+	}
+}
+
+func TestParseConfigDenyEnvs(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "bot.toml")
+	if err := os.WriteFile(path, []byte("deny_envs = [\"FOO\"]\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	c, err := parseConfig([]string{"--config", path, "--deny-env", "BAR"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Additive: file [FOO] + flag [BAR]. Names, not paths — no ~/absolute munging.
+	if len(c.DenyEnvs) != 2 || c.DenyEnvs[0] != "FOO" || c.DenyEnvs[1] != "BAR" {
+		t.Errorf("DenyEnvs merge wrong: %v", c.DenyEnvs)
 	}
 }
 
@@ -137,7 +152,7 @@ func TestParseConfigResolvesRelativePaths(t *testing.T) {
 func TestParseConfigRejectsGlobPaths(t *testing.T) {
 	// A glob metacharacter (or control char) in any path field is rejected up
 	// front: the sandbox filesystem rules glob-match, so it would silently protect
-	// the wrong files. Covers project, wire_skills, deny_read.
+	// the wrong files. Covers project, wire_skills, deny_reads.
 	cases := [][]string{
 		{"--project", "/code/*"},
 		{"--project", "/a[b]/c"},

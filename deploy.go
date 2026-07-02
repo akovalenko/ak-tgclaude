@@ -79,4 +79,6 @@ project   = "~/code/example-project"
 # wire_skills = ["~/lib/my-domain-skill"]  # domain skill DIR, preloaded into the responder (always in context)
 # add_skills  = ["~/lib/some-generic-skill"]  # generic skill DIR(s), copied verbatim for on-demand use (not preloaded)
 # add_agents  = ["~/lib/some-agent.md"]        # generic agent .md FILE(s), copied verbatim as on-demand subagents
+# deny_reads  = ["~/code/myproject/secrets.env"]  # extra paths the responder must never read
+# deny_envs   = ["MY_SECRET_TOKEN"]            # extra env-var NAMES to scrub (ANTHROPIC keys are always scrubbed)
 `
