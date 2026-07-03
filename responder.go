@@ -106,6 +106,10 @@ func (c *claudeResponder) env(docDir string) []string {
 		projectEnv+"="+c.project,
 		"NO_PROXY="+noProxy,
 		"no_proxy="+noProxy,
+		// Point temp at the per-invocation outbox: the sandbox derives the sandboxed
+		// $TMPDIR as $TMPDIR/claude-<uid>, so temp lands under the outbox and the
+		// dispatcher's RemoveAll cleans it (instead of accumulating in /tmp/claude-<uid>).
+		"TMPDIR="+docDir,
 	)
 	if c.cacheDir != "" {
 		// The isolated Go cache, so the sandboxed `go` inherits it (a settings-file

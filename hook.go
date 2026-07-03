@@ -55,7 +55,7 @@ type preToolUseDecision struct {
 //
 // readRoots is a superset of writeRoots — the responder can read anything it can
 // write (so it can iterate on files it authored) plus the project; writeRoots is
-// the outbox + tmp (the project stays read-only). See envFilePolicy.
+// the outbox (the project stays read-only). See envFilePolicy.
 type filePolicy struct {
 	deny       []string // protected paths (token); highest priority
 	readRoots  []string // Read allowed under these (project + writeRoots)
@@ -64,10 +64,12 @@ type filePolicy struct {
 }
 
 // envFilePolicy resolves the policy from the responder's env at hook time:
-// writeRoots = $AK_TGCLAUDE_OUTBOX + the sandbox tmp dir; readRoots =
-// $AK_TGCLAUDE_PROJECT + writeRoots (read what you can write, plus the project).
+// writeRoots = $AK_TGCLAUDE_OUTBOX; readRoots = $AK_TGCLAUDE_PROJECT + writeRoots
+// (read what you can write, plus the project). The responder runs with
+// TMPDIR=$AK_TGCLAUDE_OUTBOX, so temp lands under the outbox too — /tmp/claude-<uid>
+// is no longer a scratch root.
 func envFilePolicy(deny []string) filePolicy {
-	writeRoots := append(envRoots(outboxEnv), sandboxTmpDir())
+	writeRoots := envRoots(outboxEnv)
 	readRoots := append(envRoots(projectEnv), writeRoots...)
 	return filePolicy{deny: deny, readRoots: readRoots, writeRoots: writeRoots}
 }
@@ -134,9 +136,9 @@ func decidePreToolUse(in *preToolUseInput, pol filePolicy) (decision, reason str
 
 	case "Edit", "MultiEdit", "Write", "NotebookEdit":
 		if _, ok := underAny(in.ToolInput.FilePath, pol.writeRoots); ok {
-			return "allow", "ak-tgclaude hook: write within the outbox/tmp"
+			return "allow", "ak-tgclaude hook: write within the outbox"
 		}
-		return "deny", "ak-tgclaude hook: write is limited to the outbox and tmp " + fmtRoots(pol.writeRoots)
+		return "deny", "ak-tgclaude hook: write is limited to the outbox " + fmtRoots(pol.writeRoots)
 	}
 
 	return "", "" // defer (Grep/Glob/Skill/…)
@@ -176,12 +178,6 @@ func envRoots(name string) []string {
 		return []string{v}
 	}
 	return nil
-}
-
-// sandboxTmpDir is the per-uid temp the command sandbox makes writable by
-// default (/tmp/claude-<uid>) — the responder's scratch area.
-func sandboxTmpDir() string {
-	return fmt.Sprintf("/tmp/claude-%d", os.Getuid())
 }
 
 // fmtRoots renders roots for a deny reason.

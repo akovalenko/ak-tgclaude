@@ -22,7 +22,7 @@ func bashInput(cmd string, disableSandbox bool) *preToolUseInput {
 var testPolicy = filePolicy{
 	deny:       []string{"/cfg/bot.toml"},
 	readRoots:  []string{"/proj"},
-	writeRoots: []string{"/run/out/outbox-A1", "/tmp/claude-1000"},
+	writeRoots: []string{"/run/out/outbox-A1"},
 }
 
 func TestDecideReadScopedToProject(t *testing.T) {
@@ -41,11 +41,9 @@ func TestDecideReadScopedToProject(t *testing.T) {
 	}
 }
 
-func TestDecideWriteScopedToOutboxAndTmp(t *testing.T) {
-	for _, p := range []string{"/run/out/outbox-A1/reply.html", "/tmp/claude-1000/scratch.md"} {
-		if d, _ := decidePreToolUse(fileInput("Write", p), testPolicy); d != "allow" {
-			t.Errorf("write %q => %q, want allow", p, d)
-		}
+func TestDecideWriteScopedToOutbox(t *testing.T) {
+	if d, _ := decidePreToolUse(fileInput("Write", "/run/out/outbox-A1/reply.html"), testPolicy); d != "allow" {
+		t.Errorf("write in outbox => %q, want allow", d)
 	}
 	// Edit / MultiEdit / NotebookEdit follow the same write policy.
 	for _, tool := range []string{"Edit", "MultiEdit", "NotebookEdit"} {
@@ -53,8 +51,9 @@ func TestDecideWriteScopedToOutboxAndTmp(t *testing.T) {
 			t.Errorf("%s in outbox => %q, want allow", tool, d)
 		}
 	}
-	// Writing into the project (read-only) or anywhere else is denied.
-	for _, p := range []string{"/proj/main.go", "/etc/cron.d/x"} {
+	// Writing into the project (read-only), /tmp (no longer a scratch root), or
+	// anywhere else is denied.
+	for _, p := range []string{"/proj/main.go", "/tmp/claude-1000/scratch.md", "/etc/cron.d/x"} {
 		if d, _ := decidePreToolUse(fileInput("Write", p), testPolicy); d != "deny" {
 			t.Errorf("write %q => %q, want deny", p, d)
 		}
@@ -116,24 +115,29 @@ func TestEnvFilePolicy(t *testing.T) {
 	t.Setenv(projectEnv, "/proj")
 	t.Setenv(outboxEnv, "/run/out/o1")
 	pol := envFilePolicy([]string{"/cfg/bot.toml"})
-	tmp := sandboxTmpDir()
 
-	// Read is allowed in the project AND the writable areas (read what you write,
+	// Read is allowed in the project AND the writable area (read what you write,
 	// so authoring can iterate).
-	for _, p := range []string{"/proj/main.go", "/run/out/o1/draft.md", tmp + "/scratch.txt"} {
+	for _, p := range []string{"/proj/main.go", "/run/out/o1/draft.md"} {
 		if d, _ := decidePreToolUse(fileInput("Read", p), pol); d != "allow" {
 			t.Errorf("read %q => %q, want allow", p, d)
 		}
 	}
-	// Write is allowed only in the writable areas, not the (read-only) project.
+	// Write is allowed only in the outbox, not the (read-only) project.
 	if d, _ := decidePreToolUse(fileInput("Write", "/run/out/o1/draft.md"), pol); d != "allow" {
 		t.Errorf("write outbox => %q, want allow", d)
 	}
-	if d, _ := decidePreToolUse(fileInput("Edit", tmp+"/scratch.txt"), pol); d != "allow" {
-		t.Errorf("edit tmp => %q, want allow", d)
-	}
 	if d, _ := decidePreToolUse(fileInput("Write", "/proj/main.go"), pol); d != "deny" {
 		t.Errorf("write project => %q, want deny (read-only)", d)
+	}
+	// /tmp/claude-<uid> is no longer a scratch root: read and write are denied
+	// (temp now lives under the outbox via TMPDIR).
+	const tmp = "/tmp/claude-1000/scratch.txt"
+	if d, _ := decidePreToolUse(fileInput("Read", tmp), pol); d != "deny" {
+		t.Errorf("read /tmp => %q, want deny", d)
+	}
+	if d, _ := decidePreToolUse(fileInput("Write", tmp), pol); d != "deny" {
+		t.Errorf("write /tmp => %q, want deny", d)
 	}
 	// Token denied first even though it isn't under any root.
 	if d, _ := decidePreToolUse(fileInput("Read", "/cfg/bot.toml"), pol); d != "deny" {

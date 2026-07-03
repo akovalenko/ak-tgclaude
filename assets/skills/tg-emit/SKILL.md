@@ -49,13 +49,11 @@ Only files in your outbox can be attached; a path elsewhere is rejected.
 ## Authoring / scratch files
 
 For non-trivial work — drafting a document, preparing an attachment — you can
-**write, read, and edit** files in your writable areas: your **outbox** directory
-or the sandbox tmp (`/tmp/claude-<uid>`). A normal cycle is Write a draft → Read it
-back → Edit it (the Edit tool requires you to have Read the file first) → repeat,
-then attach the result with `mcp__tg__send_document`. Note this is only for
-**attachments** — plain and code replies go straight through the send tools with
-no file. Prefer the **outbox** for anything private (it is per-invocation and
-isolated); the tmp dir is **shared** across concurrent responders. The project
+**write, read, and edit** files in your **outbox** directory. A normal cycle is
+Write a draft → Read it back → Edit it (the Edit tool requires you to have Read the
+file first) → repeat, then attach the result with `mcp__tg__send_document`. Note
+this is only for **attachments** — plain and code replies go straight through the
+send tools with no file. The outbox is per-invocation and isolated. The project
 directory is **read-only**.
 
 ## Several messages & length
