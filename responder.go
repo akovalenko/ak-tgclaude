@@ -57,6 +57,7 @@ type claudeResponder struct {
 	cacheDir   string   // isolated Go cache root, injected into the process env
 	debug      bool     // pass --debug to claude -p (diagnostics to stderr)
 	claudeArgs []string // operator passthrough appended to claude -p (validated at config load)
+	extraTools []string // EXTRA tools granted (config `tools`/--tool): added to --allowedTools
 }
 
 // Respond runs `claude -p [--agent] [--resume] --output-format json`, feeding
@@ -64,7 +65,7 @@ type claudeResponder struct {
 // (route-pinned by MCPToken). It returns the session id parsed from the JSON
 // result.
 func (c *claudeResponder) Respond(ctx context.Context, req RespondRequest) (RespondResult, error) {
-	cmd := exec.CommandContext(ctx, "claude", buildClaudeArgs(c.agent, req.SessionID, req.DocDir, req.MCPURL, req.MCPToken, c.debug, c.claudeArgs)...)
+	cmd := exec.CommandContext(ctx, "claude", buildClaudeArgs(c.agent, req.SessionID, req.DocDir, req.MCPURL, req.MCPToken, c.debug, c.extraTools, c.claudeArgs)...)
 	cmd.Dir = c.cwd
 	cmd.Env = c.env(req.DocDir)
 	cmd.Stdin = strings.NewReader(buildPrompt(c.project, req.DocDir, req.Prompt))
@@ -170,7 +171,7 @@ func buildPrompt(project, outbox, message string) string {
 // invocation's outbox (merged on top of the static settings). Any operator
 // passthrough (extra) is appended last — validated against the denylist at config
 // load, so it cannot name a flag set above.
-func buildClaudeArgs(agent, sessionID, docDir, mcpURL, mcpToken string, debug bool, extra []string) []string {
+func buildClaudeArgs(agent, sessionID, docDir, mcpURL, mcpToken string, debug bool, extraTools, extra []string) []string {
 	args := []string{
 		"-p", "--output-format", "json",
 		"--setting-sources", "project",
@@ -184,10 +185,12 @@ func buildClaudeArgs(agent, sessionID, docDir, mcpURL, mcpToken string, debug bo
 		args = append(args, "--debug")
 	}
 	if mcpURL != "" && mcpToken != "" {
+		// --allowedTools carries the tg send tools plus any operator extras — the SAME
+		// combineTools list the agent's tools: frontmatter is built from.
 		args = append(args,
 			"--mcp-config", buildMCPConfig(mcpURL, mcpToken),
 			"--strict-mcp-config",
-			"--allowedTools", strings.Join(mcpTools, ","),
+			"--allowedTools", strings.Join(combineTools(mcpTools, extraTools), ","),
 		)
 	}
 	if s := buildInvocationSettings(docDir); s != "" {

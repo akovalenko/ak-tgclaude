@@ -273,6 +273,21 @@ func TestParseConfigDeliveryGuard(t *testing.T) {
 	}
 }
 
+func TestParseConfigTools(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "bot.toml")
+	if err := os.WriteFile(path, []byte("tools = [\"Agent\"]\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	c, err := parseConfig([]string{"--config", path, "--tool", "WebFetch", "--tool", "mcp__x__y"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Additive: file [Agent] + flags [WebFetch, mcp__x__y], in order.
+	if len(c.Tools) != 3 || c.Tools[0] != "Agent" || c.Tools[1] != "WebFetch" || c.Tools[2] != "mcp__x__y" {
+		t.Errorf("tools merge wrong: %v", c.Tools)
+	}
+}
+
 func TestParseConfigResolvesRelativePaths(t *testing.T) {
 	// Every path field is absolutized against the launch cwd, so it is
 	// unambiguous once the responder consumes it from the scaffold cwd.

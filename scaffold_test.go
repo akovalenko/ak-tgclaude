@@ -553,3 +553,21 @@ func TestMaterializeAgentInjectsMCPTools(t *testing.T) {
 		}
 	}
 }
+
+func TestMaterializeAgentGrantsExtraTools(t *testing.T) {
+	// Operator extra tools (config `tools`/--tool) land in the tools: frontmatter
+	// after the send tools, deduped — so availability matches the --allowedTools
+	// grant. A duplicate of a send tool is not repeated.
+	cwd := t.TempDir()
+	if err := materializeScaffold(cwd, scaffoldParams{CacheDir: "/c", Tools: []string{"Agent", "mcp__tg__send_message"}}); err != nil {
+		t.Fatal(err)
+	}
+	b, err := os.ReadFile(filepath.Join(cwd, ".claude", "agents", defaultAgent+".md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "tools: Read, Grep, Glob, Bash, Write, Edit, Skill, " + strings.Join(mcpTools, ", ") + ", Agent"
+	if body := string(b); !strings.Contains(body, want) {
+		t.Errorf("extra tool not in tools: frontmatter (or dedup failed)\nwant line: %q\ngot:\n%s", want, body)
+	}
+}

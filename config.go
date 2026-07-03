@@ -142,6 +142,16 @@ type Config struct {
 	// Repeatable via --add-agent (additive with this list).
 	AddAgents []string `toml:"add_agents"`
 
+	// Tools grants EXTRA tools to the responder, adding each name to BOTH the agent's
+	// `tools:` frontmatter (availability) AND `--allowedTools` (permission) in one go
+	// — the two must move together, so a single knob keeps them from drifting. Values
+	// are tool names or MCP patterns (e.g. "Agent", "WebFetch", "mcp__x__*"). This is
+	// a sharp, operator-only knob for ad-hoc experiments: the sandbox still confines
+	// Bash and the PreToolUse hook still gates the file tools, but a tool the hook
+	// does NOT gate (WebFetch, Agent, …) genuinely widens access — grant deliberately.
+	// Repeatable via --tool (additive with this list).
+	Tools []string `toml:"tools"`
+
 	// Responder selects the responder implementation: "claude" (default) spawns
 	// `claude -p`; "stub" replies with a fixed line, for smoke-testing the
 	// Telegram I/O path without a model or scaffold.
@@ -319,6 +329,8 @@ func parseConfig(args []string) (*Config, error) {
 	fs.Var(&addSkills, "add-skill", "generic skill DIRECTORY to copy verbatim for on-demand use (not preloaded; repeatable; merged with add_skills)")
 	var addAgents stringList
 	fs.Var(&addAgents, "add-agent", "generic agent .md FILE to copy verbatim as a subagent (not preloaded; repeatable; merged with add_agents)")
+	var tools stringList
+	fs.Var(&tools, "tool", "grant an EXTRA tool to the responder, added to BOTH the agent's tools: frontmatter and --allowedTools (e.g. --tool Agent --tool WebFetch); repeatable, merged with tools; a sharp operator knob — see docs")
 	var denyRead stringList
 	fs.Var(&denyRead, "deny-read", "path the responder must never read, at both the Read-tool and sandboxed-Bash layers (repeatable; merged with deny_reads; ~ and relative resolved against the launch cwd)")
 	var denyEnvs stringList
@@ -405,6 +417,10 @@ func parseConfig(args []string) (*Config, error) {
 	}
 	if len(addAgents) > 0 {
 		c.AddAgents = append(c.AddAgents, addAgents...)
+	}
+	// tools is additive too (grant one extra tool ad-hoc for an experiment).
+	if len(tools) > 0 {
+		c.Tools = append(c.Tools, tools...)
 	}
 	// deny_reads is additive too (protect one more path ad-hoc).
 	if len(denyRead) > 0 {

@@ -10,21 +10,21 @@ func TestBuildClaudeArgs(t *testing.T) {
 	base := "-p --output-format json --setting-sources project --permission-mode dontAsk"
 
 	// No docDir and no MCP endpoint, no debug, no passthrough => bare args.
-	if got := strings.Join(buildClaudeArgs("", "", "", "", "", false, nil), " "); got != base {
+	if got := strings.Join(buildClaudeArgs("", "", "", "", "", false, nil, nil), " "); got != base {
 		t.Errorf("bare args = %q", got)
 	}
 
 	// --debug (alone) is inserted right after the base flags when enabled.
-	if got := strings.Join(buildClaudeArgs("", "", "", "", "", true, nil), " "); got != base+" --debug" {
+	if got := strings.Join(buildClaudeArgs("", "", "", "", "", true, nil, nil), " "); got != base+" --debug" {
 		t.Errorf("debug args = %q", got)
 	}
 
 	// Operator passthrough is appended verbatim, after everything else.
-	if got := strings.Join(buildClaudeArgs("", "", "", "", "", false, []string{"--model", "opus", "--effort", "high"}), " "); got != base+" --model opus --effort high" {
+	if got := strings.Join(buildClaudeArgs("", "", "", "", "", false, nil, []string{"--model", "opus", "--effort", "high"}), " "); got != base+" --model opus --effort high" {
 		t.Errorf("passthrough args = %q", got)
 	}
 
-	got := buildClaudeArgs("eputs-telegram-guide", "sess-7", "/run/out/outbox-A1", "http://127.0.0.1:9/mcp", "tok9", false, nil)
+	got := buildClaudeArgs("eputs-telegram-guide", "sess-7", "/run/out/outbox-A1", "http://127.0.0.1:9/mcp", "tok9", false, nil, nil)
 	joined := strings.Join(got, " ")
 	// MCP wiring: the inline config (url + Authorization token), strict-only, and
 	// the send tools permitted under dontAsk.
@@ -44,6 +44,17 @@ func TestBuildClaudeArgs(t *testing.T) {
 	}
 	if !strings.HasSuffix(joined, "--agent eputs-telegram-guide --resume sess-7") {
 		t.Errorf("agent/resume should come last: %q", joined)
+	}
+}
+
+func TestBuildClaudeArgsExtraTools(t *testing.T) {
+	// Operator extra tools join --allowedTools after the send tools, deduped; a
+	// duplicate of a send tool is not repeated.
+	got := strings.Join(buildClaudeArgs("", "", "", "http://127.0.0.1:9/mcp", "tok", false,
+		[]string{"Agent", "WebFetch", "mcp__tg__send_message"}, nil), " ")
+	want := "--allowedTools mcp__tg__send_message,mcp__tg__send_code,mcp__tg__send_document,Agent,WebFetch"
+	if !strings.Contains(got, want) {
+		t.Errorf("extra tools not merged into --allowedTools\nwant substring: %q\ngot: %q", want, got)
 	}
 }
 

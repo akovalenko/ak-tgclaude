@@ -524,6 +524,7 @@ func runDispatch(args []string) {
 			AddSkills:   cfg.AddSkills,
 			AddAgents:   cfg.AddAgents,
 			DenyRead:    cfg.DenyRead,
+			Tools:       cfg.Tools,
 			DenyEnvVars: cfg.DenyEnvs,
 			HookBinary:  selfExePath(),
 			BangBug:     cfg.BangBug,
@@ -539,7 +540,7 @@ func runDispatch(args []string) {
 			fmt.Fprintf(os.Stderr, "ak-tgclaude: dispatch: agent %q not materialized (%s); use the default %q (custom agents are not wired yet)\n", cfg.Agent, agentFile, defaultAgent)
 			os.Exit(1)
 		}
-		resp = &claudeResponder{agent: cfg.Agent, cwd: cwd, project: cfg.Project, cacheDir: cacheDir, debug: cfg.Debug, claudeArgs: cfg.ClaudeArgs}
+		resp = &claudeResponder{agent: cfg.Agent, cwd: cwd, project: cfg.Project, cacheDir: cacheDir, debug: cfg.Debug, claudeArgs: cfg.ClaudeArgs, extraTools: cfg.Tools}
 	}
 
 	helpText := cfg.HelpText

@@ -114,6 +114,14 @@ project = "~/code/example-project"
 # (default) => the guard only re-prompts and logs, sending no fabricated message.
 # undelivered_text = "Sorry, I could not answer that."
 
+# Grant EXTRA tools to the responder, adding each to BOTH the agent's tools:
+# frontmatter (availability) AND --allowedTools (permission) in one move — the two
+# must change together, so one knob keeps them in sync. Values are tool names or MCP
+# patterns (Agent, WebFetch, mcp__srv__*). Handy for ad-hoc experiments. SHARP knob:
+# the sandbox still confines Bash and the hook still gates the file tools, but a tool
+# the hook does NOT gate (WebFetch, Agent, ...) genuinely widens access. Also --tool.
+# tools = ["Agent"]
+
 # Responder persona, composed into the base agent at {{POLICY}}: "normal"
 # (declines off-topic, the default) | "norefuse" (do-what-you're-asked) |
 # "introspect" (candid/debug: precise about failures, explains the machinery,

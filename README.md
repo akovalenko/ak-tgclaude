@@ -41,6 +41,7 @@ project   = "~/code/myproject"  # the codebase consulted on (read-only under qa)
 # claude_args = ["--model", "opus", "--effort", "high"]  # extra raw `claude -p` flags (ak-tgclaude-owned flags rejected)
 # allow_silent = false          # true DISABLES the delivery guard (below); default false = guard on
 # undelivered_text = "Sorry, I could not answer that."  # fallback reply if the guard's re-prompt still sent nothing
+# tools = ["Agent"]             # grant EXTRA tools (into tools: frontmatter AND --allowedTools); sharp knob — see below
 # runtime_base = ""             # base for the ephemeral cwd (default: $XDG_RUNTIME_DIR)
 # state_dir    = ""             # durable state (default: $XDG_STATE_HOME/ak-tgclaude)
 ```
@@ -100,6 +101,15 @@ ak-tgclaude dispatch --bot-token 123:ABC --profile qa --project ~/code/myproject
   still sends nothing and `undelivered_text` is set, that fixed line goes out as a
   last resort (empty ⇒ the guard only re-prompts and logs). Set `allow_silent = true`
   (or `--allow-silent`) only if a no-send turn is legitimate for your bot.
+- **Extra tools (`tools`, repeatable `--tool`).** Grant the responder additional
+  tools, adding each name to BOTH the agent's `tools:` frontmatter (availability)
+  and `--allowedTools` (permission) in one move — the two must change together, so
+  one knob keeps them from drifting. Values are tool names or MCP patterns
+  (`Agent`, `WebFetch`, `mcp__srv__*`). Handy for ad-hoc experiments (e.g. trying the
+  subagent launcher, `--tool Agent`). **Sharp knob:** the sandbox still confines Bash
+  and the PreToolUse hook still gates the file tools, but a tool the hook does *not*
+  gate (`WebFetch`, `Agent`, …) genuinely widens what the responder can reach — grant
+  deliberately. Extras are merged with the always-present tg send tools and deduped.
 
 ## Runtime layout (directories)
 

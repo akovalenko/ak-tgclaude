@@ -105,6 +105,7 @@ type scaffoldParams struct {
 	AddSkills      []string // generic skill DIRECTORIES copied verbatim, NOT preloaded (on-demand)
 	AddAgents      []string // generic agent .md FILES copied verbatim, NOT preloaded (on-demand)
 	DenyRead       []string // operator paths denied at BOTH layers (Read-tool hook + sandbox Bash)
+	Tools          []string // EXTRA tools granted to the responder (into tools: frontmatter AND --allowedTools)
 	BangBug        bool     // pass --bang-bug to the hook (deny sandboxed Bash with the corrupted `\!`)
 }
 
@@ -124,6 +125,24 @@ func dedupStrings(in []string) []string {
 			seen[s] = true
 			out = append(out, s)
 		}
+	}
+	return out
+}
+
+// combineTools merges the always-present base tools (the tg send tools) with the
+// operator's extra tools (config `tools` / --tool), dropping blanks and duplicates
+// (order-preserving). Both the agent's `tools:` frontmatter and --allowedTools are
+// built from this ONE list, so the availability and permission grants never drift.
+func combineTools(base, extra []string) []string {
+	out := make([]string, 0, len(base)+len(extra))
+	seen := make(map[string]bool, len(base)+len(extra))
+	for _, t := range append(append([]string{}, base...), extra...) {
+		t = strings.TrimSpace(t)
+		if t == "" || seen[t] {
+			continue
+		}
+		seen[t] = true
+		out = append(out, t)
 	}
 	return out
 }
@@ -324,7 +343,7 @@ func materializeScaffold(cwd string, p scaffoldParams) error {
 	if err := addAgents(claudeDir, p.AddAgents); err != nil {
 		return err
 	}
-	return materializeAgent(claudeDir, p.Policy, p.Project, wired)
+	return materializeAgent(claudeDir, p.Policy, p.Project, wired, p.Tools)
 }
 
 // projectPlaceholder is replaced with the project path when an agent or skill
@@ -595,7 +614,7 @@ func loadPolicies(policies []string) ([]byte, error) {
 // are appended to the agent's `skills:` frontmatter so their bodies are preloaded
 // at startup, and the `tools:` line's {{MCP_TOOLS}} marker is expanded from the
 // mcpTools source.
-func materializeAgent(claudeDir string, policies []string, project string, wiredSkills []string) error {
+func materializeAgent(claudeDir string, policies []string, project string, wiredSkills, extraTools []string) error {
 	data, err := scaffoldAssets.ReadFile("assets/agents/faq-responder.md")
 	if err != nil {
 		return err
@@ -608,10 +627,11 @@ func materializeAgent(claudeDir string, policies []string, project string, wired
 	// {{POLICY}} is preserved rather than doubled.
 	data = []byte(strings.ReplaceAll(string(data), policyPlaceholder, strings.TrimRight(string(policyBody), "\n")))
 	data = appendAgentSkills(data, wiredSkills)
-	// Expand {{MCP_TOOLS}} in the tools: frontmatter from the single mcpTools source
-	// (mcp.go), the same slice that feeds --allowedTools — so the availability and
-	// permission gates never drift and the authored template stays MCP-agnostic.
-	data = injectMCPTools(data, mcpTools)
+	// Expand {{MCP_TOOLS}} in the tools: frontmatter from the tg send tools plus any
+	// operator extras (config `tools`/--tool). buildClaudeArgs feeds --allowedTools
+	// from the SAME combineTools list, so availability and permission never drift and
+	// the authored template stays MCP-agnostic.
+	data = injectMCPTools(data, combineTools(mcpTools, extraTools))
 	dst := filepath.Join(claudeDir, "agents", "faq-responder.md")
 	return materializeFile(dst, data, project, 0o600)
 }
@@ -736,6 +756,7 @@ func runScaffold(args []string) {
 		AddSkills:   cfg.AddSkills,
 		AddAgents:   cfg.AddAgents,
 		DenyRead:    cfg.DenyRead,
+		Tools:       cfg.Tools,
 		DenyEnvVars: cfg.DenyEnvs,
 		HookBinary:  selfExePath(),
 		BangBug:     cfg.BangBug,
@@ -756,6 +777,9 @@ func runScaffold(args []string) {
 	}
 	if len(cfg.AddAgents) > 0 {
 		fmt.Printf("  added agents: %s (verbatim, on-demand)\n", strings.Join(cfg.AddAgents, ", "))
+	}
+	if len(cfg.Tools) > 0 {
+		fmt.Printf("  extra tools: %s (into tools: frontmatter + --allowedTools)\n", strings.Join(cfg.Tools, ", "))
 	}
 	if len(cfg.DenyRead) > 0 {
 		fmt.Printf("  deny-read: %s (Read-tool + sandboxed Bash)\n", strings.Join(cfg.DenyRead, ", "))
