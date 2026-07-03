@@ -142,14 +142,18 @@ type Config struct {
 	// Repeatable via --add-agent (additive with this list).
 	AddAgents []string `toml:"add_agents"`
 
-	// Tools grants EXTRA tools to the responder, adding each name to BOTH the agent's
-	// `tools:` frontmatter (availability) AND `--allowedTools` (permission) in one go
-	// — the two must move together, so a single knob keeps them from drifting. Values
-	// are tool names or MCP patterns (e.g. "Agent", "WebFetch", "mcp__x__*"). This is
-	// a sharp, operator-only knob for ad-hoc experiments: the sandbox still confines
-	// Bash and the PreToolUse hook still gates the file tools, but a tool the hook
-	// does NOT gate (WebFetch, Agent, …) genuinely widens access — grant deliberately.
-	// Repeatable via --tool (additive with this list).
+	// Tools grants EXTRA tools to the responder. Each value is split across the two
+	// grants that must move together: its bare NAME goes into the agent's `tools:`
+	// frontmatter (availability), and the value VERBATIM goes into `--allowedTools`
+	// (permission). So a scoped spec like "WebFetch(domain:*.github.com)" grants bare
+	// WebFetch availability plus that exact domain scope in one knob — and two specs
+	// with the same verb (WebFetch(domain:a), WebFetch(domain:b)) collapse to a single
+	// WebFetch in the frontmatter while both scopes ride --allowedTools. Values are
+	// tool names, scoped specs, or MCP patterns (e.g. "Agent", "WebFetch(domain:X)",
+	// "mcp__x__*"). A sharp, operator-only knob for ad-hoc grants: the sandbox still
+	// confines Bash and the PreToolUse hook still gates the file tools, but a tool the
+	// hook does NOT gate (WebFetch, Agent, …) genuinely widens access — grant
+	// deliberately. Repeatable via --tool (additive with this list).
 	Tools []string `toml:"tools"`
 
 	// Responder selects the responder implementation: "claude" (default) spawns
@@ -330,7 +334,7 @@ func parseConfig(args []string) (*Config, error) {
 	var addAgents stringList
 	fs.Var(&addAgents, "add-agent", "generic agent .md FILE to copy verbatim as a subagent (not preloaded; repeatable; merged with add_agents)")
 	var tools stringList
-	fs.Var(&tools, "tool", "grant an EXTRA tool to the responder, added to BOTH the agent's tools: frontmatter and --allowedTools (e.g. --tool Agent --tool WebFetch); repeatable, merged with tools; a sharp operator knob — see docs")
+	fs.Var(&tools, "tool", "grant an EXTRA tool to the responder: bare name into the agent's tools: frontmatter, full value into --allowedTools (e.g. --tool Agent --tool 'WebFetch(domain:*.github.com)' — quote it so the shell leaves the parens/asterisks alone); repeatable, merged with tools; a sharp operator knob — see docs")
 	var denyRead stringList
 	fs.Var(&denyRead, "deny-read", "path the responder must never read, at both the Read-tool and sandboxed-Bash layers (repeatable; merged with deny_reads; ~ and relative resolved against the launch cwd)")
 	var denyEnvs stringList

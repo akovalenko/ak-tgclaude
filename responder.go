@@ -189,8 +189,10 @@ func buildClaudeArgs(agent, sessionID, docDir, mcpURL, mcpToken string, debug bo
 		args = append(args, "--debug")
 	}
 	if mcpURL != "" && mcpToken != "" {
-		// --allowedTools carries the tg send tools plus any operator extras — the SAME
-		// combineTools list the agent's tools: frontmatter is built from.
+		// --allowedTools carries the tg send tools plus any operator extras verbatim —
+		// a scoped WebFetch(domain:X) keeps its scope here (permission gate). The
+		// agent's tools: frontmatter is built from the SAME combineTools list but
+		// reduced to bare names (frontmatterTools) — availability vs permission, one source.
 		args = append(args,
 			"--mcp-config", buildMCPConfig(mcpURL, mcpToken),
 			"--strict-mcp-config",

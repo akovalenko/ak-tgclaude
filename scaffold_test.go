@@ -571,3 +571,55 @@ func TestMaterializeAgentGrantsExtraTools(t *testing.T) {
 		t.Errorf("extra tool not in tools: frontmatter (or dedup failed)\nwant line: %q\ngot:\n%s", want, body)
 	}
 }
+
+func TestBaseToolName(t *testing.T) {
+	for _, c := range []struct{ in, want string }{
+		{"WebFetch(domain:*.github.com)", "WebFetch"}, // scope stripped
+		{"Bash(git *)", "Bash"},
+		{"Agent", "Agent"}, // bare name unchanged
+		{"mcp__tg__send_message", "mcp__tg__send_message"},
+		{"mcp__x__*", "mcp__x__*"}, // a "*" with no parens is a pattern, not a scope — kept
+		{"  WebFetch(domain:x)  ", "WebFetch"},
+	} {
+		if got := baseToolName(c.in); got != c.want {
+			t.Errorf("baseToolName(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+}
+
+func TestFrontmatterToolsDedupsByVerb(t *testing.T) {
+	// Two scopes of the same verb collapse to a single bare name (order-preserving);
+	// a bare name and a scoped spec of the same verb also collapse; non-scoped
+	// entries pass through unchanged.
+	in := []string{"WebFetch(domain:a)", "Agent", "WebFetch(domain:b)", "WebFetch", "mcp__tg__x"}
+	got := strings.Join(frontmatterTools(in), ",")
+	want := "WebFetch,Agent,mcp__tg__x"
+	if got != want {
+		t.Errorf("frontmatterTools(%v) = %q, want %q", in, got, want)
+	}
+}
+
+func TestMaterializeAgentScopedExtraToolBareInFrontmatter(t *testing.T) {
+	// A scoped extra tool lands in the tools: frontmatter as its BARE name (the
+	// availability list is keyed by name; the scope rides --allowedTools, not the
+	// YAML). Two scopes of the same verb must NOT duplicate the verb (Anton's rule).
+	cwd := t.TempDir()
+	if err := materializeScaffold(cwd, scaffoldParams{CacheDir: "/c",
+		Tools: []string{"WebFetch(domain:github.com)", "WebFetch(domain:*.github.com)", "Agent"}}); err != nil {
+		t.Fatal(err)
+	}
+	b, err := os.ReadFile(filepath.Join(cwd, ".claude", "agents", defaultAgent+".md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := string(b)
+	// A single bare WebFetch (the two scopes deduped), then Agent — no scoped spec.
+	want := "tools: Read, Grep, Glob, Bash, Write, Edit, Skill, " + strings.Join(mcpTools, ", ") + ", WebFetch, Agent"
+	if !strings.Contains(body, want) {
+		t.Errorf("scoped tool not reduced to a single bare name in frontmatter\nwant line: %q\ngot:\n%s", want, body)
+	}
+	// The scope (parens, "*") must never leak into the YAML tools: line.
+	if strings.Contains(body, "WebFetch(") {
+		t.Errorf("scoped spec leaked into frontmatter tools: line:\n%s", body)
+	}
+}

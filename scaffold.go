@@ -132,8 +132,11 @@ func dedupStrings(in []string) []string {
 
 // combineTools merges the always-present base tools (the tg send tools) with the
 // operator's extra tools (config `tools` / --tool), dropping blanks and duplicates
-// (order-preserving). Both the agent's `tools:` frontmatter and --allowedTools are
-// built from this ONE list, so the availability and permission grants never drift.
+// (order-preserving). This ONE list is the single source for both grants:
+// --allowedTools takes it verbatim (permission, so a scoped spec like
+// WebFetch(domain:*.github.com) keeps its scope), while the agent's `tools:`
+// frontmatter takes it through frontmatterTools (availability, keyed by bare name).
+// Same source, deterministic transforms — so the two grants never drift.
 func combineTools(base, extra []string) []string {
 	out := make([]string, 0, len(base)+len(extra))
 	seen := make(map[string]bool, len(base)+len(extra))
@@ -144,6 +147,40 @@ func combineTools(base, extra []string) []string {
 		}
 		seen[t] = true
 		out = append(out, t)
+	}
+	return out
+}
+
+// baseToolName returns the availability name of a tool spec: the part before the
+// first "(" — a permission scope such as WebFetch(domain:*.github.com) or
+// Bash(git *) — trimmed. A bare name or an MCP pattern (no parens, e.g.
+// mcp__tg__send_message) is returned unchanged. The agent's `tools:` frontmatter
+// is an availability gate keyed by tool NAME, so a scoped spec must be reduced to
+// its name there; the scope rides only on --allowedTools (the permission gate).
+func baseToolName(spec string) string {
+	if i := strings.IndexByte(spec, '('); i >= 0 {
+		return strings.TrimSpace(spec[:i])
+	}
+	return strings.TrimSpace(spec)
+}
+
+// frontmatterTools maps a combined tool list to the availability names for the
+// agent's `tools:` frontmatter: each entry reduced to its baseToolName and
+// de-duplicated (order-preserving), blanks dropped. So WebFetch(domain:a) and
+// WebFetch(domain:b) collapse to a single WebFetch in the frontmatter, while the
+// full scoped specs stay verbatim on --allowedTools. Also keeps a literal "*"
+// (e.g. an mcp__x__* pattern) out of the frontmatter unless the operator authored
+// it as a bare name — a scope's "*" never leaks into the YAML tools: line.
+func frontmatterTools(tools []string) []string {
+	out := make([]string, 0, len(tools))
+	seen := make(map[string]bool, len(tools))
+	for _, t := range tools {
+		n := baseToolName(t)
+		if n == "" || seen[n] {
+			continue
+		}
+		seen[n] = true
+		out = append(out, n)
 	}
 	return out
 }
@@ -632,10 +669,12 @@ func materializeAgent(claudeDir string, policies []string, project string, wired
 	data = []byte(strings.ReplaceAll(string(data), policyPlaceholder, strings.TrimRight(string(policyBody), "\n")))
 	data = appendAgentSkills(data, wiredSkills)
 	// Expand {{MCP_TOOLS}} in the tools: frontmatter from the tg send tools plus any
-	// operator extras (config `tools`/--tool). buildClaudeArgs feeds --allowedTools
-	// from the SAME combineTools list, so availability and permission never drift and
-	// the authored template stays MCP-agnostic.
-	data = injectMCPTools(data, combineTools(mcpTools, extraTools))
+	// operator extras (config `tools`/--tool), reduced to availability NAMES via
+	// frontmatterTools (a scoped spec like WebFetch(domain:X) becomes bare WebFetch).
+	// buildClaudeArgs feeds --allowedTools from the SAME combineTools list but
+	// verbatim (scope kept), so availability and permission never drift and the
+	// authored template stays MCP-agnostic.
+	data = injectMCPTools(data, frontmatterTools(combineTools(mcpTools, extraTools)))
 	dst := filepath.Join(claudeDir, "agents", "faq-responder.md")
 	return materializeFile(dst, data, project, 0o600)
 }

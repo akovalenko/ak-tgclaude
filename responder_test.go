@@ -58,6 +58,19 @@ func TestBuildClaudeArgsExtraTools(t *testing.T) {
 	}
 }
 
+func TestBuildClaudeArgsScopedToolKeepsScope(t *testing.T) {
+	// A scoped extra tool reaches --allowedTools VERBATIM (scope preserved, "*"
+	// literal — args are exec.Command elements, never shell-expanded), and two scopes
+	// of the same verb are BOTH kept as distinct permission rules — the opposite of
+	// the frontmatter, which collapses them to one bare name.
+	got := strings.Join(buildClaudeArgs("", "", "", "http://127.0.0.1:9/mcp", "tok", false,
+		[]string{"WebFetch(domain:github.com)", "WebFetch(domain:*.github.com)"}, nil), " ")
+	want := "--allowedTools mcp__tg__send_message,mcp__tg__send_code,mcp__tg__send_document,WebFetch(domain:github.com),WebFetch(domain:*.github.com)"
+	if !strings.Contains(got, want) {
+		t.Errorf("scoped tools not kept verbatim in --allowedTools\nwant substring: %q\ngot: %q", want, got)
+	}
+}
+
 func TestBuildInvocationSettings(t *testing.T) {
 	if buildInvocationSettings("") != "" {
 		t.Errorf("empty outbox => empty overlay")
