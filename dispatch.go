@@ -60,6 +60,9 @@ type Dispatcher struct {
 	helpParseMode string // "" (plain) or "HTML" for the help reply
 	bill          bool   // send the run's dollar cost as a "$n.nnn" message after each answer
 	debug         bool   // log the responder's full final text after each run (troubleshooting)
+
+	requireDelivery bool   // guard: if the responder sent nothing, re-prompt once (then fall back)
+	undeliveredText string // fallback reply when the guard's re-prompt still delivered nothing ("" => none)
 }
 
 // Run long-polls and dispatches updates to per-chat workers until ctx is
@@ -160,6 +163,14 @@ func (w *chatWorkers) serve(ch chan Update) {
 
 // wait blocks until all worker goroutines have exited (after ctx is done).
 func (w *chatWorkers) wait() { w.wg.Wait() }
+
+// redeliverPrompt is fed to the SAME session by the delivery guard when a
+// responder turn delivered nothing: its final text is discarded, so the answer
+// never reached the user. It nudges the model to actually send this time.
+const redeliverPrompt = "Your previous turn ended without calling any send tool, so nothing reached the user " +
+	"— your final message is only a status signal and is discarded, never delivered. Send your actual reply now " +
+	"by calling mcp__tg__send_message (or send_code / send_document). If you meant to decline, tell the user so " +
+	"via mcp__tg__send_message. Then end with the status word as usual."
 
 // handleUpdate processes one update: /clear resets the chat's session; anything
 // else is answered by a responder whose outbound messages are delivered to the
@@ -269,6 +280,47 @@ func (d *Dispatcher) handleUpdate(ctx context.Context, u Update) {
 			log.Printf("ak-tgclaude: binding chat %d: %v", m.Chat.ID, err)
 		}
 	}
+
+	// Delivery guard: the responder's final text is only a status signal (discarded),
+	// so an answer reaches the user ONLY through a send tool. A weaker model sometimes
+	// ends without calling one, dumping its answer into that discarded text. If this
+	// invocation delivered nothing, re-prompt the SAME session once to actually send;
+	// if it still delivers nothing, fall back to undeliveredText (when set). Keyed on
+	// the per-invocation delivered count the MCP server tracks; token/docDir are still
+	// registered here (their defers run at return), so the re-prompt reuses the route.
+	if d.requireDelivery && d.mcp.DeliveredCount(token) == 0 {
+		log.Printf("ak-tgclaude: no delivery chat=%d user=%s msg=%d — re-prompting the session", m.Chat.ID, ulabel, m.MessageID)
+		resumeID := res.SessionID
+		if resumeID == "" {
+			resumeID = sid
+		}
+		rTypingCtx, rStopTyping := context.WithCancel(ctx)
+		go keepTyping(rTypingCtx, d.sender, m.Chat.ID)
+		res2, err := d.resp.Respond(ctx, RespondRequest{
+			Prompt:    redeliverPrompt,
+			SessionID: resumeID,
+			DocDir:    docDir,
+			MCPURL:    d.mcp.URL(),
+			MCPToken:  token,
+		})
+		rStopTyping()
+		if err != nil {
+			log.Printf("ak-tgclaude: redeliver chat=%d user=%s msg=%d FAILED: %v", m.Chat.ID, ulabel, m.MessageID, err)
+		} else if res2.SessionID != "" {
+			if err := d.store.SetSession(m.Chat.ID, res2.SessionID); err != nil {
+				log.Printf("ak-tgclaude: binding chat %d: %v", m.Chat.ID, err)
+			}
+		}
+		if d.mcp.DeliveredCount(token) == 0 {
+			log.Printf("ak-tgclaude: still no delivery chat=%d user=%s msg=%d after re-prompt", m.Chat.ID, ulabel, m.MessageID)
+			if d.undeliveredText != "" {
+				if _, err := d.sender.SendMessage(ctx, route, d.undeliveredText, "", false); err != nil {
+					log.Printf("ak-tgclaude: undelivered fallback chat=%d: %v", m.Chat.ID, err)
+				}
+			}
+		}
+	}
+
 	if d.bill {
 		if line, ok := billLine(res.CostUSD); ok {
 			if _, err := d.sender.SendMessage(ctx, route, line, "", false); err != nil {
@@ -527,6 +579,9 @@ func runDispatch(args []string) {
 		helpParseMode: helpParseMode,
 		bill:          cfg.Bill,
 		debug:         cfg.Debug,
+
+		requireDelivery: !cfg.AllowSilent,
+		undeliveredText: cfg.UndeliveredText,
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)

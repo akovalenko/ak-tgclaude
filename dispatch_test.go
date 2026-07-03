@@ -149,6 +149,134 @@ func TestHandleClearDropsSessionAndSkipsResponder(t *testing.T) {
 	}
 }
 
+// scriptedResponder delivers a different set of send_message replies on each
+// successive Respond call (rounds[i] for the i-th call; past the end it delivers
+// nothing) and records the prompt it got each time — so a test can simulate a
+// responder that sends nothing first, then something on the guard's re-prompt.
+type scriptedResponder struct {
+	sid     string
+	rounds  [][]string
+	calls   int
+	prompts []string
+}
+
+func (s *scriptedResponder) Respond(ctx context.Context, req RespondRequest) (RespondResult, error) {
+	s.prompts = append(s.prompts, req.Prompt)
+	var replies []string
+	if s.calls < len(s.rounds) {
+		replies = s.rounds[s.calls]
+	}
+	s.calls++
+	for _, text := range replies {
+		if err := mcpStubSend(ctx, req.MCPURL, req.MCPToken, text); err != nil {
+			return RespondResult{}, err
+		}
+	}
+	return RespondResult{SessionID: s.sid}, nil
+}
+
+func TestDeliveryGuardRepromptsThenDelivers(t *testing.T) {
+	// First turn sends nothing (answer dumped into discarded final text); the guard
+	// re-prompts the same session, and the second turn actually delivers.
+	resp := &scriptedResponder{sid: "s", rounds: [][]string{nil, {"the real answer"}}}
+	sender := &fakeSender{}
+	d := newTestDispatcher(t, resp, sender)
+	d.requireDelivery = true
+	d.undeliveredText = "fallback (should not be used)"
+
+	d.handleUpdate(context.Background(), textUpdate(1, 42, 7, "question"))
+
+	if resp.calls != 2 {
+		t.Fatalf("expected original + one re-prompt, got %d calls", resp.calls)
+	}
+	if resp.prompts[0] != "question" || resp.prompts[1] != redeliverPrompt {
+		t.Errorf("re-prompt not the redeliver nudge: %q", resp.prompts[1])
+	}
+	calls := sender.snapshot()
+	if len(calls) != 1 || calls[0].text != "the real answer" {
+		t.Fatalf("expected exactly the re-delivered answer, got %+v", calls)
+	}
+}
+
+func TestDeliveryGuardFallbackWhenStillSilent(t *testing.T) {
+	// The responder never sends, even after the re-prompt: the guard sends the
+	// undelivered-text fallback so the user is not left with silence.
+	resp := &scriptedResponder{sid: "s"} // no rounds => every call delivers nothing
+	sender := &fakeSender{}
+	d := newTestDispatcher(t, resp, sender)
+	d.requireDelivery = true
+	d.undeliveredText = "sorry, the model could not answer"
+
+	d.handleUpdate(context.Background(), textUpdate(1, 42, 7, "question"))
+
+	if resp.calls != 2 {
+		t.Fatalf("expected original + one re-prompt, got %d calls", resp.calls)
+	}
+	calls := sender.snapshot()
+	if len(calls) != 1 || calls[0].text != "sorry, the model could not answer" {
+		t.Fatalf("expected the fallback message, got %+v", calls)
+	}
+	if calls[0].route.ChatID != 42 || calls[0].route.ReplyTo != 7 {
+		t.Errorf("fallback not routed to the incoming message: %+v", calls[0].route)
+	}
+}
+
+func TestDeliveryGuardSilentNoFallbackText(t *testing.T) {
+	// Guard on but no undelivered_text: it re-prompts once and then stays quiet
+	// (only logs) — no fabricated fallback message.
+	resp := &scriptedResponder{sid: "s"}
+	sender := &fakeSender{}
+	d := newTestDispatcher(t, resp, sender)
+	d.requireDelivery = true
+
+	d.handleUpdate(context.Background(), textUpdate(1, 42, 7, "question"))
+
+	if resp.calls != 2 {
+		t.Fatalf("expected original + one re-prompt, got %d calls", resp.calls)
+	}
+	if calls := sender.snapshot(); len(calls) != 0 {
+		t.Fatalf("expected no message without undelivered_text, got %+v", calls)
+	}
+}
+
+func TestDeliveryGuardOffAllowsSilentTurn(t *testing.T) {
+	// With the guard disabled (allow_silent), a no-send turn is left alone: no
+	// re-prompt, no fallback.
+	resp := &scriptedResponder{sid: "s"}
+	sender := &fakeSender{}
+	d := newTestDispatcher(t, resp, sender)
+	d.requireDelivery = false
+
+	d.handleUpdate(context.Background(), textUpdate(1, 42, 7, "question"))
+
+	if resp.calls != 1 {
+		t.Fatalf("guard off must not re-prompt, got %d calls", resp.calls)
+	}
+	if calls := sender.snapshot(); len(calls) != 0 {
+		t.Fatalf("guard off must send nothing, got %+v", calls)
+	}
+}
+
+func TestDeliveryGuardQuietWhenDelivered(t *testing.T) {
+	// The common case: the responder delivered on the first turn, so the guard does
+	// not fire even though it is on.
+	resp := &scriptedResponder{sid: "s", rounds: [][]string{{"answer"}}}
+	sender := &fakeSender{}
+	d := newTestDispatcher(t, resp, sender)
+	d.requireDelivery = true
+	d.undeliveredText = "fallback (should not be used)"
+
+	d.handleUpdate(context.Background(), textUpdate(1, 42, 7, "question"))
+
+	if resp.calls != 1 {
+		t.Fatalf("guard must not re-prompt after a delivery, got %d calls", resp.calls)
+	}
+	calls := sender.snapshot()
+	if len(calls) != 1 || calls[0].text != "answer" {
+		t.Fatalf("expected just the original answer, got %+v", calls)
+	}
+}
+
 func TestOutcomeField(t *testing.T) {
 	if got := outcomeField(RespondResult{Outcome: "answered"}); got != "answered" {
 		t.Errorf("known outcome => %q", got)

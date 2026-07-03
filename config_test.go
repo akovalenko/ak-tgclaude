@@ -246,6 +246,33 @@ func TestParseConfigPolicyTOML(t *testing.T) {
 	}
 }
 
+func TestParseConfigDeliveryGuard(t *testing.T) {
+	// Default: guard ON (AllowSilent false), no fallback text.
+	c, err := parseConfig(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.AllowSilent {
+		t.Errorf("delivery guard should be ON by default (AllowSilent=false)")
+	}
+	// --allow-silent disables the guard.
+	if c, err := parseConfig([]string{"--allow-silent"}); err != nil || !c.AllowSilent {
+		t.Errorf("--allow-silent: err=%v AllowSilent=%v", err, c.AllowSilent)
+	}
+	// allow_silent + undelivered_text decode from TOML.
+	path := filepath.Join(t.TempDir(), "bot.toml")
+	if err := os.WriteFile(path, []byte("allow_silent = true\nundelivered_text = \"could not answer\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	c2, err := parseConfig([]string{"--config", path})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !c2.AllowSilent || c2.UndeliveredText != "could not answer" {
+		t.Errorf("TOML delivery config wrong: AllowSilent=%v UndeliveredText=%q", c2.AllowSilent, c2.UndeliveredText)
+	}
+}
+
 func TestParseConfigResolvesRelativePaths(t *testing.T) {
 	// Every path field is absolutized against the launch cwd, so it is
 	// unambiguous once the responder consumes it from the scaffold cwd.

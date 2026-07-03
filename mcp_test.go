@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"os"
@@ -96,6 +97,46 @@ func TestMCPToolsCallDelivers(t *testing.T) {
 	}
 	if calls[0].route.ChatID != 42 || calls[0].route.ReplyTo != 7 {
 		t.Errorf("route not resolved from token: %+v", calls[0].route)
+	}
+}
+
+func TestMCPDeliveredCount(t *testing.T) {
+	m := newTestMCP(t, &fakeSender{})
+	tok, err := m.Register(Route{ChatID: 5, ReplyTo: 2}, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n := m.DeliveredCount(tok); n != 0 {
+		t.Fatalf("fresh invocation delivered=%d, want 0", n)
+	}
+	if resp := callSendMessage(t, m, tok, "one", false); isToolError(resp) {
+		t.Fatalf("send failed: %v", resp)
+	}
+	if resp := callSendMessage(t, m, tok, "two", false); isToolError(resp) {
+		t.Fatalf("send failed: %v", resp)
+	}
+	if n := m.DeliveredCount(tok); n != 2 {
+		t.Fatalf("after two sends delivered=%d, want 2", n)
+	}
+	// An unknown token reports 0 rather than panicking.
+	if n := m.DeliveredCount("bogus"); n != 0 {
+		t.Fatalf("unknown token delivered=%d, want 0", n)
+	}
+}
+
+func TestMCPDeliveredCountIgnoresFailedSend(t *testing.T) {
+	// A send Telegram rejects must NOT count as delivered — else the guard would
+	// think a dropped answer was delivered and never re-prompt.
+	m := newTestMCP(t, &fakeSender{err: errors.New("telegram rejected")})
+	tok, err := m.Register(Route{ChatID: 5}, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp := callSendMessage(t, m, tok, "hi", false); !isToolError(resp) {
+		t.Fatal("expected a tool error on a failing send")
+	}
+	if n := m.DeliveredCount(tok); n != 0 {
+		t.Fatalf("failed send must not count: delivered=%d, want 0", n)
 	}
 }
 

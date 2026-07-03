@@ -39,6 +39,8 @@ project   = "~/code/myproject"  # the codebase consulted on (read-only under qa)
 # deny_reads = ["~/code/myproject/secrets.env"]  # extra paths the responder must never read
 # deny_envs  = ["MY_SECRET"]     # extra env-var names to scrub (ANTHROPIC keys are always scrubbed)
 # claude_args = ["--model", "opus", "--effort", "high"]  # extra raw `claude -p` flags (ak-tgclaude-owned flags rejected)
+# allow_silent = false          # true DISABLES the delivery guard (below); default false = guard on
+# undelivered_text = "Sorry, I could not answer that."  # fallback reply if the guard's re-prompt still sent nothing
 # runtime_base = ""             # base for the ephemeral cwd (default: $XDG_RUNTIME_DIR)
 # state_dir    = ""             # durable state (default: $XDG_STATE_HOME/ak-tgclaude)
 ```
@@ -89,6 +91,15 @@ ak-tgclaude dispatch --bot-token 123:ABC --profile qa --project ~/code/myproject
   precedence is undocumented, so an override is refused rather than trusted to win.
   Everything else passes through — you can break the bot's *behavior*, but not its
   sandbox.
+- **Delivery guard (on by default; `allow_silent` / `--allow-silent` disables it).**
+  The responder delivers an answer **only** by calling a send tool — its final text
+  is just a status signal and is discarded, never sent. A weaker model sometimes
+  ends a turn without calling one, dumping its answer into that discarded text, so
+  the user gets nothing. When guarded, the dispatcher notices a turn delivered
+  **zero** messages and **re-prompts the same session once** to actually send; if it
+  still sends nothing and `undelivered_text` is set, that fixed line goes out as a
+  last resort (empty ⇒ the guard only re-prompts and logs). Set `allow_silent = true`
+  (or `--allow-silent`) only if a no-send turn is legitimate for your bot.
 
 ## Runtime layout (directories)
 

@@ -45,10 +45,14 @@ var mcpTools = []string{
 }
 
 // mcpRoute binds one invocation's capability token to its Telegram route and the
-// directory its document attachments must live in (path confinement).
+// directory its document attachments must live in (path confinement). delivered
+// counts the messages this invocation actually sent, so the dispatcher can tell a
+// responder that emitted nothing (dumped its answer into its discarded final text)
+// from one that delivered — the delivery guard (require_delivery) keys on it.
 type mcpRoute struct {
-	route  Route
-	docDir string
+	route     Route
+	docDir    string
+	delivered int
 }
 
 // mcpServer is the dispatcher-owned MCP-over-HTTP transport: a long-lived local
@@ -123,6 +127,26 @@ func (m *mcpServer) lookup(token string) (mcpRoute, bool) {
 	defer m.mu.Unlock()
 	r, ok := m.routes[token]
 	return r, ok
+}
+
+// recordDelivered increments the invocation's delivered-message count on a
+// successful send. Called from callTool under a still-registered token.
+func (m *mcpServer) recordDelivered(token string) {
+	m.mu.Lock()
+	if r, ok := m.routes[token]; ok {
+		r.delivered++
+		m.routes[token] = r
+	}
+	m.mu.Unlock()
+}
+
+// DeliveredCount reports how many messages the invocation identified by token has
+// sent so far (0 if the token is unknown). The dispatcher reads it after the
+// responder returns to run the delivery guard.
+func (m *mcpServer) DeliveredCount(token string) int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.routes[token].delivered
 }
 
 // Close stops the HTTP server.
@@ -233,7 +257,7 @@ func (m *mcpServer) handle(w http.ResponseWriter, req *http.Request) {
 		m.debugf("ak-tgclaude: mcp: tools/list chat=%d", rt.route.ChatID)
 		writeRPCResult(w, rpc.ID, toolsListResult())
 	case "tools/call":
-		writeRPCResult(w, rpc.ID, m.callTool(req.Context(), rt, rpc.Params))
+		writeRPCResult(w, rpc.ID, m.callTool(req.Context(), tok, rt, rpc.Params))
 	case "ping":
 		writeRPCResult(w, rpc.ID, map[string]any{})
 	default:
@@ -351,7 +375,7 @@ func toolsListResult() map[string]any {
 // call (unknown tool, missing field, out-of-scope path) or a Telegram rejection
 // is returned as a tool error (isError) the model can see and often fix — not a
 // JSON-RPC protocol error.
-func (m *mcpServer) callTool(ctx context.Context, rt mcpRoute, params json.RawMessage) map[string]any {
+func (m *mcpServer) callTool(ctx context.Context, tok string, rt mcpRoute, params json.RawMessage) map[string]any {
 	var call struct {
 		Name      string          `json:"name"`
 		Arguments json.RawMessage `json:"arguments"`
@@ -370,6 +394,7 @@ func (m *mcpServer) callTool(ctx context.Context, rt mcpRoute, params json.RawMe
 		log.Printf("ak-tgclaude: mcp: tools/call %s chat=%d: telegram error: %v", call.Name, rt.route.ChatID, err)
 		return toolError("Telegram rejected the message: " + deliveryError(err))
 	}
+	m.recordDelivered(tok)
 	log.Printf("ak-tgclaude: mcp: tools/call %s chat=%d -> message_id=%d", call.Name, rt.route.ChatID, id)
 	return toolText(fmt.Sprintf("delivered (message_id %d)", id))
 }

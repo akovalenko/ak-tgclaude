@@ -92,6 +92,11 @@ still prefer to split long prose yourself — see above).
 
 ## Final output — output ONLY a status word (it is a signal, not your answer)
 
+**Self-check before you finish:** did you actually call a send tool this turn? If
+you did NOT, your reply has **not reached the user** — this final message is
+discarded, never delivered. Call `mcp__tg__send_message` now (even just to say you
+cannot help), THEN emit the status word. Do not put your answer in this final text.
+
 Your answer has already gone to the user through a successful send tool call (if a
 call reported an error, you fixed it and resent — see above). What you return now
 — your final assistant message — is a **completion signal for the operator's log,

@@ -176,6 +176,23 @@ type Config struct {
 	// run would cost at API rates), not real billing. Default false. Also --bill.
 	Bill bool `toml:"bill"`
 
+	// AllowSilent DISABLES the delivery guard. The guard (on by default) catches a
+	// responder that ended without calling any send tool — a weaker model sometimes
+	// dumps its answer into its final text, which is only the discarded status
+	// signal, so the user gets nothing. When guarded, the dispatcher re-prompts the
+	// same session once to actually deliver, then falls back to UndeliveredText. Set
+	// this (or --allow-silent) only if a no-send turn is legitimate for your bot.
+	// Default false (guard on). The field is inverted (allow_silent, not
+	// require_delivery) so the safe default needs no config and the CLI never needs
+	// --flag=false to turn a default-on bool off.
+	AllowSilent bool `toml:"allow_silent"`
+
+	// UndeliveredText is the fallback reply sent when the delivery guard is active
+	// and the responder STILL delivered nothing after the re-prompt. Empty => no
+	// fallback message (the guard then only re-prompts and logs). Ignored when
+	// AllowSilent is set. Plain text.
+	UndeliveredText string `toml:"undelivered_text"`
+
 	// Debug passes `--debug` to the responder's `claude -p`, so its own diagnostics
 	// (MCP handshake/tool discovery/transport errors, etc.) go to the responder's
 	// stderr — which the dispatcher inherits, so they land in the dispatcher log.
@@ -291,6 +308,7 @@ func parseConfig(args []string) (*Config, error) {
 	fs.Var(&policyFlags, "policy", "responder persona composed into the agent: normal (declines off-topic, default) | norefuse (do-what-you're-asked) | introspect (candid/debug) | a path to a custom .md fragment; repeatable and additive with the config list, entries merged in order into one persona")
 	ephemeralSessions := fs.Bool("ephemeral-sessions", false, "keep chat→session bindings in memory only (never persisted; offset still persists; each restart starts fresh)")
 	bill := fs.Bool("bill", false, "after each answer, send the run's dollar cost as a bare \"$n.nnn\" message (only when present and non-zero)")
+	allowSilent := fs.Bool("allow-silent", false, "DISABLE the delivery guard (on by default): allow a responder turn that sends nothing. Normally a no-send turn is re-prompted once, then answered with undelivered_text")
 	debug := fs.Bool("debug", false, "pass --debug to the responder's `claude -p` so its diagnostics (incl. MCP handshake/tool-call transport) reach the dispatcher log via stderr; verbose")
 	bangBug := fs.Bool("bang-bug", false, `deny sandboxed Bash containing \! (workaround for bug #64301 corrupting the bang char); the responder writes such commands to a file instead`)
 	var allowUsers int64List
@@ -362,6 +380,9 @@ func parseConfig(args []string) (*Config, error) {
 	}
 	if *bill {
 		c.Bill = true
+	}
+	if *allowSilent {
+		c.AllowSilent = true
 	}
 	if *debug {
 		c.Debug = true
