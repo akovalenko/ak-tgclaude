@@ -9,24 +9,31 @@ import (
 func TestBuildClaudeArgs(t *testing.T) {
 	base := "-p --output-format json --setting-sources project --permission-mode dontAsk"
 
-	// No outbox => no --settings overlay.
-	if got := strings.Join(buildClaudeArgs("", "", ""), " "); got != base {
+	// No docDir and no MCP endpoint => bare args (no overlay, no MCP wiring).
+	if got := strings.Join(buildClaudeArgs("", "", "", "", ""), " "); got != base {
 		t.Errorf("bare args = %q", got)
 	}
 
-	// With an outbox, a --settings overlay scoping sandbox access to that outbox
-	// is inserted before --agent/--resume.
-	got := buildClaudeArgs("eputs-telegram-guide", "sess-7", "/run/out/outbox-A1")
+	got := buildClaudeArgs("eputs-telegram-guide", "sess-7", "/run/out/outbox-A1", "http://127.0.0.1:9/mcp", "tok9")
 	joined := strings.Join(got, " ")
-	if !strings.Contains(joined, "--settings ") {
-		t.Fatalf("expected --settings overlay: %q", joined)
+	// MCP wiring: the config (url + Authorization token), strict-only, and the
+	// send tools permitted under dontAsk.
+	if !strings.Contains(joined, "--mcp-config ") || !strings.Contains(joined, "--strict-mcp-config") {
+		t.Errorf("expected MCP config args: %q", joined)
 	}
+	if !strings.Contains(joined, `"url":"http://127.0.0.1:9/mcp"`) || !strings.Contains(joined, "Bearer tok9") {
+		t.Errorf("MCP config should carry url + token: %q", joined)
+	}
+	if !strings.Contains(joined, "--allowedTools mcp__tg__send_message,mcp__tg__send_code,mcp__tg__send_document") {
+		t.Errorf("expected --allowedTools with the send tools: %q", joined)
+	}
+	// A --settings overlay scopes sandbox access to that outbox, before --agent/--resume.
 	if !strings.Contains(joined, `"allowWrite":["/run/out/outbox-A1"]`) ||
 		!strings.Contains(joined, `"allowRead":["/run/out/outbox-A1"]`) {
 		t.Errorf("overlay missing per-invocation sandbox grants: %q", joined)
 	}
 	if !strings.HasSuffix(joined, "--agent eputs-telegram-guide --resume sess-7") {
-		t.Errorf("agent/resume should come after --settings: %q", joined)
+		t.Errorf("agent/resume should come last: %q", joined)
 	}
 }
 
@@ -53,7 +60,7 @@ func TestBuildPrompt(t *testing.T) {
 	if !strings.Contains(p, "Project directory (read-only): /home/bot/code") {
 		t.Errorf("missing literal project path: %q", p)
 	}
-	if !strings.Contains(p, "Outbox directory (write your reply body files here): /run/out/outbox-A1") {
+	if !strings.Contains(p, "Outbox directory (write attachment/scratch files here): /run/out/outbox-A1") {
 		t.Errorf("missing literal outbox path: %q", p)
 	}
 	if !strings.Contains(p, "not shell-expanded") {
@@ -66,17 +73,27 @@ func TestBuildPrompt(t *testing.T) {
 }
 
 func TestStubResponderRepliesFixed(t *testing.T) {
-	dir := t.TempDir()
-	res, err := (&stubResponder{}).Respond(context.Background(), RespondRequest{OutboxDir: dir, Prompt: "any question"})
+	f := &fakeSender{}
+	m := newTestMCP(t, f) // helper from mcp_test.go
+	tok, err := m.Register(Route{ChatID: 5, ReplyTo: 2}, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, err := (&stubResponder{}).Respond(context.Background(), RespondRequest{
+		Prompt: "any question", MCPURL: m.URL(), MCPToken: tok,
+	})
 	if err != nil {
 		t.Fatalf("Respond: %v", err)
 	}
 	if res.SessionID != "" {
 		t.Errorf("stub should not bind a session, got %q", res.SessionID)
 	}
-	d, _ := readOnlyDescriptor(t, dir) // helper from outbox_test.go
-	if d.Kind != KindText || d.Text != "i am here" {
-		t.Errorf("stub descriptor wrong: %+v", d)
+	calls := f.snapshot()
+	if len(calls) != 1 || calls[0].text != "i am here" {
+		t.Fatalf("stub reply wrong: %+v", calls)
+	}
+	if calls[0].route.ChatID != 5 || calls[0].route.ReplyTo != 2 {
+		t.Errorf("stub reply not routed via the token: %+v", calls[0].route)
 	}
 }
 

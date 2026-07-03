@@ -10,24 +10,14 @@ import (
 // runDeploy provisions the operator-side bits that are NOT the binary itself
 // (the binary arrives via `go install` and is already on PATH). It does not
 // generate settings.json — that is materialized by `dispatch` at startup with
-// the runtime paths. It writes an example config, sanity-checks that the binary
-// can find itself on PATH (the hook is referenced by bare name), and — with
-// --workdir — provisions $workdir/{project,state} and marks project trusted.
+// the runtime paths. It writes an example config and — with --workdir —
+// provisions $workdir/{project,state} and marks project trusted.
 func runDeploy(args []string) {
 	fs := flag.NewFlagSet("deploy", flag.ContinueOnError)
 	conf := fs.String("conf", "", "directory to write bot.toml.example into")
 	workdir := fs.String("workdir", "", "provision a static workdir: create $workdir/{project,state} and mark $workdir/project trusted in ~/.claude.json (the same trust dispatch sets at startup)")
 	if err := fs.Parse(args); err != nil {
 		os.Exit(2)
-	}
-
-	// The responder invokes `ak-tgclaude send` by bare name, so the ak-tgclaude on
-	// PATH must be this binary. `dispatch` enforces this (fail-fast); here it is
-	// only a provisioning hint, so a mismatch is a warning, not an error.
-	if err := checkBinaryOnPath(); err != nil {
-		fmt.Fprintf(os.Stderr, "ak-tgclaude: deploy: warning: %v\n", err)
-	} else {
-		fmt.Println("ak-tgclaude: deploy: ak-tgclaude on PATH is this binary")
 	}
 
 	if *conf != "" {

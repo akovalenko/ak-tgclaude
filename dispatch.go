@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"log"
 	"os"
-	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"strconv"
@@ -48,12 +47,13 @@ func keepTyping(ctx context.Context, s Sender, chatID int64) {
 // Dispatcher is the long-lived process: it long-polls Telegram, routes each
 // update to a responder, and delivers the responder's outbound messages.
 type Dispatcher struct {
-	client        *Client // getUpdates
-	sender        Sender  // sendMessage/sendDocument (= client in production)
+	client        *Client    // getUpdates
+	sender        Sender     // sendMessage/sendDocument (= client in production)
+	mcp           *mcpServer // outbound transport: the responder's send_* tools deliver through here
 	store         *SessionStore
 	resp          Responder
 	authz         Authorizer // gates which Telegram users may use the bot
-	outboxRoot    string     // writable root under which per-invocation outbox dirs are created
+	outboxRoot    string     // writable root under which per-invocation outbox (doc/scratch) dirs are created
 	pollTimeout   int
 	maxConcurrent int    // cap on responders running at once
 	helpText      string // reply to /help and /start
@@ -205,12 +205,26 @@ func (d *Dispatcher) handleUpdate(ctx context.Context, u Update) {
 		return
 	}
 
-	outbox, err := os.MkdirTemp(d.outboxRoot, "outbox-")
+	// Per-invocation writable dir for the responder's document attachments and
+	// scratch files (its Write-tool scope). Under the same outboxRoot as before so
+	// the scaffold's sibling-isolation (deny-read of outboxRoot, own dir carved
+	// back per invocation) is unchanged.
+	docDir, err := os.MkdirTemp(d.outboxRoot, "outbox-")
 	if err != nil {
 		log.Printf("ak-tgclaude: outbox for chat %d: %v", m.Chat.ID, err)
 		return
 	}
-	defer os.RemoveAll(outbox)
+	defer os.RemoveAll(docDir)
+
+	// Mint this invocation's capability token: the MCP server resolves the route
+	// (chat/reply) from it, so the responder's send_* calls carry no chat_id and
+	// cannot retarget. Invalidated on responder exit.
+	token, err := d.mcp.Register(route, docDir)
+	if err != nil {
+		log.Printf("ak-tgclaude: mcp register chat %d: %v", m.Chat.ID, err)
+		return
+	}
+	defer d.mcp.Unregister(token)
 
 	ulabel := userLabel(m.From)
 	log.Printf("ak-tgclaude: launch responder chat=%d user=%s msg=%d", m.Chat.ID, ulabel, m.MessageID)
@@ -221,24 +235,16 @@ func (d *Dispatcher) handleUpdate(ctx context.Context, u Update) {
 	typingCtx, stopTyping := context.WithCancel(ctx)
 	go keepTyping(typingCtx, d.sender, m.Chat.ID)
 
-	// One drainer for this invocation's outbox, stopped after the responder exits.
-	stop := make(chan struct{})
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		serveOutbox(ctx, outbox, route, d.sender, stop)
-	}()
-
 	start := time.Now()
 	sid, _ := d.store.SessionID(m.Chat.ID)
 	res, err := d.resp.Respond(ctx, RespondRequest{
 		Prompt:    m.Text,
 		SessionID: sid,
-		OutboxDir: outbox,
+		DocDir:    docDir,
+		MCPURL:    d.mcp.URL(),
+		MCPToken:  token,
 	})
 	stopTyping()
-	close(stop)
-	<-done
 	dur := time.Since(start).Round(time.Millisecond)
 
 	if err != nil {
@@ -375,38 +381,6 @@ func resolveRuntimeBase(configured string) string {
 	return os.TempDir()
 }
 
-// checkBinaryOnPath verifies that the `ak-tgclaude` resolved on PATH is the same
-// file as the running binary. The responder inherits this PATH and invokes
-// `ak-tgclaude send` (and other self-calls) by bare name, so a mismatch — not
-// installed, shadowed by an earlier PATH entry, or a stale copy — would route
-// replies through the wrong binary. Everything downstream assumes they match, so
-// the dispatcher fails fast here rather than discover it on the first reply.
-func checkBinaryOnPath() error {
-	self, err := os.Executable()
-	if err != nil {
-		return fmt.Errorf("cannot determine own path (os.Executable): %w", err)
-	}
-	onPath, err := exec.LookPath("ak-tgclaude")
-	if err != nil {
-		return fmt.Errorf("'ak-tgclaude' is not on PATH (%w); install it (e.g. `go install`) "+
-			"so the responder's `send` resolves to this binary", err)
-	}
-	selfInfo, err := os.Stat(self)
-	if err != nil {
-		return fmt.Errorf("stat self %s: %w", self, err)
-	}
-	pathInfo, err := os.Stat(onPath)
-	if err != nil {
-		return fmt.Errorf("stat %s: %w", onPath, err)
-	}
-	if !os.SameFile(selfInfo, pathInfo) {
-		return fmt.Errorf("the 'ak-tgclaude' on PATH (%s) is not this running binary (%s); "+
-			"the responder resolves `send` by bare name via PATH, so they must be the same — "+
-			"reinstall (e.g. `go install`) or fix PATH", onPath, self)
-	}
-	return nil
-}
-
 // runDispatch loads configuration and runs the dispatcher loop until SIGINT/
 // SIGTERM.
 func runDispatch(args []string) {
@@ -423,6 +397,15 @@ func runDispatch(args []string) {
 	}
 
 	client := NewClient(cfg.BotToken)
+
+	// The outbound transport: a dispatcher-owned MCP server the responders deliver
+	// through. Created before either responder kind (the stub calls it too).
+	mcp, err := newMCPServer(client, version)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "ak-tgclaude: dispatch: %v\n", err)
+		os.Exit(1)
+	}
+	defer mcp.Close()
 
 	cwd, ephemeral, err := resolveResponderCwd(cfg)
 	if err != nil {
@@ -458,17 +441,6 @@ func runDispatch(args []string) {
 	case ResponderStub:
 		resp = &stubResponder{}
 	default:
-		// The responder invokes `ak-tgclaude send` by bare name from its skills
-		// (resolved via the inherited PATH — deliberately kept out of the skills so
-		// the model isn't burdened with a path). That send is a local outbox drop
-		// (no token, no network — the dispatcher delivers), but it must be THIS
-		// binary or replies run on some stale/other ak-tgclaude. The hook is pinned
-		// to an absolute path, but these self-calls are not, so fail fast if the
-		// ak-tgclaude on PATH is not us.
-		if err := checkBinaryOnPath(); err != nil {
-			fmt.Fprintf(os.Stderr, "ak-tgclaude: dispatch: %v\n", err)
-			os.Exit(1)
-		}
 		// Materialize the responder scaffold (generated .claude/settings.json with
 		// the literal runtime paths: sandbox, token deny-read, hook) and launch
 		// the responder there with --setting-sources project. The cache dir is
@@ -533,6 +505,7 @@ func runDispatch(args []string) {
 	d := &Dispatcher{
 		client:        client,
 		sender:        client,
+		mcp:           mcp,
 		store:         store,
 		resp:          resp,
 		authz:         authz,

@@ -7,8 +7,8 @@ codebase and its notes — then sends the reply back to Telegram.
 
 > Status: **implemented, under active development**. The dispatcher, the
 > project-bound responder (`claude -p`, plus a `stub` for Telegram-I/O smoke
-> tests), the outbox transport with blocking delivery feedback, and the
-> supporting subcommands (`send` / `scaffold` / `clear` / `deploy` / `hook`) are
+> tests), the MCP-over-HTTP outbound transport with synchronous delivery feedback,
+> and the supporting subcommands (`scaffold` / `clear` / `deploy` / `hook`) are
 > built and unit-tested. This README remains the design of record; the non-QA
 > profiles are reserved but not wired yet.
 
@@ -19,12 +19,11 @@ sprawl, one thing to put on `PATH`:
 
 | mode | where it runs | what it does |
 |------|---------------|--------------|
-| `dispatch` | host (trusted) | holds the bot token in memory, polls Telegram `getUpdates`, routes each update to a responder, watches the outbox spool and sends queued messages |
-| `send` | inside the responder's sandbox | enqueues an outbound Telegram message (drops a descriptor into the outbox spool; no token, no network), then blocks until the dispatcher reports delivery — exiting non-zero if Telegram rejected it |
+| `dispatch` | host (trusted) | holds the bot token in memory, polls Telegram `getUpdates`, routes each update to a responder, and runs the MCP server that delivers the responder's replies to Telegram |
 | `hook pretooluse` | as the responder's PreToolUse hook | gates the responder's tool calls (e.g. denies reads of the token file) |
 | `scaffold` | host | materializes a responder `workdir/project` (generated settings.json) without running the dispatcher, to inspect it and run `claude` by hand |
 | `clear` | host | drops every persisted chat→session binding (keeps the getUpdates offset); reads the state dir from `--config` or the default |
-| `deploy` | host, once | writes an example config, checks PATH, and (with `--workdir`) provisions the static workdir + marks it trusted |
+| `deploy` | host, once | writes an example config and (with `--workdir`) provisions the static workdir + marks it trusted |
 
 ## Configuration
 
@@ -110,15 +109,18 @@ never race on the same `--resume` session). For each message:
    intercepting it keeps that stray message off the responder. The `/clear` and
    `/help` menu is uploaded via `setMyCommands` at startup (best-effort).
 2. Otherwise it looks up the chat's session, creates a **per-invocation outbox
-   directory**, and spawns the responder (`claude -p --agent … [--resume <id>]`)
-   with `$AK_TGCLAUDE_OUTBOX` pointing at that directory and the message text on
-   stdin. A drain bound to `Route{chat_id, reply_to=incoming message_id}` runs
-   for the lifetime of that responder and delivers its messages (replying to the
-   incoming one). For that same lifetime the dispatcher shows a **`typing…`**
-   chat action, refreshed every few seconds (Telegram expires it after ~5s) and
-   stopped when the responder returns — so the user sees activity while the model
-   thinks, and the gaps between a multi-message answer stay filled (each
-   delivered message clears the action; the next refresh re-asserts it).
+   directory** (for the responder's document attachments and scratch), **mints a
+   capability token** bound in memory to `Route{chat_id, reply_to=incoming
+   message_id}` and that dir, and spawns the responder (`claude -p --agent …
+   [--resume <id>]`) with `$AK_TGCLAUDE_OUTBOX` pointing at the dir, the token +
+   MCP endpoint in its `--mcp-config`, and the message text on stdin. The
+   responder delivers its replies by calling the dispatcher's MCP send tools,
+   which resolve the route from the token and send **synchronously** (replying to
+   the incoming one). For its lifetime the dispatcher shows a **`typing…`** chat
+   action, refreshed every few seconds (Telegram expires it after ~5s) and stopped
+   when the responder returns — so the user sees activity while the model thinks,
+   and the gaps between a multi-message answer stay filled (each delivered message
+   clears the action; the next refresh re-asserts it).
 3. When the responder finishes, the session id it used (parsed from
    `--output-format json`) is bound to the chat, so the next message
    `--resume`s it. With **`bill`** (`--bill`) set, the run's `total_cost_usd`
@@ -127,18 +129,18 @@ never race on the same `--resume` session). For each message:
    subscription the figure is *notional* (what the run would cost at API rates),
    not real billing.
 
-**The per-invocation outbox dir is the route capability.** The dispatcher pins
-the route in memory and binds it to the directory it handed this one responder;
-the responder never names a chat, so it cannot retarget a message by descriptor
-content — the route is decided by *which* outbox dir the descriptor lands in.
-(This is the route-binding decision the spool transport deliberately left open: a
-private dir per invocation, rather than a shared spool plus a per-message token.)
+**The per-invocation token is the route capability.** The dispatcher pins the
+route in memory and binds it to the bearer token it handed this one responder; the
+responder never names a chat, and the send tools take no `chat_id`, so it cannot
+retarget a message — the route is decided by *which* token authorizes the call.
+(See [The route capability is the token](#the-route-capability-is-the-token-not-a-directory).)
 
-> Under concurrency this relies on a responder being able to write **only to its
-> own** outbox — otherwise a prompt-injected responder could enumerate sibling
-> dirs and drop a descriptor into another chat's outbox. That per-invocation
-> write isolation is enforced by a `--settings` overlay on both the Write-tool
-> and sandbox layers — see [Per-invocation write isolation](#per-invocation-write-isolation).
+> The outbox dir no longer carries the route (the token does), but per-invocation
+> **write isolation of that dir still matters**: a responder must write documents
+> and scratch only to its **own** outbox, so a prompt-injected one cannot stage a
+> file into a sibling's or read another's. That isolation is enforced by a
+> `--settings` overlay on both the Write-tool and sandbox layers — see
+> [Per-invocation isolation](#per-invocation-isolation-write-and-read).
 
 Session ids are **not** derived from the chat id — Claude Code mints a fresh one
 per new conversation and the dispatcher captures it, so `/clear` can truly sever
@@ -166,9 +168,10 @@ Two operator levers beyond the per-chat `/clear` reset the whole map:
 ### Smoke-testing the Telegram path (`--responder stub`)
 
 `dispatch --responder stub` swaps the model for a stub that replies a fixed line
-("i am here") to every message, dropped through the **real** outbox — so the full
-Telegram I/O path runs (getUpdates → route → outbox → drain → `sendMessage` with
-reply threading) without `claude` or a provisioned scaffold. It needs only a
+("i am here") to every message, delivered through the **real** MCP transport (an
+actual `send_message` tools/call to the dispatcher's server) — so the full
+Telegram I/O path runs (getUpdates → route → MCP `send_message` → `sendMessage`
+with reply threading) without `claude` or a provisioned scaffold. It needs only a
 token:
 
 ```sh
@@ -212,9 +215,11 @@ the token.
 - The token is held **only in the dispatcher's memory** (parsed from the TOML
   config, or read from `--bot-token` at startup). It is never placed in an
   environment variable and never written to a path the responder can read.
-- The responder reaches Telegram only **indirectly**, by writing a descriptor to
-  the **outbox spool**; the dispatcher is the only component that talks to the
-  Telegram API.
+- The responder reaches Telegram only **indirectly**, by calling the dispatcher's
+  MCP send tools; the dispatcher is the only component that talks to the Telegram
+  API. The per-invocation MCP token is a route capability, not the bot token: it
+  only authorizes sending to the already-pinned chat, and Claude Code keeps it in
+  the request header, out of the model's context.
 - When the token comes from a **config file**, the binary registers that file in
   the responder's `sandbox.credentials.files` (`mode: "deny"`) so the sandbox
   denies any read of it — a backstop to the PreToolUse hook. (Requires Claude
@@ -294,12 +299,12 @@ a generic one, embedded in the binary and materialized into the scaffold:
   wire a skill into it with `wire_skills`/`--wire-skill` (see [Wiring domain
   skills](#wiring-domain-skills)) rather than writing a custom agent.
 - **`tg-emit`** (skill, referenced by the agent's `skills:` frontmatter) — the
-  **emission contract**: write the reply body to a file in `$AK_TGCLAUDE_OUTBOX`
-  and hand it to `ak-tgclaude send --file`, so message text (quotes, `!`, HTML)
-  never hits the command line. Covers plain/HTML text, `send code`, `send doc`,
-  and multiple messages. The responder ends its turn with a **status word**
-  (`answered` / `problematic` / `refused`) on stdout — not sent to Telegram; the
-  dispatcher extracts it from the JSON output and logs it.
+  **emission contract**: call the MCP send tools (`mcp__tg__send_message` /
+  `send_code` / `send_document`), passing content directly as tool arguments — no
+  files, no shell. Covers plain/HTML text, code blocks, document attachments, and
+  multiple messages. The responder ends its turn with a **status word**
+  (`answered` / `problematic` / `refused`) as its final message — not sent to
+  Telegram; the dispatcher extracts it from the JSON output and logs it.
 
 The dispatcher logs one line when it **launches** a responder (`chat` / `user` /
 `msg`) and one when it **finishes** (adding `outcome` and duration), so each
@@ -431,31 +436,26 @@ deferred tools (no Read/Write). A Bash read of the token is masked by the sandbo
 string-matching). The hook reads the project/outbox from env, which the
 dispatcher sets on the responder process and the (unsandboxed) hook inherits.
 
-**Which `ak-tgclaude` runs.** There are two self-invocation sites, handled
-differently. The **hook** is emitted by the dispatcher, so it is **pinned** to
-`os.Executable()` — PATH plays no part, and a stale or shadowing `ak-tgclaude`
-cannot become the token guard. The responder's **`ak-tgclaude send`** (from the
-`tg-emit` skill and doc export), by contrast, is invoked by the *model* and left
-as a **bare name** on purpose — the skills should not carry an absolute path. That
-`send` is only a local outbox drop (no token, no network; the dispatcher's drain
-delivers), so the risk is a broken/version-skewed reply, not a leak. To keep the
-bare name safe, `dispatch` **fails fast at startup** unless the `ak-tgclaude`
-resolved on PATH is `os.SameFile` as the running binary (not installed, shadowed,
-or a stale copy → a clear error, not a first-reply surprise). Caveat: this is a
-point-in-time check — reinstalling the binary *while the dispatcher runs* skews
-the send path until you restart it (the pinned hook is unaffected).
+**Which `ak-tgclaude` runs.** The responder has exactly one `ak-tgclaude`
+self-invocation site: the **PreToolUse hook**. It is emitted by the dispatcher, so
+it is **pinned** to `os.Executable()` — PATH plays no part, and a stale or
+shadowing `ak-tgclaude` cannot become the token guard. The responder no longer
+runs an `ak-tgclaude send` subprocess (it emits via the MCP tools, which reach the
+dispatcher's server over HTTP, not by re-exec), so there is no bare-name
+self-invocation to keep in sync and no startup PATH check.
 
 ### Per-invocation isolation (write and read)
 
-The **Write tool** is scoped to this invocation's outbox (and the tmp dir) by the
+The responder writes document attachments and scratch files to its outbox. The
+**Write tool** is scoped to this invocation's outbox (and the tmp dir) by the
 **hook**, using `$AK_TGCLAUDE_OUTBOX`. The **sandbox** side (which governs Bash,
 not the tools) is scoped by a per-invocation `--settings` overlay:
 
-- `sandbox.filesystem.allowWrite: [<outbox>]` — so Bash (`send`, `cp`) can write
-  only this outbox, not a sibling's;
+- `sandbox.filesystem.allowWrite: [<outbox>]` — so Bash (`cp`, a build that emits
+  a file) can write only this outbox, not a sibling's;
 - `sandbox.filesystem.allowRead: [<outbox>]` — carving this outbox back out of the
-  static `denyRead: [<outboxRoot>]` so `send --file` can read its own body while
-  sibling outboxes stay masked.
+  static `denyRead: [<outboxRoot>]` so the responder can read files it authored
+  while sibling outboxes stay masked.
 
 These merge on top of the static settings (the `sandbox.filesystem` arrays merge
 across `--settings` and the project file — verified empirically, including that a
@@ -465,11 +465,13 @@ materialized file.
 
 So a concurrent, possibly prompt-injected responder cannot **write** into another
 chat's outbox (the hook denies a Write-tool path outside its own outbox; Bash
-`cp` / redirect / `send --outbox <sibling>` is denied by the sandbox), nor
-**read** another chat's pending reply (a Bash `cat`/`ls` of a sibling sees `No
-such file or directory`; a Read tool outside the project is denied by the hook).
-Combined with the dispatcher deciding the route from *which* outbox a descriptor
-lands in, the cross-chat confused-deputy is closed.
+`cp` / redirect is denied by the sandbox), nor **read** another chat's staged
+attachment (a Bash `cat`/`ls` of a sibling sees `No such file or directory`; a
+Read tool outside the project is denied by the hook). This matters because
+`send_document` attaches a file from the outbox: confining writes to the own
+outbox, plus the server taking only a basename within *this* invocation's outbox,
+closes the cross-chat confused-deputy on attachments — and the route itself is the
+token's, never the responder's.
 
 > Residual: the Grep/Glob **tools** are not path-scoped, so a determined, injected
 > responder could in principle enumerate sibling outbox *names* (not Bash-maskable
@@ -513,138 +515,112 @@ ak-tgclaude scaffold --workdir ~/qa-inspect --config bot.toml
   paths into the generated settings.json.
 - Uses an **isolated module/tool cache** so its activity does not touch the host's.
 
-## Outbound transport: an outbox directory
+## Outbound transport: an MCP server
 
-The responder hands outbound messages to the dispatcher through a **spool
-directory**, not a pipe:
+The responder emits by **calling MCP tools** the dispatcher exposes, not by
+dropping files in a spool. The dispatcher runs one long-lived **MCP-over-HTTP
+server** on `127.0.0.1:<random port>/mcp`; each per-invocation responder is a
+client, wired to it via `--mcp-config` (with `--strict-mcp-config` so no other MCP
+source is picked up). The responder calls `send_message` / `send_code` /
+`send_document`; the server delivers to Telegram **synchronously** and returns the
+`message_id` (or a tool error).
 
-- **Durable / queued** — a dropped file survives a dispatcher restart; a pipe with
-  no reader loses data and blocks the writer.
-- **Decoupled** — the writer never blocks on the reader.
-- **Multi-instance** — unique filenames + atomic rename; no interleaving, no
-  single-consumer bottleneck.
-- **Crash-safe and inspectable.**
+Why MCP rather than the spool it replaces:
 
-The dispatcher watches the directory (fsnotify) for sub-millisecond pickup, so the
-"real-time" edge of a FIFO is not worth its fragility. Each message is dropped via
-a temp-file-plus-atomic-rename, so the watcher never sees a partial write.
+- **Native synchronous feedback.** The tool call returns the outcome — a
+  `message_id` or the Telegram error — so a responder that emits bad HTML sees the
+  failure in the same turn and fixes it, with no result-file polling.
+- **Typed tool surface.** Content is passed as tool arguments (a JSON string), so
+  text — quotes, `!`, arbitrary HTML — never touches a shell; the old
+  write-to-a-file-and-`--file`-it dance is gone.
+- **No upload-vs-teardown race for documents.** The call blocks until the upload
+  finishes, so the file is guaranteed present (the spool's drain had to beat the
+  per-invocation `RemoveAll`).
 
-The **return / private channel** (dispatcher → a specific responder instance) is a
-separate concern from this outbound spool and may use a per-instance channel.
+The trade-off, accepted deliberately: the transport is no longer **durable**. An
+RPC is the "pipe without a reader" the spool avoided — if delivery fails, the call
+returns an error then and there rather than queuing for a retry. For a FAQ bot
+that is tolerable (the responder reports `problematic`), and the synchronous
+feedback is worth more here than crash-safe queuing.
 
-### The descriptor
+### The route capability is the token, not a directory
 
-Each dropped file is one **descriptor** — a single outbound action, JSON. It
-carries the **semantic** message (what to say), never the **route** (where): the
-dispatcher pins `chat_id`/`reply_to` in-process and ignores anything a responder
-might add. A `kind` discriminator plus a `v` schema version keep it extensible —
-a new kind (`photo`, an inline-keyboard for the approval UX) or field is
-non-breaking, since a reader switches on `kind` and ignores fields it does not
-know.
+The Telegram **route** (`chat_id`/`reply_to`) is never chosen by the responder.
+When the dispatcher spawns a responder for an update, it **mints a random bearer
+token** and maps it in memory to that invocation's route (and its document
+directory), then writes the token into the responder's `--mcp-config` as an
+`Authorization: Bearer …` header. Claude Code attaches the header to every MCP
+request under the hood, so **the token never enters the model's context**. The
+server resolves the route from the token; the tool call carries no `chat_id`, so a
+responder cannot retarget a message — the token *is* the route capability (as the
+per-invocation outbox dir was in the spool design). The token is invalidated when
+the responder exits.
 
-```jsonc
-{ "v": 1, "kind": "text",     "text": "…", "format": "plain|html", "silent": false }
-{ "v": 1, "kind": "code",     "code": "…", "language": "go", "caption": "…" }
-{ "v": 1, "kind": "document", "path": "/abs/file.pdf", "filename": "report.pdf", "caption": "…" }
-```
+This holds even under prompt injection: the token is not in the dialogue (so it
+can't be exfiltrated), and even if it were, it only authorizes sending to the
+already-pinned chat — which the responder can do anyway.
 
-- **`text`** — a message. `format: "plain"` (default, shown verbatim) or `"html"`
-  (Telegram `parse_mode=HTML`; the responder supplies valid, escaped HTML — its
-  full inline-formatting escape hatch).
-- **`code`** — a preformatted block with an optional `language`. The dispatcher
-  renders it as `<pre><code class="language-LANG">…</code></pre>` (escaping the
-  body for you) and **spills to a document** when it exceeds Telegram's size
-  limit.
-- **`document`** — a file attachment. `path` is **absolute** so it survives the
-  responder's ephemeral cwd; the dispatcher uploads it before that cwd is torn
-  down.
+### The tools
 
-Rendering to Telegram HTML and the oversize-spill policy live in the
-**dispatcher**, so `send` only serializes intent.
+The server (`tg`) exposes three tools; the route is pinned per invocation, so none
+takes a `chat_id`. Rendering to Telegram HTML and the oversize-spill policy live in
+the **dispatcher**, so a tool call only conveys intent.
 
-### The `send` surface
+- **`send_message(text, html?, silent?)`** — a text message. `html: true` sets
+  Telegram `parse_mode=HTML` (the responder supplies valid, escaped HTML); default
+  is plain, shown verbatim.
+- **`send_code(code, language?, caption?, silent?)`** — a preformatted block,
+  rendered as `<pre><code class="language-LANG">…</code></pre>` (the body escaped
+  for you) and **spilled to a document** when it exceeds Telegram's size limit.
+- **`send_document(path, filename?, caption?, silent?)`** — a file attachment. The
+  responder writes the file into its **outbox** directory (`$AK_TGCLAUDE_OUTBOX`,
+  its Write-tool scope) and passes the path.
 
-`send` runs inside the responder sandbox and drops one descriptor per call into
-`$AK_TGCLAUDE_OUTBOX` (the dispatcher sets this to the directory bound to the
-invocation's route). The body is a positional argument, or stdin (`-`/omitted)
-for large content:
+A responder may call the tools several times to emit multiple messages for one
+update (text, code, attachments, "think and send more").
 
-```sh
-ak-tgclaude send text [--html] [--silent] [--file F] [body|-]
-ak-tgclaude send code [--lang go] [--caption main.go] [--silent] [--file F] [body|-]
-ak-tgclaude send doc  [--filename report.pdf] [--caption "…"] [--silent] <path>
-```
+Availability vs permission are two gates: the tools must appear in the responder
+agent's `tools:` frontmatter (availability — an agent `tools:` allowlist filters
+the toolset) **and** in `--allowedTools` (permission — under `--permission-mode
+dontAsk` an unlisted tool is denied). The scaffold's built-in agent lists all
+three; `dispatch` passes the same three to `--allowedTools`.
 
-The responder emits with **`--file`**: it writes the message body to a file
-(with the Write tool) and passes only the filename, so message content — quotes,
-`!`, arbitrary HTML — never reaches the command line, where a sandboxed shell
-would mangle it. The body can also be a positional argument or stdin (`-`) for
-non-agent callers.
+### Document path confinement
 
-A responder may call `send` several times to emit multiple messages for one
-update (the rich agent facade — text, code, attachments, "think and send more"
-— is preserved).
+The server runs in the dispatcher (unsandboxed, full filesystem access), so it
+**confines the document path itself** — the perimeter the sandboxed spool `send`
+got for free from its read-scope. It takes only the **basename** of the path and
+joins it to that invocation's outbox dir, so any directory component (including an
+absolute path like `/home/…/.ssh/id_rsa`, or a `../` traversal) collapses to a
+name that must exist in the outbox, else the call is rejected. The responder can
+therefore attach only files it wrote to its own outbox.
 
-**`send` blocks on delivery.** After dropping the descriptor it waits (up to 5s)
-for the dispatcher's delivery result, then exits: `0` on success (silently), or on
-timeout — degrading to fire-and-forget, the drop stays queued and drain finishes
-in the background; **non-zero** when Telegram rejected the message, printing the
-error to stderr (a permanent reject such as malformed HTML additionally hints to
-fix and resend). This closes the feedback loop: a responder that emits bad HTML
-sees the failure in the same turn and can correct it. There are **no flags** to
-skip or retune the wait — the responder is not burdened with delivery options, and
-the timeout is a constant.
+### Delivery and errors
 
-### Dispatcher-side delivery (drain)
+The tool handler builds an internal descriptor from the arguments, renders it
+(`text` → `sendMessage` plain or `parse_mode=HTML`; `code` → `<pre><code>`;
+oversize `text`/`code` → a spilled document; `document` → `sendDocument`), and
+delivers it on the token's route. It returns the Telegram **`message_id`** on
+success, or a **tool error** (`isError`) carrying the Telegram description — a
+malformed-HTML `can't parse entities`, a blocked chat, an oversize attachment. The
+responder acts on it: fix the HTML and call again (nothing was sent, so no
+duplicate), or report `problematic`. A message over the 4096-char limit is not an
+error — it spills to a document automatically.
 
-The dispatcher runs one **drain** per invocation's outbox: it watches the
-directory (fsnotify) and, on each drop, sends the descriptors to Telegram **in
-drop order** (filenames sort by drop time), deleting each only after a successful
-send. It is the sole drainer of that directory, so there is no concurrent
-send/remove race. The route (`chat_id`/`reply_to`) is the dispatcher's, bound to
-the outbox — never taken from the descriptor.
-
-- **Catch-up + final flush.** It first sends whatever is already present (the
-  responder may write before the watcher registers), then streams new drops; when
-  the responder exits it does a final flush so nothing is left behind.
-- **Rendering lives here.** `text` goes out as `sendMessage` (plain, or
-  `parse_mode=HTML`); `code` is wrapped in `<pre><code class="language-…">` with
-  the body HTML-escaped; a message over Telegram's 4096-char limit **spills to a
-  document** (the raw, unwrapped payload). `document` is a `sendDocument` upload.
-- **Ordering and failures.** Sends are sequential per outbox. A **permanent
-  reject** (a 4xx Telegram won't accept on retry — bad HTML, blocked chat,
-  chat-not-found; 429 excepted) is moved to `<outbox>/bad/`, a delivery result is
-  written, and the pass **continues** past it, so one bad descriptor can never
-  wedge the queue behind it. A **transient** failure (429 / 5xx / network) stops
-  the pass — leaving that descriptor and everything after it — and is retried with
-  exponential back-off (honoring a 429's `retry_after`), capped, and quarantined
-  as a give-up after a few attempts; stopping the pass preserves order
-  (head-of-line). An unparseable descriptor is likewise moved to `<outbox>/bad/`
-  and skipped, so junk never blocks the queue.
-- **Delivery results / blocking `send`.** On every terminal outcome the drain
-  writes a small result descriptor to `<outbox>/results/<basename>` (correlated
-  1:1 with the drop by filename, written atomically): `ok`+`message_id` on
-  success, or `!ok` with the Telegram description and a `permanent` / give-up flag
-  on failure. `send` blocks polling for its result and maps it to an exit code —
-  see [The `send` surface](#the-send-surface). Results live **inside** the outbox,
-  so the per-invocation `RemoveAll` on teardown sweeps them and **no reaper is
-  needed** — a deliberate simplification over the long-lived host relay.
-
-Each successful send returns the Telegram `message_id`, which the dispatcher will
-later map back to the responder's session for **reply-resurrection** (replying to
-an old bot message revives its `--resume` session).
+The `message_id` is also what the dispatcher will later map back to the
+responder's session for **reply-resurrection** (replying to an old bot message
+revives its `--resume` session).
 
 ## Install & deploy
 
 The binary is distributed the normal Go way (`go install`), so by the time you run
 it, it is already on `PATH`. The `deploy` subcommand therefore **does not copy
-itself** — it provisions everything else (project root, example config, skills) and
-sanity-checks that the `ak-tgclaude` on `PATH` is this same binary
-(`os.SameFile`), warning if not. `dispatch` makes that same check **fatal** at
-startup, because the responder invokes `ak-tgclaude send` by bare name. The
-PreToolUse hook, by contrast, is pinned to the dispatcher's absolute path
+itself** — it provisions everything else (project root, example config, skills).
+The responder no longer self-invokes `ak-tgclaude` (it emits via the MCP tools, not
+a `send` subprocess), so nothing rides on the `PATH` name: the only self-reference
+is the **PreToolUse hook**, and that is pinned to the dispatcher's absolute path
 (`os.Executable()`) in the generated settings.json — see the **Which
-`ak-tgclaude` runs** note above — so the token guard never rides on `PATH`.
+`ak-tgclaude` runs** note above — so the token guard is unaffected by `PATH`.
 
 ## Approval UX
 
@@ -656,20 +632,19 @@ inline-keyboard **yes/no approval buttons** in Telegram for gated actions.
 ```
 main.go            command dispatch (skeleton)
 config.go          Config: TOML + CLI-flag resolution
-outbox.go          outbound descriptor model + atomic spool drop
-send.go            `send` subcommand (text / code / document)
+mcp.go             the MCP-over-HTTP server: token->route registry, JSON-RPC, send_* tools, doc-path confinement
+outbox.go          Descriptor: the in-memory outbound message model (built by the MCP handler)
+deliver.go         sendDescriptor: render + spill + deliver on a route (the shared delivery core)
 render.go          descriptor -> Telegram text/parse_mode, code wrapping, spill
 telegram.go        Telegram Bot API client (getUpdates / sendMessage / sendDocument)
-drain.go           per-invocation outbox drain (fsnotify watch -> send -> ack); classify + back-off
-result.go          delivery result descriptors (drain writes on a terminal outcome, send polls)
 session.go         durable state: poll offset + chat->session map (+ ephemeral mode)
 clear.go           `clear` subcommand: wipe persisted chat->session bindings
-responder.go       Responder interface (claude / stub) + `claude -p` spawn
-dispatch.go        the dispatch loop: poll -> route -> respond -> deliver (+ startup binary-on-PATH check)
+responder.go       Responder interface (claude / stub) + `claude -p` spawn (MCP config wiring)
+dispatch.go        the dispatch loop: poll -> route -> mint token -> respond (responder delivers via MCP)
 scaffold.go        generated .claude/settings.json + materialize embedded assets (hook pinned to os.Executable())
 assets/            embedded responder agent + emission skill (go:embed)
 hook.go            `hook pretooluse`: path-scope the file tools; deny protected reads (token + deny_reads)
-deploy.go          `deploy`: binary-on-PATH check (warning) + example config
+deploy.go          `deploy`: example config + optional static workdir provisioning
 bot.toml.example   example config
 go.mod / go.sum
 README.md          this design

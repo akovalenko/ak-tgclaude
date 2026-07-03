@@ -680,7 +680,8 @@ func runScaffold(args []string) {
 		agentFlag = " --agent " + cfg.Agent
 	}
 	fmt.Printf("\nrun claude there by hand to observe the sandbox (the --settings\n")
-	fmt.Printf("overlay grants write to just this outbox, as the dispatcher does per invocation):\n")
+	fmt.Printf("overlay grants write to just this outbox, as the dispatcher does per invocation;\n")
+	fmt.Printf("the MCP send tools are NOT wired here — they need the running dispatcher):\n")
 	fmt.Printf("  cd %s\n", project)
 	fmt.Printf("  AK_TGCLAUDE_OUTBOX=%s claude -p --setting-sources project --permission-mode dontAsk \\\n", outboxRoot)
 	fmt.Printf("    --settings '%s'%s 'hello'\n", buildInvocationSettings(outboxRoot), agentFlag)

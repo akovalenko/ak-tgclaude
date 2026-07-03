@@ -8,16 +8,6 @@ import (
 	"time"
 )
 
-func TestCheckBinaryOnPathRejectsMismatch(t *testing.T) {
-	// Under `go test` the running binary is the test harness, never the installed
-	// ak-tgclaude, so the check must fail (LookPath miss, or SameFile false if some
-	// ak-tgclaude happens to be on PATH). It must never pass by accident and let a
-	// mismatched `send` binary through.
-	if err := checkBinaryOnPath(); err == nil {
-		t.Error("checkBinaryOnPath must fail when the running binary is not the ak-tgclaude on PATH")
-	}
-}
-
 // typingProbe blocks in Respond until the sender has recorded a "typing" chat
 // action, proving the dispatcher shows typing for the responder's lifetime.
 type typingProbe struct{ sender *fakeSender }
@@ -47,21 +37,22 @@ func TestHandleShowsTypingDuringResponder(t *testing.T) {
 	}
 }
 
-// fakeResponder records the request it got and, simulating the agent's `send`
-// calls, drops descriptors into the invocation's outbox.
+// fakeResponder records the request it got and, simulating the agent's send_*
+// tool calls, delivers each reply through the real MCP transport (an actual
+// tools/call to the dispatcher's server, authorized by the invocation token).
 type fakeResponder struct {
-	sid         string
-	cost        float64
-	descriptors []*Descriptor
-	gotReq      RespondRequest
-	called      bool
+	sid     string
+	cost    float64
+	replies []string // text messages to emit via send_message
+	gotReq  RespondRequest
+	called  bool
 }
 
-func (f *fakeResponder) Respond(_ context.Context, req RespondRequest) (RespondResult, error) {
+func (f *fakeResponder) Respond(ctx context.Context, req RespondRequest) (RespondResult, error) {
 	f.called = true
 	f.gotReq = req
-	for _, d := range f.descriptors {
-		if _, err := d.Drop(req.OutboxDir); err != nil {
+	for _, text := range f.replies {
+		if err := mcpStubSend(ctx, req.MCPURL, req.MCPToken, text); err != nil {
 			return RespondResult{}, err
 		}
 	}
@@ -74,8 +65,14 @@ func newTestDispatcher(t *testing.T, resp Responder, sender Sender) *Dispatcher 
 	if err != nil {
 		t.Fatal(err)
 	}
+	mcp, err := newMCPServer(sender, "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { mcp.Close() })
 	return &Dispatcher{
 		sender:      sender,
+		mcp:         mcp,
 		store:       store,
 		resp:        resp,
 		authz:       openAccess{}, // tests that don't exercise access allow everyone
@@ -92,7 +89,7 @@ func textUpdate(updateID, chatID, msgID int64, text string) Update {
 }
 
 func TestHandleNewSessionBindsAndDelivers(t *testing.T) {
-	resp := &fakeResponder{sid: "sess-1", descriptors: []*Descriptor{{Kind: KindText, Text: "answer"}}}
+	resp := &fakeResponder{sid: "sess-1", replies: []string{"answer"}}
 	sender := &fakeSender{}
 	d := newTestDispatcher(t, resp, sender)
 
@@ -192,7 +189,7 @@ func TestBillLine(t *testing.T) {
 }
 
 func TestHandleBillSendsCostAfterAnswer(t *testing.T) {
-	resp := &fakeResponder{sid: "s", cost: 0.0123, descriptors: []*Descriptor{{Kind: KindText, Text: "answer"}}}
+	resp := &fakeResponder{sid: "s", cost: 0.0123, replies: []string{"answer"}}
 	sender := &fakeSender{}
 	d := newTestDispatcher(t, resp, sender)
 	d.bill = true
@@ -216,7 +213,7 @@ func TestHandleBillSendsCostAfterAnswer(t *testing.T) {
 
 func TestHandleBillSilentWhenZeroOrDisabled(t *testing.T) {
 	// bill enabled but cost is zero => no bill message (just the answer).
-	resp := &fakeResponder{sid: "s", cost: 0, descriptors: []*Descriptor{{Kind: KindText, Text: "answer"}}}
+	resp := &fakeResponder{sid: "s", cost: 0, replies: []string{"answer"}}
 	sender := &fakeSender{}
 	d := newTestDispatcher(t, resp, sender)
 	d.bill = true
@@ -226,7 +223,7 @@ func TestHandleBillSilentWhenZeroOrDisabled(t *testing.T) {
 	}
 
 	// bill disabled but cost present => still no bill message.
-	resp2 := &fakeResponder{sid: "s", cost: 5, descriptors: []*Descriptor{{Kind: KindText, Text: "answer"}}}
+	resp2 := &fakeResponder{sid: "s", cost: 5, replies: []string{"answer"}}
 	sender2 := &fakeSender{}
 	d2 := newTestDispatcher(t, resp2, sender2)
 	d2.handleUpdate(context.Background(), textUpdate(1, 42, 7, "hi"))
@@ -299,7 +296,7 @@ func TestHandleDeniesUnauthorized(t *testing.T) {
 }
 
 func TestHandleAllowedUserPasses(t *testing.T) {
-	resp := &fakeResponder{descriptors: []*Descriptor{{Kind: KindText, Text: "answer"}}}
+	resp := &fakeResponder{replies: []string{"answer"}}
 	sender := &fakeSender{}
 	d := newTestDispatcher(t, resp, sender)
 	d.authz = newAllowList([]int64{999})
