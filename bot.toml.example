@@ -114,13 +114,16 @@ project = "~/code/example-project"
 # (default) => the guard only re-prompts and logs, sending no fabricated message.
 # undelivered_text = "Sorry, I could not answer that."
 
-# Grant EXTRA tools to the responder, adding each to BOTH the agent's tools:
-# frontmatter (availability) AND --allowedTools (permission) in one move — the two
-# must change together, so one knob keeps them in sync. Values are tool names or MCP
-# patterns (Agent, WebFetch, mcp__srv__*). Handy for ad-hoc experiments. SHARP knob:
-# the sandbox still confines Bash and the hook still gates the file tools, but a tool
-# the hook does NOT gate (WebFetch, Agent, ...) genuinely widens access. Also --tool.
-# tools = ["Agent"]
+# Grant EXTRA tools to the responder. Each value is split across the two grants that
+# must change together: its bare NAME goes into the agent's tools: frontmatter
+# (availability) and the value VERBATIM into --allowedTools (permission). So a scoped
+# spec like WebFetch(domain:*.github.com) grants bare WebFetch availability plus that
+# domain scope; two scopes of one verb collapse to a single name in the frontmatter
+# while both ride --allowedTools. Values are tool names, scoped specs, or MCP patterns
+# (Agent, WebFetch(domain:X), mcp__srv__*). SHARP knob: the sandbox still confines Bash
+# and the hook still gates the file tools, but a tool the hook does NOT gate (WebFetch,
+# Agent, ...) genuinely widens access. Also repeatable --tool (quote a scoped spec).
+# tools = ["Agent", "WebFetch(domain:*.github.com)"]
 
 # Responder persona, composed into the base agent at {{POLICY}}: "normal"
 # (declines off-topic, the default) | "norefuse" (do-what-you're-asked) |
