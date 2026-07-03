@@ -41,6 +41,33 @@ func (l *stringList) Set(s string) error {
 	return nil
 }
 
+// policyList is the ordered list of persona-fragment selectors merged into the
+// agent at {{POLICY}}. It decodes from TOML as EITHER a single string
+// (policy = "norefuse") or an array (policy = ["norefuse", "introspect"]) so a
+// pre-list config keeps working; both yield the same []string. On the CLI it is
+// the repeatable --policy flag (a stringList), additive with the file list.
+type policyList []string
+
+func (pl *policyList) UnmarshalTOML(v interface{}) error {
+	switch x := v.(type) {
+	case string:
+		*pl = policyList{x}
+	case []interface{}:
+		out := make(policyList, 0, len(x))
+		for _, e := range x {
+			s, ok := e.(string)
+			if !ok {
+				return fmt.Errorf("policy list entry %v is not a string", e)
+			}
+			out = append(out, s)
+		}
+		*pl = out
+	default:
+		return fmt.Errorf("policy must be a string or an array of strings, got %T", v)
+	}
+	return nil
+}
+
 // Profile selects the responder's access level. Only ProfileQA (read-only) is
 // implemented for now; ProfileDev/ProfileOps are reserved for a future
 // remote-development pivot.
@@ -125,12 +152,15 @@ type Config struct {
 	MaxConcurrent int `toml:"max_concurrent"`
 
 	// Policy selects the responder's persona/stance, composed into the base agent
-	// at {{POLICY}}: a built-in name — "normal" (declines off-topic, the default),
-	// "norefuse" (do-what-you're-asked), "introspect" (candid/debug: precise about
-	// failures, explains the machinery, shares context meta) — OR a path to a custom
-	// .md fragment. Machine guards still apply, so no persona can exceed the
-	// read-only sandboxed contract. Also --policy.
-	Policy string `toml:"policy"`
+	// at {{POLICY}}. Each entry is a built-in name — "normal" (declines off-topic,
+	// the default), "norefuse" (do-what-you're-asked), "introspect" (candid/debug:
+	// precise about failures, explains the machinery, shares context meta) — OR a
+	// path to a custom .md fragment. Multiple entries are MERGED in order (blank-line
+	// separated) into one persona, so stances can be layered. TOML accepts a bare
+	// string or an array; --policy is repeatable and additive with the file list.
+	// Machine guards still apply, so no persona (or blend) can exceed the read-only
+	// sandboxed contract.
+	Policy policyList `toml:"policy"`
 
 	// BangBug makes the PreToolUse hook deny sandboxed Bash whose command contains
 	// a `\!` — the signature of Claude Code bug #64301, where the sandbox
@@ -257,7 +287,8 @@ func parseConfig(args []string) (*Config, error) {
 	responder := fs.String("responder", "", "responder implementation: claude|stub (default claude; stub replies a fixed line for Telegram I/O tests)")
 	workdir := fs.String("workdir", "", "static canon-only workspace root: $workdir/project is the responder cwd (regenerated from canon each start, trusted once) and $workdir/state holds the session store (default: an ephemeral cwd, removed on exit)")
 	maxConcurrent := fs.Int("max-concurrent", 0, "max responders running at once (per-chat is always serialized; default 4)")
-	policy := fs.String("policy", "", "responder persona composed into the agent: normal (declines off-topic, default) | norefuse (do-what-you're-asked) | introspect (candid/debug) | a path to a custom .md fragment")
+	var policyFlags stringList
+	fs.Var(&policyFlags, "policy", "responder persona composed into the agent: normal (declines off-topic, default) | norefuse (do-what-you're-asked) | introspect (candid/debug) | a path to a custom .md fragment; repeatable and additive with the config list, entries merged in order into one persona")
 	ephemeralSessions := fs.Bool("ephemeral-sessions", false, "keep chat→session bindings in memory only (never persisted; offset still persists; each restart starts fresh)")
 	bill := fs.Bool("bill", false, "after each answer, send the run's dollar cost as a bare \"$n.nnn\" message (only when present and non-zero)")
 	debug := fs.Bool("debug", false, "pass --debug to the responder's `claude -p` so its diagnostics (incl. MCP handshake/tool-call transport) reach the dispatcher log via stderr; verbose")
@@ -321,8 +352,10 @@ func parseConfig(args []string) (*Config, error) {
 	if *maxConcurrent != 0 {
 		c.MaxConcurrent = *maxConcurrent
 	}
-	if *policy != "" {
-		c.Policy = *policy
+	// policy is additive too: --policy appends to the file list, and the entries
+	// are merged in order into one persona (like the other repeatable lists).
+	if len(policyFlags) > 0 {
+		c.Policy = append(c.Policy, policyFlags...)
 	}
 	if *ephemeralSessions {
 		c.EphemeralSessions = true
@@ -386,10 +419,12 @@ func parseConfig(args []string) (*Config, error) {
 	for i := range c.DenyRead {
 		c.DenyRead[i] = resolvePath(c.DenyRead[i])
 	}
-	// A policy given as a PATH (custom fragment) resolves like the other paths; a
-	// built-in NAME is left untouched.
-	if policyIsPath(c.Policy) {
-		c.Policy = resolvePath(c.Policy)
+	// A policy entry given as a PATH (custom fragment) resolves like the other
+	// paths; a built-in NAME is left untouched.
+	for i := range c.Policy {
+		if policyIsPath(c.Policy[i]) {
+			c.Policy[i] = resolvePath(c.Policy[i])
+		}
 	}
 
 	// Fail fast on a path we cannot represent literally in the sandbox glob rules
@@ -427,17 +462,19 @@ func parseConfig(args []string) (*Config, error) {
 		}
 	}
 
-	// The policy is either a built-in name or a readable custom fragment file —
-	// fail at startup on an unknown name or a missing file, not mid-run.
-	if policyIsPath(c.Policy) {
-		if err := validatePath("policy", c.Policy); err != nil {
-			return nil, err
+	// Each policy entry is either a built-in name or a readable custom fragment
+	// file — fail at startup on an unknown name or a missing file, not mid-run.
+	for i, p := range c.Policy {
+		if policyIsPath(p) {
+			if err := validatePath(fmt.Sprintf("policy[%d]", i), p); err != nil {
+				return nil, err
+			}
+			if _, err := os.Stat(p); err != nil {
+				return nil, fmt.Errorf("policy fragment %s: %w", p, err)
+			}
+		} else if !builtinPolicies[p] {
+			return nil, fmt.Errorf("unknown policy %q (built-in: normal, norefuse, introspect; or a path to a .md fragment)", p)
 		}
-		if _, err := os.Stat(c.Policy); err != nil {
-			return nil, fmt.Errorf("policy fragment %s: %w", c.Policy, err)
-		}
-	} else if !builtinPolicies[c.Policy] {
-		return nil, fmt.Errorf("unknown policy %q (built-in: normal, norefuse, introspect; or a path to a .md fragment)", c.Policy)
 	}
 
 	// Reject any operator claude_arg that names a flag ak-tgclaude owns, so a stray
@@ -506,8 +543,8 @@ func (c *Config) applyDefaults() {
 	if c.Agent == "" {
 		c.Agent = defaultAgent
 	}
-	if c.Policy == "" {
-		c.Policy = defaultPolicy
+	if len(c.Policy) == 0 {
+		c.Policy = policyList{defaultPolicy}
 	}
 	if c.MaxConcurrent == 0 {
 		c.MaxConcurrent = 4

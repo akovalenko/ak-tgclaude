@@ -336,7 +336,7 @@ The agent is **one base template** — the invariant mechanics (project access,
 replying via tg-emit, the machine-enforced boundaries) — with a `{{POLICY}}` marker
 that the scaffold replaces with a **persona fragment**. The persona is a property of
 the invocation, so there is exactly one copy of the shared prose; swapping the stance
-never touches it. Select with `policy` (config) / `--policy`:
+never touches it. Select with `policy` (config) / `--policy`, each of which is one of:
 
 - **`normal`** (default) — a read-only **FAQ assistant**, narrowly scoped: answers
   from the code, notes assumptions on ambiguity, declines off-topic, and treats the
@@ -351,10 +351,24 @@ never touches it. Select with `policy` (config) / `--policy`:
 - **a path to a `.md` file** — your own fragment, composed into the base like a
   built-in (e.g. `--policy ~/lib/my-persona.md`).
 
-Every persona is **safe by construction**: the read-only sandbox, token deny-read,
-per-invocation write grant, and pinned route are machine-enforced, so no persona can
-exceed them (it still can't modify the project, read secrets, or message anyone but
-the sender). An unknown name or a missing fragment file is rejected **at startup**.
+`policy` is **repeatable** — give several selectors and they are **merged in order**
+(blank-line separated) into one persona, so stances layer (e.g. a built-in base plus a
+custom `.md` overlay). In TOML it accepts a bare string or an array; `--policy` is
+repeatable and **additive** with the config list (like `wire_skills` et al.):
+
+```toml
+policy = ["norefuse", "~/lib/house-style.md"]   # or a bare string: policy = "normal"
+```
+
+```
+--policy norefuse --policy ~/lib/house-style.md   # merged on top of any config entries
+```
+
+Every persona (or blend) is **safe by construction**: the read-only sandbox, token
+deny-read, per-invocation write grant, and pinned route are machine-enforced, so no
+persona can exceed them (it still can't modify the project, read secrets, or message
+anyone but the sender). An unknown name or a missing fragment file is rejected **at
+startup**.
 
 ### Wiring domain skills
 

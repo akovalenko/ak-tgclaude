@@ -99,7 +99,7 @@ type scaffoldParams struct {
 	HookBinary     string   // default "ak-tgclaude"
 	DenyEnvVars    []string // secrets to unset in the sandbox
 	NetworkDomains []string // sandbox egress allowlist
-	Policy         string   // persona fragment composed into the agent (built-in name or custom .md path; "" => normal)
+	Policy         []string // persona fragment(s) merged into the agent (built-in names and/or custom .md paths; empty => normal)
 	Project        string   // knowledge root; substituted for {{PROJECT}} in agent/skill templates
 	WireSkills     []string // operator skill template DIRECTORIES to materialize + preload
 	AddSkills      []string // generic skill DIRECTORIES copied verbatim, NOT preloaded (on-demand)
@@ -565,21 +565,42 @@ func loadPolicy(policy string) ([]byte, error) {
 	return scaffoldAssets.ReadFile("assets/policies/" + policy + ".md")
 }
 
+// loadPolicies merges the persona-fragment bodies for a list of selectors into a
+// single fragment: each is loaded via loadPolicy, trimmed of surrounding blank
+// lines, and joined in order with a blank line between them, so several stances
+// (built-in names and/or custom paths) layer into one persona. An empty list
+// selects defaultPolicy — the single-selector behavior is just the one-element case.
+func loadPolicies(policies []string) ([]byte, error) {
+	if len(policies) == 0 {
+		policies = []string{defaultPolicy}
+	}
+	parts := make([]string, 0, len(policies))
+	for _, p := range policies {
+		body, err := loadPolicy(p)
+		if err != nil {
+			return nil, err
+		}
+		parts = append(parts, strings.TrimSpace(string(body)))
+	}
+	return []byte(strings.Join(parts, "\n\n")), nil
+}
+
 // materializeAgent writes the responder agent into
 // <cwd>/.claude/agents/faq-responder.md, composed from one base template plus the
-// selected persona fragment: the base carries the invariant mechanics (project
+// selected persona fragment(s): the base carries the invariant mechanics (project
 // access, replying, machine boundaries), and its {{POLICY}} marker is replaced by
-// the policy fragment (built-in name or custom path). Machine guards (sandbox,
-// token deny-read, per-invocation write, pinned route) hold regardless of persona,
-// so a relaxed policy cannot exceed them. wiredSkills are appended to the agent's
-// `skills:` frontmatter so their bodies are preloaded at startup, and the `tools:`
-// line's {{MCP_TOOLS}} marker is expanded from the mcpTools source.
-func materializeAgent(claudeDir, policy, project string, wiredSkills []string) error {
+// the merged policy fragment (built-in names and/or custom paths, joined in order).
+// Machine guards (sandbox, token deny-read, per-invocation write, pinned route)
+// hold regardless of persona, so a relaxed policy cannot exceed them. wiredSkills
+// are appended to the agent's `skills:` frontmatter so their bodies are preloaded
+// at startup, and the `tools:` line's {{MCP_TOOLS}} marker is expanded from the
+// mcpTools source.
+func materializeAgent(claudeDir string, policies []string, project string, wiredSkills []string) error {
 	data, err := scaffoldAssets.ReadFile("assets/agents/faq-responder.md")
 	if err != nil {
 		return err
 	}
-	policyBody, err := loadPolicy(policy)
+	policyBody, err := loadPolicies(policies)
 	if err != nil {
 		return err
 	}
@@ -726,7 +747,7 @@ func runScaffold(args []string) {
 	fmt.Printf("ak-tgclaude: scaffold materialized\n")
 	fmt.Printf("  project:  %s\n", project)
 	fmt.Printf("  settings: %s\n", filepath.Join(project, ".claude", "settings.json"))
-	fmt.Printf("  policy:   %s\n", cfg.Policy)
+	fmt.Printf("  policy:   %s\n", strings.Join(cfg.Policy, " + "))
 	if len(cfg.WireSkills) > 0 {
 		fmt.Printf("  wired:    %s (preloaded into the agent)\n", strings.Join(cfg.WireSkills, ", "))
 	}

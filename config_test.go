@@ -181,16 +181,25 @@ func TestParseConfigPolicy(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if c.Policy != "normal" {
-		t.Errorf("default policy = %q, want normal", c.Policy)
+	if got := []string(c.Policy); len(got) != 1 || got[0] != "normal" {
+		t.Errorf("default policy = %v, want [normal]", got)
 	}
 	// A built-in name is accepted.
-	if c, err := parseConfig([]string{"--policy", "introspect"}); err != nil || c.Policy != "introspect" {
-		t.Errorf("policy introspect: err=%v policy=%q", err, c.Policy)
+	if c, err := parseConfig([]string{"--policy", "introspect"}); err != nil || len(c.Policy) != 1 || c.Policy[0] != "introspect" {
+		t.Errorf("policy introspect: err=%v policy=%v", err, c.Policy)
 	}
-	// An unknown built-in name is rejected at startup.
+	// --policy is repeatable: entries accumulate in order.
+	if c, err := parseConfig([]string{"--policy", "norefuse", "--policy", "introspect"}); err != nil ||
+		len(c.Policy) != 2 || c.Policy[0] != "norefuse" || c.Policy[1] != "introspect" {
+		t.Errorf("repeatable policy: err=%v policy=%v, want [norefuse introspect]", err, c.Policy)
+	}
+	// An unknown built-in name is rejected at startup — including when mixed with a
+	// valid one.
 	if _, err := parseConfig([]string{"--policy", "bogus"}); err == nil {
 		t.Errorf("unknown policy name should be rejected")
+	}
+	if _, err := parseConfig([]string{"--policy", "normal", "--policy", "bogus"}); err == nil {
+		t.Errorf("unknown policy name should be rejected even alongside a valid one")
 	}
 	// A path form must exist: a missing file is rejected.
 	if _, err := parseConfig([]string{"--policy", "/no/such/policy.md"}); err == nil {
@@ -205,8 +214,35 @@ func TestParseConfigPolicy(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if c2.Policy != f {
-		t.Errorf("policy path = %q, want %q", c2.Policy, f)
+	if len(c2.Policy) != 1 || c2.Policy[0] != f {
+		t.Errorf("policy path = %v, want [%q]", c2.Policy, f)
+	}
+}
+
+func TestParseConfigPolicyTOML(t *testing.T) {
+	// A bare string in TOML (the pre-list form) still decodes to a one-element list.
+	strPath := filepath.Join(t.TempDir(), "str.toml")
+	if err := os.WriteFile(strPath, []byte("policy = \"introspect\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	c, err := parseConfig([]string{"--config", strPath})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(c.Policy) != 1 || c.Policy[0] != "introspect" {
+		t.Errorf("string TOML policy = %v, want [introspect]", c.Policy)
+	}
+	// An array in TOML decodes in order; --policy is additive on top of it.
+	arrPath := filepath.Join(t.TempDir(), "arr.toml")
+	if err := os.WriteFile(arrPath, []byte("policy = [\"normal\", \"introspect\"]\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	c2, err := parseConfig([]string{"--config", arrPath, "--policy", "norefuse"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(c2.Policy) != 3 || c2.Policy[0] != "normal" || c2.Policy[1] != "introspect" || c2.Policy[2] != "norefuse" {
+		t.Errorf("array TOML + flag policy = %v, want [normal introspect norefuse]", c2.Policy)
 	}
 }
 

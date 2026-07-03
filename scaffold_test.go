@@ -190,10 +190,10 @@ func TestMaterializeScaffoldWritesValidJSON(t *testing.T) {
 	}
 }
 
-func agentBody(t *testing.T, policy string) string {
+func agentBody(t *testing.T, policies ...string) string {
 	t.Helper()
 	cwd := t.TempDir()
-	if err := materializeScaffold(cwd, scaffoldParams{CacheDir: "/c", Policy: policy}); err != nil {
+	if err := materializeScaffold(cwd, scaffoldParams{CacheDir: "/c", Policy: policies}); err != nil {
 		t.Fatal(err)
 	}
 	b, err := os.ReadFile(filepath.Join(cwd, ".claude", "agents", defaultAgent+".md"))
@@ -487,8 +487,32 @@ func TestMaterializeAgentCustomPolicyFile(t *testing.T) {
 		t.Errorf("{{POLICY}} left unsubstituted with a custom policy:\n%s", body)
 	}
 	// An unknown built-in NAME (not a path) is an error, not a silent miss.
-	if err := materializeScaffold(t.TempDir(), scaffoldParams{CacheDir: "/c", Policy: "bogus"}); err == nil {
+	if err := materializeScaffold(t.TempDir(), scaffoldParams{CacheDir: "/c", Policy: []string{"bogus"}}); err == nil {
 		t.Errorf("unknown policy name should error")
+	}
+}
+
+func TestMaterializeAgentMergesPolicies(t *testing.T) {
+	// Several selectors merge in order into ONE persona: both fragments' distinctive
+	// prose is present, the marker is gone, and a custom .md layers on top of a
+	// built-in.
+	f := filepath.Join(t.TempDir(), "extra.md")
+	if err := os.WriteFile(f, []byte("EXTRA persona layered on top.\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	body := agentBody(t, "norefuse", f)
+	if !strings.Contains(body, "NOT** decline") {
+		t.Errorf("merged policy dropped the norefuse fragment:\n%s", body)
+	}
+	if !strings.Contains(body, "EXTRA persona layered on top.") {
+		t.Errorf("merged policy dropped the custom fragment:\n%s", body)
+	}
+	if strings.Contains(body, policyPlaceholder) {
+		t.Errorf("{{POLICY}} left unsubstituted with a merged policy:\n%s", body)
+	}
+	// A blank line separates the two fragments (norefuse body then the custom one).
+	if !strings.Contains(body, "\n\nEXTRA persona layered on top.") {
+		t.Errorf("merged fragments not blank-line separated:\n%s", body)
 	}
 }
 
