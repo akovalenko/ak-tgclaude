@@ -140,6 +140,16 @@ func TestParseConfigClaudeArgs(t *testing.T) {
 	if got := strings.Join(c.ClaudeArgs, " "); got != "--model opus --effort high" {
 		t.Errorf("ClaudeArgs merge wrong: %q", got)
 	}
+
+	// --claude-args is one whitespace-split string; combines with --claude-arg and
+	// the file list, all additive (file, then --claude-arg, then --claude-args).
+	c2, err := parseConfig([]string{"--config", path, "--claude-arg", "--verbose", "--claude-args", "  --effort   high "})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(c2.ClaudeArgs, " "); got != "--model opus --verbose --effort high" {
+		t.Errorf("--claude-args split/merge wrong: %q", got)
+	}
 }
 
 func TestParseConfigClaudeArgsGuard(t *testing.T) {

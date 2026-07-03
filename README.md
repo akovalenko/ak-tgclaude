@@ -72,10 +72,13 @@ ak-tgclaude dispatch --bot-token 123:ABC --profile qa --project ~/code/myproject
   or control character is **rejected at startup**, because the sandbox filesystem
   rules glob-match and would otherwise silently protect/expose the wrong files
   (spaces and quotes are fine). Rename or symlink around such a path.
-- **Extra `claude` flags (`claude_args`, repeatable `--claude-arg`).** Raw
-  arguments appended verbatim to the responder's `claude -p` — e.g. `--model`,
-  `--effort`, `--verbose` — so any current or future claude flag works without a
-  dedicated knob (additive: `--claude-arg` merges onto the file list). The flags
+- **Extra `claude` flags (`claude_args`, repeatable `--claude-arg`, or the
+  one-string `--claude-args`).** Raw arguments appended verbatim to the responder's
+  `claude -p` — e.g. `--model`, `--effort`, `--verbose` — so any current or future
+  claude flag works without a dedicated knob. Three additive sources: the TOML
+  `claude_args` list, repeatable `--claude-arg` (one token each), and the CLI
+  convenience `--claude-args "--model opus --effort high"` (one whitespace-split
+  string; a flag value with a space needs `--claude-arg`/`claude_args` instead). The flags
   ak-tgclaude **owns** are rejected **at startup** with a clear error, rather than
   allowed to silently override what the design pins: the security gate
   (`--permission-mode`, `--setting-sources`, the skip-permissions escapes), the MCP

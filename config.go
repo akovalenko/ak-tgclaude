@@ -250,6 +250,7 @@ func parseConfig(args []string) (*Config, error) {
 	agent := fs.String("agent", "", "responder agent name for `claude -p --agent` (default: the shipped faq-responder)")
 	var claudeArgs stringList
 	fs.Var(&claudeArgs, "claude-arg", "extra raw argument appended to the responder's `claude -p` (one token each, e.g. --claude-arg=--model --claude-arg=opus); repeatable, merged with claude_args; ak-tgclaude-owned flags are rejected")
+	claudeArgsStr := fs.String("claude-args", "", "same as --claude-arg but as ONE whitespace-split string (e.g. --claude-args \"--model opus --effort high\"); merged with claude_args and --claude-arg (a flag value with a space needs --claude-arg instead)")
 	responder := fs.String("responder", "", "responder implementation: claude|stub (default claude; stub replies a fixed line for Telegram I/O tests)")
 	workdir := fs.String("workdir", "", "static canon-only workspace root: $workdir/project is the responder cwd (regenerated from canon each start, trusted once) and $workdir/state holds the session store (default: an ephemeral cwd, removed on exit)")
 	maxConcurrent := fs.Int("max-concurrent", 0, "max responders running at once (per-chat is always serialized; default 4)")
@@ -299,6 +300,14 @@ func parseConfig(args []string) (*Config, error) {
 	// flag on top of config), like the other repeatable lists.
 	if len(claudeArgs) > 0 {
 		c.ClaudeArgs = append(c.ClaudeArgs, claudeArgs...)
+	}
+	// --claude-args is a CLI convenience: one whitespace-split string of tokens,
+	// appended after --claude-arg. All three sources (claude_args, --claude-arg,
+	// --claude-args) are additive; the denylist guard below runs on the merged
+	// result. Whitespace-split, so a flag value containing a space must come via
+	// --claude-arg / claude_args (whole tokens) instead.
+	if strings.TrimSpace(*claudeArgsStr) != "" {
+		c.ClaudeArgs = append(c.ClaudeArgs, strings.Fields(*claudeArgsStr)...)
 	}
 	if *responder != "" {
 		c.Responder = *responder

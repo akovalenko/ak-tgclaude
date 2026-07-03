@@ -22,7 +22,8 @@ bot_token = "123456789:AA...replace-me..."
 
 # Extra raw arguments appended to the responder's `claude -p` (e.g. pick the model
 # or reasoning effort). Any current/future claude flag works here; also repeatable
-# --claude-arg (merged with this list). Flags ak-tgclaude owns (--permission-mode,
+# --claude-arg (one token each) and --claude-args "--model opus --effort high" (one
+# whitespace-split string) — all three additive. Flags ak-tgclaude owns (--permission-mode,
 # --setting-sources, --mcp-config/--strict-mcp-config, --allowedTools, --settings,
 # --agent, --resume/--continue, -p/--output-format/--input-format, and the
 # skip-permissions escapes) are REJECTED at startup — they govern the sandbox,
