@@ -15,11 +15,12 @@ import (
 // tools (reachable at MCPURL, authorized by the route-pinned MCPToken); DocDir is
 // its writable area for document attachments and scratch files.
 type RespondRequest struct {
-	Prompt    string
-	SessionID string // resume this session; empty => start a fresh one
-	DocDir    string // AK_TGCLAUDE_OUTBOX: writable dir for attachments/scratch
-	MCPURL    string // dispatcher's MCP endpoint
-	MCPToken  string // this invocation's capability token (the server pins the route to it)
+	Prompt        string
+	SessionID     string // resume this session; empty => start a fresh one
+	DocDir        string // AK_TGCLAUDE_OUTBOX: writable dir for attachments/scratch
+	MCPConfigPath string // path to the responder's --mcp-config file (the claude responder)
+	MCPURL        string // dispatcher's MCP endpoint (the stub responder calls it directly)
+	MCPToken      string // this invocation's capability token (the server pins the route to it)
 }
 
 // RespondResult reports the session the responder used (so the dispatcher can
@@ -63,17 +64,10 @@ type claudeResponder struct {
 // (route-pinned by MCPToken). It returns the session id parsed from the JSON
 // result.
 func (c *claudeResponder) Respond(ctx context.Context, req RespondRequest) (RespondResult, error) {
-	cmd := exec.CommandContext(ctx, "claude", buildClaudeArgs(c.agent, req.SessionID, req.DocDir, req.MCPURL, req.MCPToken, c.debug)...)
+	cmd := exec.CommandContext(ctx, "claude", buildClaudeArgs(c.agent, req.SessionID, req.DocDir, req.MCPConfigPath, c.debug)...)
 	cmd.Dir = c.cwd
-	cmd.Env = append(os.Environ(), outboxEnv+"="+req.DocDir, projectEnv+"="+c.project)
-	if c.cacheDir != "" {
-		// Inject the isolated Go cache so the sandboxed `go` inherits it (the
-		// settings-file env block does not reach tools under --setting-sources).
-		for k, v := range goCacheEnv(c.cacheDir) {
-			cmd.Env = append(cmd.Env, k+"="+v)
-		}
-	}
-	cmd.Stdin = strings.NewReader(buildPrompt(c.project, req.DocDir, req.Prompt))
+	cmd.Env = c.env(req.DocDir)
+	cmd.Stdin = strings.NewReader(buildPrompt(c.project, req.DocDir, req.Prompt, c.debug))
 	var out bytes.Buffer
 	cmd.Stdout = &out
 	cmd.Stderr = os.Stderr
@@ -84,6 +78,65 @@ func (c *claudeResponder) Respond(ctx context.Context, req RespondRequest) (Resp
 	return RespondResult{SessionID: sid, Outcome: outcome, FinalText: final, CostUSD: cost}, nil
 }
 
+// env assembles the responder process environment: the inherited env, the
+// outbox/project vars, the isolated Go cache, and NO_PROXY/no_proxy forced to
+// include loopback.
+//
+// The proxy part is load-bearing for the MCP transport: the responder's MCP
+// client dials the dispatcher's server at http://127.0.0.1:<port>. If the host
+// has an HTTP(S)_PROXY set and NO_PROXY does not exempt loopback, that request is
+// sent to the upstream proxy — which cannot reach the dispatcher's loopback — so
+// the server is never dialed and no tools appear. Forcing loopback into NO_PROXY
+// makes the MCP request go direct while everything else (the Anthropic API) still
+// honors the proxy. Existing NO_PROXY entries are preserved.
+func (c *claudeResponder) env(docDir string) []string {
+	noProxy := mergeNoProxy(os.Getenv("NO_PROXY"), os.Getenv("no_proxy"))
+	var out []string
+	for _, kv := range os.Environ() {
+		// Drop any inherited NO_PROXY/no_proxy; re-added below with loopback merged
+		// in (a duplicate key is resolved inconsistently across getenv impls).
+		if strings.HasPrefix(kv, "NO_PROXY=") || strings.HasPrefix(kv, "no_proxy=") {
+			continue
+		}
+		out = append(out, kv)
+	}
+	out = append(out,
+		outboxEnv+"="+docDir,
+		projectEnv+"="+c.project,
+		"NO_PROXY="+noProxy,
+		"no_proxy="+noProxy,
+	)
+	if c.cacheDir != "" {
+		// The isolated Go cache, so the sandboxed `go` inherits it (a settings-file
+		// env block does not reach tools under --setting-sources).
+		for k, v := range goCacheEnv(c.cacheDir) {
+			out = append(out, k+"="+v)
+		}
+	}
+	return out
+}
+
+// mergeNoProxy returns a NO_PROXY value that always includes the loopback hosts
+// (so a configured HTTP proxy is bypassed for the dispatcher's localhost MCP
+// server), merged with — and de-duplicating — any existing entries.
+func mergeNoProxy(existing ...string) string {
+	seen := map[string]bool{}
+	var out []string
+	add := func(list string) {
+		for _, h := range strings.Split(list, ",") {
+			if h = strings.TrimSpace(h); h != "" && !seen[h] {
+				seen[h] = true
+				out = append(out, h)
+			}
+		}
+	}
+	for _, e := range existing {
+		add(e)
+	}
+	add("127.0.0.1,localhost,::1")
+	return strings.Join(out, ",")
+}
+
 // buildPrompt prepends a small preamble giving the responder the LITERAL
 // project and outbox paths, then the incoming (untrusted) message. Literal paths
 // matter because the Write/Read tools do not expand env vars in their arguments
@@ -91,7 +144,7 @@ func (c *claudeResponder) Respond(ctx context.Context, req RespondRequest) (Resp
 // outbox is where the responder writes a document before attaching it with the
 // send_document tool (plain/code replies go straight through the send tools, no
 // file needed).
-func buildPrompt(project, outbox, message string) string {
+func buildPrompt(project, outbox, message string, debug bool) string {
 	var b strings.Builder
 	b.WriteString("Project directory (read-only): ")
 	b.WriteString(project)
@@ -102,6 +155,18 @@ func buildPrompt(project, outbox, message string) string {
 		"$AK_TGCLAUDE_PROJECT / $AK_TGCLAUDE_OUTBOX.\n\n")
 	b.WriteString("Incoming Telegram message to answer:\n")
 	b.WriteString(message)
+	if debug {
+		// Override tg-emit's "final output is ONLY the status word" rule for this
+		// troubleshooting run: the responder's final text is our only window into a
+		// run that delivered nothing, so ask for a full account, status word LAST
+		// (parseOutcome reads the last line most reliably — see parseOutcome).
+		b.WriteString("\n\n[DEBUG RUN] Override the tg-emit \"status word only\" final-output " +
+			"rule for this run. After attempting the reply, output a FULL account of what " +
+			"happened: which send tools (mcp__tg__send_message / send_code / send_document) were " +
+			"available to you, whether any tool call failed and its exact error, and why you " +
+			"reached your conclusion. Put the status word (answered / problematic / refused) " +
+			"ALONE on the very last line.")
+	}
 	return b.String()
 }
 
@@ -109,12 +174,13 @@ func buildPrompt(project, outbox, message string) string {
 // responder cwd's project settings (--setting-sources project) so the generated
 // scaffold governs sandbox/permissions/hooks, runs headless deny-by-default
 // (--permission-mode dontAsk) so an unmatched tool is denied rather than hung
-// on, wires the dispatcher's MCP server as the ONLY MCP source
-// (--strict-mcp-config, the token in the config header) and permits its send
-// tools (--allowedTools; their availability comes from the agent's tools:
+// on, wires the dispatcher's MCP server as the ONLY MCP source (a --mcp-config
+// FILE — more robust than inline JSON, which some Claude Code versions silently
+// ignore, dialing no server at all — plus --strict-mcp-config) and permits its
+// send tools (--allowedTools; their availability comes from the agent's tools:
 // frontmatter), and overlays a per-invocation --settings that grants write to
 // just this invocation's outbox (merged on top of the static settings).
-func buildClaudeArgs(agent, sessionID, docDir, mcpURL, mcpToken string, debug bool) []string {
+func buildClaudeArgs(agent, sessionID, docDir, mcpConfigPath string, debug bool) []string {
 	args := []string{
 		"-p", "--output-format", "json",
 		"--setting-sources", "project",
@@ -127,9 +193,9 @@ func buildClaudeArgs(agent, sessionID, docDir, mcpURL, mcpToken string, debug bo
 	if debug {
 		args = append(args, "--debug")
 	}
-	if mcpURL != "" && mcpToken != "" {
+	if mcpConfigPath != "" {
 		args = append(args,
-			"--mcp-config", buildMCPConfig(mcpURL, mcpToken),
+			"--mcp-config", mcpConfigPath,
 			"--strict-mcp-config",
 			"--allowedTools", strings.Join(mcpTools, ","),
 		)

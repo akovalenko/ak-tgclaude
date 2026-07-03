@@ -59,6 +59,7 @@ type Dispatcher struct {
 	helpText      string // reply to /help and /start
 	helpParseMode string // "" (plain) or "HTML" for the help reply
 	bill          bool   // send the run's dollar cost as a "$n.nnn" message after each answer
+	debug         bool   // log the responder's full final text after each run (troubleshooting)
 }
 
 // Run long-polls and dispatches updates to per-chat workers until ctx is
@@ -226,6 +227,15 @@ func (d *Dispatcher) handleUpdate(ctx context.Context, u Update) {
 	}
 	defer d.mcp.Unregister(token)
 
+	// The responder loads the MCP server from a --mcp-config FILE (robust; an
+	// inline JSON value is silently ignored by some Claude Code versions).
+	mcpCfg, err := writeMCPConfig(d.mcp.URL(), token)
+	if err != nil {
+		log.Printf("ak-tgclaude: mcp config for chat %d: %v", m.Chat.ID, err)
+		return
+	}
+	defer os.Remove(mcpCfg)
+
 	ulabel := userLabel(m.From)
 	log.Printf("ak-tgclaude: launch responder chat=%d user=%s msg=%d", m.Chat.ID, ulabel, m.MessageID)
 
@@ -238,11 +248,12 @@ func (d *Dispatcher) handleUpdate(ctx context.Context, u Update) {
 	start := time.Now()
 	sid, _ := d.store.SessionID(m.Chat.ID)
 	res, err := d.resp.Respond(ctx, RespondRequest{
-		Prompt:    m.Text,
-		SessionID: sid,
-		DocDir:    docDir,
-		MCPURL:    d.mcp.URL(),
-		MCPToken:  token,
+		Prompt:        m.Text,
+		SessionID:     sid,
+		DocDir:        docDir,
+		MCPConfigPath: mcpCfg,
+		MCPURL:        d.mcp.URL(),
+		MCPToken:      token,
 	})
 	stopTyping()
 	dur := time.Since(start).Round(time.Millisecond)
@@ -254,6 +265,15 @@ func (d *Dispatcher) handleUpdate(ctx context.Context, u Update) {
 	}
 	log.Printf("ak-tgclaude: responder done chat=%d user=%s msg=%d outcome=%s in %s",
 		m.Chat.ID, ulabel, m.MessageID, outcomeField(res), dur)
+	// In debug, dump the responder's full final text — in a normal run it is only
+	// the status word, but with --debug the responder is asked for a full account
+	// of what happened (e.g. whether the send tools were available), which is the
+	// window into a run that emitted nothing to Telegram.
+	if d.debug {
+		if final := strings.TrimSpace(res.FinalText); final != "" {
+			log.Printf("ak-tgclaude: responder final text chat=%d:\n%s", m.Chat.ID, final)
+		}
+	}
 	if res.SessionID != "" {
 		if err := d.store.SetSession(m.Chat.ID, res.SessionID); err != nil {
 			log.Printf("ak-tgclaude: binding chat %d: %v", m.Chat.ID, err)
@@ -516,6 +536,7 @@ func runDispatch(args []string) {
 		helpText:      helpText,
 		helpParseMode: helpParseMode,
 		bill:          cfg.Bill,
+		debug:         cfg.Debug,
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)

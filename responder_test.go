@@ -9,25 +9,22 @@ import (
 func TestBuildClaudeArgs(t *testing.T) {
 	base := "-p --output-format json --setting-sources project --permission-mode dontAsk"
 
-	// No docDir and no MCP endpoint, no debug => bare args (no overlay, no MCP wiring).
-	if got := strings.Join(buildClaudeArgs("", "", "", "", "", false), " "); got != base {
+	// No docDir and no MCP config, no debug => bare args (no overlay, no MCP wiring).
+	if got := strings.Join(buildClaudeArgs("", "", "", "", false), " "); got != base {
 		t.Errorf("bare args = %q", got)
 	}
 
 	// --debug (alone) is inserted right after the base flags when enabled.
-	if got := strings.Join(buildClaudeArgs("", "", "", "", "", true), " "); got != base+" --debug" {
+	if got := strings.Join(buildClaudeArgs("", "", "", "", true), " "); got != base+" --debug" {
 		t.Errorf("debug args = %q", got)
 	}
 
-	got := buildClaudeArgs("eputs-telegram-guide", "sess-7", "/run/out/outbox-A1", "http://127.0.0.1:9/mcp", "tok9", false)
+	got := buildClaudeArgs("eputs-telegram-guide", "sess-7", "/run/out/outbox-A1", "/tmp/mcp-A1.json", false)
 	joined := strings.Join(got, " ")
-	// MCP wiring: the config (url + Authorization token), strict-only, and the
-	// send tools permitted under dontAsk.
-	if !strings.Contains(joined, "--mcp-config ") || !strings.Contains(joined, "--strict-mcp-config") {
-		t.Errorf("expected MCP config args: %q", joined)
-	}
-	if !strings.Contains(joined, `"url":"http://127.0.0.1:9/mcp"`) || !strings.Contains(joined, "Bearer tok9") {
-		t.Errorf("MCP config should carry url + token: %q", joined)
+	// MCP wiring: the config FILE path, strict-only, and the send tools permitted
+	// under dontAsk.
+	if !strings.Contains(joined, "--mcp-config /tmp/mcp-A1.json") || !strings.Contains(joined, "--strict-mcp-config") {
+		t.Errorf("expected MCP config file args: %q", joined)
 	}
 	if !strings.Contains(joined, "--allowedTools mcp__tg__send_message,mcp__tg__send_code,mcp__tg__send_document") {
 		t.Errorf("expected --allowedTools with the send tools: %q", joined)
@@ -60,8 +57,29 @@ func TestBuildInvocationSettings(t *testing.T) {
 	}
 }
 
+func TestMergeNoProxy(t *testing.T) {
+	// Loopback is always present so the MCP request bypasses any host proxy.
+	got := mergeNoProxy("", "")
+	for _, h := range []string{"127.0.0.1", "localhost", "::1"} {
+		if !strings.Contains(got, h) {
+			t.Errorf("mergeNoProxy should include %s: %q", h, got)
+		}
+	}
+	// Existing entries are preserved and everything is de-duplicated.
+	got = mergeNoProxy("example.com, 127.0.0.1", "localhost")
+	if !strings.Contains(got, "example.com") {
+		t.Errorf("should preserve existing entries: %q", got)
+	}
+	if n := strings.Count(got, "127.0.0.1"); n != 1 {
+		t.Errorf("127.0.0.1 should appear once, got %d: %q", n, got)
+	}
+	if n := strings.Count(got, "localhost"); n != 1 {
+		t.Errorf("localhost should appear once, got %d: %q", n, got)
+	}
+}
+
 func TestBuildPrompt(t *testing.T) {
-	p := buildPrompt("/home/bot/code", "/run/out/outbox-A1", "how does foo work?")
+	p := buildPrompt("/home/bot/code", "/run/out/outbox-A1", "how does foo work?", false)
 	if !strings.Contains(p, "Project directory (read-only): /home/bot/code") {
 		t.Errorf("missing literal project path: %q", p)
 	}
@@ -71,9 +89,18 @@ func TestBuildPrompt(t *testing.T) {
 	if !strings.Contains(p, "not shell-expanded") {
 		t.Errorf("missing the tool-vs-shell caveat: %q", p)
 	}
-	// The message comes last, after the preamble.
+	// Without debug, the message comes last and there is no debug override.
 	if !strings.HasSuffix(p, "how does foo work?") {
 		t.Errorf("message should be appended last: %q", p)
+	}
+	if strings.Contains(p, "DEBUG RUN") {
+		t.Errorf("no debug override expected when debug is off: %q", p)
+	}
+	// With debug, the override is appended after the message and asks for the
+	// status word last.
+	pd := buildPrompt("/home/bot/code", "/run/out/outbox-A1", "how does foo work?", true)
+	if !strings.Contains(pd, "DEBUG RUN") || !strings.Contains(pd, "ALONE on the very last line") {
+		t.Errorf("debug prompt should carry the full-account override: %q", pd)
 	}
 }
 

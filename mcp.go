@@ -80,8 +80,11 @@ func newMCPServer(sender Sender, version string) (*mcpServer, error) {
 		return nil, fmt.Errorf("mcp: listen: %w", err)
 	}
 	m := &mcpServer{sender: sender, version: version, ln: ln, routes: make(map[string]mcpRoute)}
+	// Catch-all (not just "/mcp") so EVERY request is logged in handle, including
+	// one to a wrong path — which the mux would otherwise answer 404 without
+	// logging, hiding a client that dials the wrong URL.
 	mux := http.NewServeMux()
-	mux.HandleFunc("/mcp", m.handle)
+	mux.HandleFunc("/", m.handle)
 	m.srv = &http.Server{Handler: mux}
 	go func() {
 		if err := m.srv.Serve(ln); err != nil && err != http.ErrServerClosed {
@@ -167,6 +170,16 @@ type rpcError struct {
 // JSON response; a notification (no id) gets 202 with no body — the streamable-
 // http shape Claude Code's client expects, without SSE or session headers.
 func (m *mcpServer) handle(w http.ResponseWriter, req *http.Request) {
+	// Log EVERY incoming request up front — method + path + whether it carried an
+	// Authorization header — so any connection attempt is visible, including a GET
+	// probe (which we answer 405) and a request with a bad/absent token. This
+	// disambiguates "no mcp: lines" between "the client never dialed" and "it
+	// dialed but we answered before logging".
+	log.Printf("ak-tgclaude: mcp: <- %s %s auth=%t", req.Method, req.URL.Path, req.Header.Get("Authorization") != "")
+	if req.URL.Path != "/mcp" {
+		http.NotFound(w, req)
+		return
+	}
 	if req.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
@@ -452,6 +465,32 @@ func buildMCPConfig(url, token string) string {
 	return string(b)
 }
 
+// writeMCPConfig writes the responder's --mcp-config to a temp file and returns
+// its path; the caller removes it after the responder exits. A FILE is more
+// robust than passing the JSON inline on the command line: Claude Code loads a
+// --mcp-config file path reliably, whereas an inline JSON value is silently
+// ignored by some versions (which then dial no server at all — no tools). The
+// file holds the per-invocation capability token (a route capability, not the
+// bot secret), so it lives only for the invocation.
+func writeMCPConfig(url, token string) (string, error) {
+	f, err := os.CreateTemp("", "ak-tgclaude-mcp-*.json")
+	if err != nil {
+		return "", fmt.Errorf("mcp: config file: %w", err)
+	}
+	defer f.Close()
+	if _, err := f.WriteString(buildMCPConfig(url, token)); err != nil {
+		os.Remove(f.Name())
+		return "", fmt.Errorf("mcp: writing config: %w", err)
+	}
+	return f.Name(), nil
+}
+
+// mcpLoopbackClient talks to the dispatcher's own MCP server on localhost. It
+// forces Proxy:nil so a host HTTP(S)_PROXY does not swallow the loopback request
+// (the same trap the responder avoids via NO_PROXY) — the stub runs inside the
+// dispatcher, which may have a proxy configured for the Telegram/API traffic.
+var mcpLoopbackClient = &http.Client{Transport: &http.Transport{Proxy: nil}}
+
 // mcpStubSend delivers text by making a real send_message tools/call to the
 // dispatcher's MCP server — the stub responder's path, so --responder stub
 // exercises the actual transport (HTTP + auth + route resolution + delivery)
@@ -476,7 +515,7 @@ func mcpStubSend(ctx context.Context, url, token, text string) error {
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
 	httpReq.Header.Set("Authorization", "Bearer "+token)
-	resp, err := http.DefaultClient.Do(httpReq)
+	resp, err := mcpLoopbackClient.Do(httpReq)
 	if err != nil {
 		return fmt.Errorf("stub: MCP request: %w", err)
 	}

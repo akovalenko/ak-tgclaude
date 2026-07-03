@@ -221,6 +221,27 @@ func TestMCPMissingRequiredArg(t *testing.T) {
 	}
 }
 
+func TestMCPWrongPath404(t *testing.T) {
+	m := newTestMCP(t, &fakeSender{})
+	tok, _ := m.Register(Route{ChatID: 1}, t.TempDir())
+	// A POST to a path other than /mcp is a plain 404 (and logged) — not treated
+	// as JSON-RPC — so a client dialing the wrong URL is visible, not silent.
+	base := strings.TrimSuffix(m.URL(), "/mcp")
+	req, err := http.NewRequest(http.MethodPost, base+"/wrong", bytes.NewReader([]byte(`{"jsonrpc":"2.0","id":1,"method":"tools/list"}`)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Authorization", "Bearer "+tok)
+	resp, err := mcpLoopbackClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusNotFound {
+		t.Errorf("wrong path should be 404, got %d", resp.StatusCode)
+	}
+}
+
 func TestBuildMCPConfig(t *testing.T) {
 	cfg := buildMCPConfig("http://127.0.0.1:1234/mcp", "tok123")
 	var parsed struct {
