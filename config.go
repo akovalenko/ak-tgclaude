@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/BurntSushi/toml"
 )
@@ -165,6 +166,13 @@ type Config struct {
 	// per chat, but different chats run concurrently up to this bound. Default 4.
 	MaxConcurrent int `toml:"max_concurrent"`
 
+	// OutboxTTL is how long a chat's PERSISTENT outbox (its working dir, reattached
+	// across the chat's turns so the responder needn't rebuild what it built earlier)
+	// is kept after last use before idle-eviction reaps it. A Go duration ("2h",
+	// "30m"); default 2h; "0" disables eviction (outboxes then live until /clear, a
+	// session reset, or shutdown under ephemeral sessions).
+	OutboxTTL string `toml:"outbox_ttl"`
+
 	// Policy selects the responder's persona/stance, composed into the base agent
 	// at {{POLICY}}. Each entry is a built-in name — "normal" (declines off-topic,
 	// the default), "norefuse" (do-what-you're-asked), "introspect" (candid/debug:
@@ -318,6 +326,7 @@ func parseConfig(args []string) (*Config, error) {
 	responder := fs.String("responder", "", "responder implementation: claude|stub (default claude; stub replies a fixed line for Telegram I/O tests)")
 	workdir := fs.String("workdir", "", "static canon-only workspace root: $workdir/project is the responder cwd (regenerated from canon each start, trusted once) and $workdir/state holds the session store (default: an ephemeral cwd, removed on exit)")
 	maxConcurrent := fs.Int("max-concurrent", 0, "max responders running at once (per-chat is always serialized; default 4)")
+	outboxTTL := fs.String("outbox-ttl", "", `how long an idle chat's persistent outbox is kept before eviction (Go duration, e.g. "2h"; "0" disables; default 2h)`)
 	var policyFlags stringList
 	fs.Var(&policyFlags, "policy", "responder persona composed into the agent: normal (declines off-topic, default) | norefuse (do-what-you're-asked) | introspect (candid/debug) | a path to a custom .md fragment; repeatable and additive with the config list, entries merged in order into one persona")
 	ephemeralSessions := fs.Bool("ephemeral-sessions", false, "keep chat→session bindings in memory only (never persisted; offset still persists; each restart starts fresh)")
@@ -385,6 +394,9 @@ func parseConfig(args []string) (*Config, error) {
 	}
 	if *maxConcurrent != 0 {
 		c.MaxConcurrent = *maxConcurrent
+	}
+	if *outboxTTL != "" {
+		c.OutboxTTL = *outboxTTL
 	}
 	// policy is additive too: --policy appends to the file list, and the entries
 	// are merged in order into one persona (like the other repeatable lists).
@@ -590,11 +602,27 @@ func (c *Config) applyDefaults() {
 	if c.MaxConcurrent == 0 {
 		c.MaxConcurrent = 4
 	}
+	if c.OutboxTTL == "" {
+		c.OutboxTTL = "2h"
+	}
 	if c.StateDir == "" {
 		c.StateDir = defaultStateDir()
 	}
 	// RuntimeBase is resolved at cwd-materialization time (it depends on whether
 	// $XDG_RUNTIME_DIR exists when the dispatcher starts), so it stays empty here.
+}
+
+// OutboxTTLDur is the parsed OutboxTTL. validate() guarantees it parses; this falls
+// back to 2h only if called on an unvalidated/empty config.
+func (c *Config) OutboxTTLDur() time.Duration {
+	if c.OutboxTTL == "" {
+		return 2 * time.Hour
+	}
+	d, err := time.ParseDuration(c.OutboxTTL)
+	if err != nil {
+		return 2 * time.Hour
+	}
+	return d
 }
 
 func (c *Config) validate() error {
@@ -611,6 +639,9 @@ func (c *Config) validate() error {
 	}
 	if c.MaxConcurrent < 1 {
 		return fmt.Errorf("max_concurrent must be >= 1, got %d", c.MaxConcurrent)
+	}
+	if _, err := time.ParseDuration(c.OutboxTTL); err != nil {
+		return fmt.Errorf("outbox_ttl %q is not a valid duration (e.g. \"2h\", \"30m\", \"0\"): %w", c.OutboxTTL, err)
 	}
 	switch c.Responder {
 	case ResponderClaude:

@@ -121,6 +121,9 @@ func TestBuildPrompt(t *testing.T) {
 	if !strings.Contains(p, "not shell-expanded") {
 		t.Errorf("missing the tool-vs-shell caveat: %q", p)
 	}
+	if !strings.Contains(p, "PERSISTS across replies") {
+		t.Errorf("missing the outbox-persistence hint: %q", p)
+	}
 	// The untrusted message is appended last, verbatim.
 	if !strings.HasSuffix(p, "how does foo work?") {
 		t.Errorf("message should be appended last: %q", p)

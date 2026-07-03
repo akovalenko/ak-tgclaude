@@ -52,8 +52,9 @@ type Dispatcher struct {
 	mcp           *mcpServer // outbound transport: the responder's send_* tools deliver through here
 	store         *SessionStore
 	resp          Responder
-	authz         Authorizer // gates which Telegram users may use the bot
-	outboxRoot    string     // writable root under which per-invocation outbox (doc/scratch) dirs are created
+	authz         Authorizer    // gates which Telegram users may use the bot
+	outboxRoot    string        // writable root under which per-chat persistent outbox (doc/scratch) dirs live
+	outboxTTL     time.Duration // idle-eviction TTL for a chat's persistent outbox (<=0 disables)
 	pollTimeout   int
 	maxConcurrent int    // cap on responders running at once
 	helpText      string // reply to /help and /start
@@ -198,6 +199,11 @@ func (d *Dispatcher) handleUpdate(ctx context.Context, u Update) {
 	}
 
 	if isClearCommand(m.Text) {
+		if p, ok := d.store.Outbox(m.Chat.ID); ok {
+			if err := os.RemoveAll(p); err != nil {
+				log.Printf("ak-tgclaude: clear outbox %d: %v", m.Chat.ID, err)
+			}
+		}
 		if err := d.store.Clear(m.Chat.ID); err != nil {
 			log.Printf("ak-tgclaude: clear %d: %v", m.Chat.ID, err)
 		}
@@ -217,16 +223,27 @@ func (d *Dispatcher) handleUpdate(ctx context.Context, u Update) {
 		return
 	}
 
-	// Per-invocation writable dir for the responder's document attachments and
-	// scratch files (its Write-tool scope). Under the same outboxRoot as before so
-	// the scaffold's sibling-isolation (deny-read of outboxRoot, own dir carved
-	// back per invocation) is unchanged.
-	docDir, err := os.MkdirTemp(d.outboxRoot, "outbox-")
+	// Reap idle chats' persistent outboxes (TTL); skip this chat, whose record is
+	// about to be refreshed. Runs on dispatch (no separate timer) — simplest policy.
+	d.evictExpiredOutboxes(m.Chat.ID)
+
+	// Persistent per-session writable dir for the responder's attachments and scratch
+	// (its Write-tool scope): reattached across this chat's turns so the model needn't
+	// rebuild what it built earlier. Reuse the chat's recorded outbox if it still
+	// exists, else mint a fresh one and record its path (keyed by chat — the fresh
+	// session id isn't known until after the run). Under outboxRoot as before, so the
+	// scaffold's sibling-isolation (deny-read of outboxRoot, own dir carved back per
+	// invocation) is unchanged.
+	docDir, err := d.resolveOutbox(m.Chat.ID)
 	if err != nil {
 		log.Printf("ak-tgclaude: outbox for chat %d: %v", m.Chat.ID, err)
 		return
 	}
-	defer os.RemoveAll(docDir)
+	// Reap only the sandboxed tmp Claude creates under TMPDIR (= docDir): TMPDIR is the
+	// BASE and Claude appends /claude-<uid>. Scratch dies each turn; the rest of the
+	// outbox (the model's builds/checkouts) persists. One defer at return covers the
+	// main run and the delivery-guard re-prompt (both share docDir).
+	defer os.RemoveAll(filepath.Join(docDir, fmt.Sprintf("claude-%d", os.Getuid())))
 
 	// Mint this invocation's capability token: the MCP server resolves the route
 	// (chat/reply) from it, so the responder's send_* calls carry no chat_id and
@@ -276,6 +293,19 @@ func (d *Dispatcher) handleUpdate(ctx context.Context, u Update) {
 		}
 	}
 	if res.SessionID != "" {
+		// If a resumed session was replaced by a new one (the old one expired), the
+		// persistent outbox belongs to the old session's context — which the new
+		// session doesn't remember — so wipe it; a fresh one is minted next turn.
+		if prev, ok := d.store.SessionID(m.Chat.ID); ok && prev != "" && prev != res.SessionID {
+			if p, ok := d.store.Outbox(m.Chat.ID); ok {
+				if err := os.RemoveAll(p); err != nil {
+					log.Printf("ak-tgclaude: reset outbox chat %d: %v", m.Chat.ID, err)
+				}
+			}
+			if err := d.store.SetOutbox(m.Chat.ID, ""); err != nil {
+				log.Printf("ak-tgclaude: reset outbox record chat %d: %v", m.Chat.ID, err)
+			}
+		}
 		if err := d.store.SetSession(m.Chat.ID, res.SessionID); err != nil {
 			log.Printf("ak-tgclaude: binding chat %d: %v", m.Chat.ID, err)
 		}
@@ -575,6 +605,7 @@ func runDispatch(args []string) {
 		resp:          resp,
 		authz:         authz,
 		outboxRoot:    outboxRoot,
+		outboxTTL:     cfg.OutboxTTLDur(),
 		pollTimeout:   defaultPollTimeout,
 		maxConcurrent: cfg.MaxConcurrent,
 		helpText:      helpText,
@@ -602,6 +633,18 @@ func runDispatch(args []string) {
 		cfg.Responder, cwd, kind, cfg.MaxConcurrent, accessDesc, cfg.SessionDir(), redact(cfg.BotToken))
 
 	runErr := d.Run(ctx)
+
+	// Ephemeral sessions don't survive a restart, so neither should their persistent
+	// outboxes: wipe them on shutdown. (A disposable cwd, removed just below, would
+	// also take them — but a FIXED cwd with ephemeral sessions keeps the cwd, so the
+	// outboxes must be removed explicitly.)
+	if store.Ephemeral() {
+		for _, p := range store.Outboxes() {
+			if err := os.RemoveAll(p); err != nil {
+				log.Printf("ak-tgclaude: dispatch: removing ephemeral outbox %s: %v", p, err)
+			}
+		}
+	}
 
 	// An ephemeral cwd is disposable: remove it (and its outbox) on shutdown. A
 	// fixed cwd is kept for inspection.
@@ -634,4 +677,39 @@ func resolveResponderCwd(cfg *Config) (dir string, ephemeral bool, err error) {
 		return "", false, fmt.Errorf("creating ephemeral cwd: %w", err)
 	}
 	return dir, true, nil
+}
+
+// resolveOutbox returns the chat's persistent working dir: its recorded outbox if
+// that still exists on disk, else a freshly minted one whose path is recorded (so
+// the next turn reattaches it). A recording failure is non-fatal — the dir works
+// this turn, it just won't be remembered across a dispatcher restart.
+func (d *Dispatcher) resolveOutbox(chat int64) (string, error) {
+	if p, ok := d.store.Outbox(chat); ok {
+		if fi, err := os.Stat(p); err == nil && fi.IsDir() {
+			return p, nil
+		}
+	}
+	p, err := os.MkdirTemp(d.outboxRoot, "outbox-")
+	if err != nil {
+		return "", err
+	}
+	if err := d.store.SetOutbox(chat, p); err != nil {
+		log.Printf("ak-tgclaude: recording outbox chat %d: %v", chat, err)
+	}
+	return p, nil
+}
+
+// evictExpiredOutboxes reaps the persistent outboxes of chats idle past the TTL
+// (keeping `active`, served right now), removing each from disk. A no-op when the
+// TTL is disabled (outboxTTL <= 0).
+func (d *Dispatcher) evictExpiredOutboxes(active int64) {
+	paths, err := d.store.EvictExpired(time.Now(), d.outboxTTL, active)
+	if err != nil {
+		log.Printf("ak-tgclaude: outbox eviction sweep: %v", err)
+	}
+	for _, p := range paths {
+		if err := os.RemoveAll(p); err != nil {
+			log.Printf("ak-tgclaude: evicting outbox %s: %v", p, err)
+		}
+	}
 }

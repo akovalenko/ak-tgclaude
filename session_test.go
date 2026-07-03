@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 func TestSessionStorePersistsAcrossReload(t *testing.T) {
@@ -131,5 +132,111 @@ func TestClearAllDropsBindingsKeepsOffset(t *testing.T) {
 	}
 	if s2.Offset() != 7 {
 		t.Errorf("offset should survive ClearAll: %d", s2.Offset())
+	}
+}
+
+func TestSessionStoreOutbox(t *testing.T) {
+	dir := t.TempDir()
+	s, _ := LoadSessionStore(dir, false)
+	if _, ok := s.Outbox(1); ok {
+		t.Fatal("no outbox expected initially")
+	}
+	if err := s.SetOutbox(1, "/run/out/outbox-A"); err != nil {
+		t.Fatal(err)
+	}
+	if p, ok := s.Outbox(1); !ok || p != "/run/out/outbox-A" {
+		t.Errorf("Outbox = %q,%v", p, ok)
+	}
+	// Binding a session preserves the recorded outbox.
+	if err := s.SetSession(1, "sess-a"); err != nil {
+		t.Fatal(err)
+	}
+	if p, _ := s.Outbox(1); p != "/run/out/outbox-A" {
+		t.Errorf("SetSession clobbered outbox: %q", p)
+	}
+	// Outbox + session persist across a reload.
+	s2, _ := LoadSessionStore(dir, false)
+	if p, ok := s2.Outbox(1); !ok || p != "/run/out/outbox-A" {
+		t.Errorf("outbox not persisted: %q,%v", p, ok)
+	}
+	if sid, _ := s2.SessionID(1); sid != "sess-a" {
+		t.Errorf("session not persisted alongside outbox: %q", sid)
+	}
+	// Snapshot of all recorded outboxes.
+	_ = s2.SetOutbox(2, "/run/out/outbox-B")
+	if got := s2.Outboxes(); len(got) != 2 {
+		t.Errorf("Outboxes = %v, want 2", got)
+	}
+	// An empty path clears the recorded outbox.
+	if err := s2.SetOutbox(1, ""); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := s2.Outbox(1); ok {
+		t.Error("outbox should be cleared")
+	}
+}
+
+func TestEvictExpired(t *testing.T) {
+	dir := t.TempDir()
+	s, _ := LoadSessionStore(dir, false)
+	_ = s.SetOutbox(1, "/out/1") // LastUsed ~ now
+	_ = s.SetOutbox(2, "/out/2")
+	_ = s.SetOutbox(3, "/out/3")
+
+	// Fresh records are not evicted (cutoff sits in the past).
+	if got, _ := s.EvictExpired(time.Now(), time.Hour, -1); got != nil {
+		t.Errorf("fresh records evicted: %v", got)
+	}
+	// With `now` well past the TTL, all but the kept chat are evicted.
+	paths, err := s.EvictExpired(time.Now().Add(2*time.Hour), time.Minute, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(paths) != 2 {
+		t.Fatalf("evicted paths = %v, want 2 (chats 1 and 3)", paths)
+	}
+	if _, ok := s.SessionID(1); ok {
+		t.Error("chat 1 should be evicted")
+	}
+	if _, ok := s.Outbox(2); !ok {
+		t.Error("kept chat 2 should survive")
+	}
+	// ttl <= 0 disables eviction entirely.
+	if got, _ := s.EvictExpired(time.Now().Add(99*time.Hour), 0, -1); got != nil {
+		t.Errorf("ttl=0 should evict nothing, got %v", got)
+	}
+}
+
+func TestLegacyStringSessionsLoad(t *testing.T) {
+	dir := t.TempDir()
+	// An older store persisted the value as a bare session-id string.
+	legacy := `{"offset":5,"sessions":{"7":"sess-legacy"}}`
+	if err := os.WriteFile(filepath.Join(dir, "sessions.json"), []byte(legacy), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	s, err := LoadSessionStore(dir, false)
+	if err != nil {
+		t.Fatalf("legacy store should load, not crash: %v", err)
+	}
+	if sid, ok := s.SessionID(7); !ok || sid != "sess-legacy" {
+		t.Errorf("legacy session id not read: %q,%v", sid, ok)
+	}
+	if _, ok := s.Outbox(7); ok {
+		t.Error("legacy record has no outbox")
+	}
+	// A legacy record (no LastUsed) is left alone by eviction until it is next used.
+	if got, _ := s.EvictExpired(time.Now().Add(99*time.Hour), time.Minute, -1); got != nil {
+		t.Errorf("zero-LastUsed (legacy) record should not be evicted, got %v", got)
+	}
+}
+
+func TestEphemeralFlag(t *testing.T) {
+	s, _ := LoadSessionStore(t.TempDir(), true)
+	if !s.Ephemeral() {
+		t.Error("Ephemeral() should be true")
+	}
+	s2, _ := LoadSessionStore(t.TempDir(), false)
+	if s2.Ephemeral() {
+		t.Error("Ephemeral() should be false")
 	}
 }

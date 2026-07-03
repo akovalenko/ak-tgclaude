@@ -155,6 +155,9 @@ func buildPrompt(project, outbox, message string) string {
 	b.WriteString(project)
 	b.WriteString("\nOutbox directory (write attachment/scratch files here): ")
 	b.WriteString(outbox)
+	b.WriteString("\nThe outbox PERSISTS across replies in this conversation — build or clone into " +
+		"it once and reuse that next turn instead of redoing the work; only $TMPDIR (scratch) is " +
+		"cleared after each reply.")
 	b.WriteString("\nThese are literal paths — pass them verbatim to the Write/Read tools " +
 		"(tool arguments are not shell-expanded); in shell commands the same paths are in " +
 		"$AK_TGCLAUDE_PROJECT / $AK_TGCLAUDE_OUTBOX.\n\n")
