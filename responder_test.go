@@ -87,7 +87,7 @@ func TestMergeNoProxy(t *testing.T) {
 }
 
 func TestBuildPrompt(t *testing.T) {
-	p := buildPrompt("/home/bot/code", "/run/out/outbox-A1", "how does foo work?", false)
+	p := buildPrompt("/home/bot/code", "/run/out/outbox-A1", "how does foo work?")
 	if !strings.Contains(p, "Project directory (read-only): /home/bot/code") {
 		t.Errorf("missing literal project path: %q", p)
 	}
@@ -97,18 +97,9 @@ func TestBuildPrompt(t *testing.T) {
 	if !strings.Contains(p, "not shell-expanded") {
 		t.Errorf("missing the tool-vs-shell caveat: %q", p)
 	}
-	// Without debug, the message comes last and there is no debug override.
+	// The untrusted message is appended last, verbatim.
 	if !strings.HasSuffix(p, "how does foo work?") {
 		t.Errorf("message should be appended last: %q", p)
-	}
-	if strings.Contains(p, "DEBUG RUN") {
-		t.Errorf("no debug override expected when debug is off: %q", p)
-	}
-	// With debug, the override is appended after the message and asks for the
-	// status word last.
-	pd := buildPrompt("/home/bot/code", "/run/out/outbox-A1", "how does foo work?", true)
-	if !strings.Contains(pd, "DEBUG RUN") || !strings.Contains(pd, "ALONE on the very last line") {
-		t.Errorf("debug prompt should carry the full-account override: %q", pd)
 	}
 }
 

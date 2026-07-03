@@ -67,7 +67,7 @@ func (c *claudeResponder) Respond(ctx context.Context, req RespondRequest) (Resp
 	cmd := exec.CommandContext(ctx, "claude", buildClaudeArgs(c.agent, req.SessionID, req.DocDir, req.MCPURL, req.MCPToken, c.debug, c.claudeArgs)...)
 	cmd.Dir = c.cwd
 	cmd.Env = c.env(req.DocDir)
-	cmd.Stdin = strings.NewReader(buildPrompt(c.project, req.DocDir, req.Prompt, c.debug))
+	cmd.Stdin = strings.NewReader(buildPrompt(c.project, req.DocDir, req.Prompt))
 	var out bytes.Buffer
 	cmd.Stdout = &out
 	cmd.Stderr = os.Stderr
@@ -144,7 +144,7 @@ func mergeNoProxy(existing ...string) string {
 // outbox is where the responder writes a document before attaching it with the
 // send_document tool (plain/code replies go straight through the send tools, no
 // file needed).
-func buildPrompt(project, outbox, message string, debug bool) string {
+func buildPrompt(project, outbox, message string) string {
 	var b strings.Builder
 	b.WriteString("Project directory (read-only): ")
 	b.WriteString(project)
@@ -155,18 +155,6 @@ func buildPrompt(project, outbox, message string, debug bool) string {
 		"$AK_TGCLAUDE_PROJECT / $AK_TGCLAUDE_OUTBOX.\n\n")
 	b.WriteString("Incoming Telegram message to answer:\n")
 	b.WriteString(message)
-	if debug {
-		// Override tg-emit's "final output is ONLY the status word" rule for this
-		// troubleshooting run: the responder's final text is our only window into a
-		// run that delivered nothing, so ask for a full account, status word LAST
-		// (parseOutcome reads the last line most reliably — see parseOutcome).
-		b.WriteString("\n\n[DEBUG RUN] Override the tg-emit \"status word only\" final-output " +
-			"rule for this run. After attempting the reply, output a FULL account of what " +
-			"happened: which send tools (mcp__tg__send_message / send_code / send_document) were " +
-			"available to you, whether any tool call failed and its exact error, and why you " +
-			"reached your conclusion. Put the status word (answered / problematic / refused) " +
-			"ALONE on the very last line.")
-	}
 	return b.String()
 }
 
