@@ -11,18 +11,28 @@ incoming one — **you never choose the chat or the reply target.** The content
 goes **directly in the tool call** — no files, no shell, no escaping quotes or
 `!`.
 
-## Plain text (default, safest)
+## Plain vs HTML — decide, and match the flag to your intent
 
-`mcp__tg__send_message` with `text`:
+Every `send_message` is EITHER plain text OR Telegram HTML — you pick per message
+with the `html` flag. Think about which your reply actually is, and don't mix them up.
+
+**⚠ The one silent mistake:** if you write HTML tags (`<b>…`) but leave `html` off,
+they go out as **literal text** — and Telegram does **not** return an error, so it
+just quietly looks wrong (a bare `<b>` shown to the user instead of bold). The reverse
+— plain text with a raw `<`/`&` sent as `html: true` — Telegram *does* reject, and you
+fix and resend (see below). So the ONLY failure with no signal is HTML-without-the-flag.
+Before you send, check the flag matches your intent.
+
+**Plain** — `mcp__tg__send_message(text: "…")`, no `html`. Use it for prose with no
+formatting, AND when you deliberately want the user to SEE literal markup — e.g.
+answering a web question by quoting a tag: plain shows `<b>` verbatim, which is exactly
+right. No escaping needed.
 
     mcp__tg__send_message(text: "Your answer here.")
 
-Prefer this for ordinary answers. No escaping needed.
-
-## Rich text (Telegram HTML)
-
-Add `html: true` and write **valid Telegram HTML**: escape `&`→`&amp;`,
-`<`→`&lt;`, `>`→`&gt;` in text; the only allowed tags are
+**HTML** — `mcp__tg__send_message(text: "…", html: true)`. Use it whenever you want
+formatting to render. Write **valid Telegram HTML**: escape `&`→`&amp;`, `<`→`&lt;`,
+`>`→`&gt;` in the text, and the only allowed tags are
 `<b> <i> <u> <s> <code> <pre> <a href="…"> <blockquote>`.
 
     mcp__tg__send_message(text: "<b>Bold</b> and <code>code</code>", html: true)
