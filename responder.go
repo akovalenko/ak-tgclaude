@@ -55,6 +55,7 @@ type claudeResponder struct {
 	cwd      string // responder cwd (the materialized scaffold: settings.json + skills)
 	project  string // the project the agent answers about ($AK_TGCLAUDE_PROJECT)
 	cacheDir string // isolated Go cache root, injected into the process env
+	debug    bool   // pass --debug to claude -p (diagnostics to stderr)
 }
 
 // Respond runs `claude -p [--agent] [--resume] --output-format json`, feeding
@@ -62,7 +63,7 @@ type claudeResponder struct {
 // (route-pinned by MCPToken). It returns the session id parsed from the JSON
 // result.
 func (c *claudeResponder) Respond(ctx context.Context, req RespondRequest) (RespondResult, error) {
-	cmd := exec.CommandContext(ctx, "claude", buildClaudeArgs(c.agent, req.SessionID, req.DocDir, req.MCPURL, req.MCPToken)...)
+	cmd := exec.CommandContext(ctx, "claude", buildClaudeArgs(c.agent, req.SessionID, req.DocDir, req.MCPURL, req.MCPToken, c.debug)...)
 	cmd.Dir = c.cwd
 	cmd.Env = append(os.Environ(), outboxEnv+"="+req.DocDir, projectEnv+"="+c.project)
 	if c.cacheDir != "" {
@@ -113,11 +114,18 @@ func buildPrompt(project, outbox, message string) string {
 // tools (--allowedTools; their availability comes from the agent's tools:
 // frontmatter), and overlays a per-invocation --settings that grants write to
 // just this invocation's outbox (merged on top of the static settings).
-func buildClaudeArgs(agent, sessionID, docDir, mcpURL, mcpToken string) []string {
+func buildClaudeArgs(agent, sessionID, docDir, mcpURL, mcpToken string, debug bool) []string {
 	args := []string{
 		"-p", "--output-format", "json",
 		"--setting-sources", "project",
 		"--permission-mode", "dontAsk",
+	}
+	// --debug (alone, no category filter) enables verbose diagnostics on stderr.
+	// Deliberately not `--debug mcp`: if --debug is a boolean flag, a trailing
+	// `mcp` would be misparsed as the positional prompt (the prompt is fed on
+	// stdin, so there must be no stray positional).
+	if debug {
+		args = append(args, "--debug")
 	}
 	if mcpURL != "" && mcpToken != "" {
 		args = append(args,

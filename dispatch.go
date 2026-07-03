@@ -406,6 +406,7 @@ func runDispatch(args []string) {
 		os.Exit(1)
 	}
 	defer mcp.Close()
+	log.Printf("ak-tgclaude: mcp server listening at %s", mcp.URL())
 
 	cwd, ephemeral, err := resolveResponderCwd(cfg)
 	if err != nil {
@@ -476,7 +477,7 @@ func runDispatch(args []string) {
 			fmt.Fprintf(os.Stderr, "ak-tgclaude: dispatch: agent %q not materialized (%s); use the default %q (custom agents are not wired yet)\n", cfg.Agent, agentFile, defaultAgent)
 			os.Exit(1)
 		}
-		resp = &claudeResponder{agent: cfg.Agent, cwd: cwd, project: cfg.Project, cacheDir: cacheDir}
+		resp = &claudeResponder{agent: cfg.Agent, cwd: cwd, project: cfg.Project, cacheDir: cacheDir, debug: cfg.Debug}
 	}
 
 	helpText := cfg.HelpText

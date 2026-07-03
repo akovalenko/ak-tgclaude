@@ -9,12 +9,17 @@ import (
 func TestBuildClaudeArgs(t *testing.T) {
 	base := "-p --output-format json --setting-sources project --permission-mode dontAsk"
 
-	// No docDir and no MCP endpoint => bare args (no overlay, no MCP wiring).
-	if got := strings.Join(buildClaudeArgs("", "", "", "", ""), " "); got != base {
+	// No docDir and no MCP endpoint, no debug => bare args (no overlay, no MCP wiring).
+	if got := strings.Join(buildClaudeArgs("", "", "", "", "", false), " "); got != base {
 		t.Errorf("bare args = %q", got)
 	}
 
-	got := buildClaudeArgs("eputs-telegram-guide", "sess-7", "/run/out/outbox-A1", "http://127.0.0.1:9/mcp", "tok9")
+	// --debug (alone) is inserted right after the base flags when enabled.
+	if got := strings.Join(buildClaudeArgs("", "", "", "", "", true), " "); got != base+" --debug" {
+		t.Errorf("debug args = %q", got)
+	}
+
+	got := buildClaudeArgs("eputs-telegram-guide", "sess-7", "/run/out/outbox-A1", "http://127.0.0.1:9/mcp", "tok9", false)
 	joined := strings.Join(got, " ")
 	// MCP wiring: the config (url + Authorization token), strict-only, and the
 	// send tools permitted under dontAsk.

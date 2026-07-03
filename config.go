@@ -133,6 +133,12 @@ type Config struct {
 	// run would cost at API rates), not real billing. Default false. Also --bill.
 	Bill bool `toml:"bill"`
 
+	// Debug passes `--debug` to the responder's `claude -p`, so its own diagnostics
+	// (MCP handshake/tool discovery/transport errors, etc.) go to the responder's
+	// stderr — which the dispatcher inherits, so they land in the dispatcher log.
+	// Verbose; for troubleshooting only. Default false. Also --debug.
+	Debug bool `toml:"debug"`
+
 	// Project is the codebase the responder consults on (read-only under "qa").
 	// The sandbox and PreToolUse confine the responder's reads here.
 	Project string `toml:"project"`
@@ -238,6 +244,7 @@ func parseConfig(args []string) (*Config, error) {
 	noRefuse := fs.Bool("norefuse", false, "materialize the do-what-you're-asked responder (does not decline off-topic; machine guards still apply)")
 	ephemeralSessions := fs.Bool("ephemeral-sessions", false, "keep chat→session bindings in memory only (never persisted; offset still persists; each restart starts fresh)")
 	bill := fs.Bool("bill", false, "after each answer, send the run's dollar cost as a bare \"$n.nnn\" message (only when present and non-zero)")
+	debug := fs.Bool("debug", false, "pass --debug to the responder's `claude -p` so its diagnostics (incl. MCP handshake/tool-call transport) reach the dispatcher log via stderr; verbose")
 	bangBug := fs.Bool("bang-bug", false, `deny sandboxed Bash containing \! (workaround for bug #64301 corrupting the bang char); the responder writes such commands to a file instead`)
 	var allowUsers int64List
 	fs.Var(&allowUsers, "allow-user", "authorize a Telegram user id (repeatable; merged with allowed_users)")
@@ -293,6 +300,9 @@ func parseConfig(args []string) (*Config, error) {
 	}
 	if *bill {
 		c.Bill = true
+	}
+	if *debug {
+		c.Debug = true
 	}
 	if *bangBug {
 		c.BangBug = true

@@ -186,30 +186,49 @@ func (m *mcpServer) handle(w http.ResponseWriter, req *http.Request) {
 	// it into the responder's --mcp-config). Resolve the route now; tools/call
 	// needs it, the handshake methods do not, but an unknown token is rejected
 	// uniformly so a stray client cannot even enumerate the tools.
-	route, authed := m.lookup(bearer(req.Header.Get("Authorization")))
+	tok := bearer(req.Header.Get("Authorization"))
+	rt, authed := m.lookup(tok)
 
 	// Notifications (no id) are acknowledged with 202 and no body.
 	if len(rpc.ID) == 0 {
+		log.Printf("ak-tgclaude: mcp: notification %q", rpc.Method)
 		w.WriteHeader(http.StatusAccepted)
 		return
 	}
 
 	if !authed {
+		log.Printf("ak-tgclaude: mcp: %s: unauthorized (token=%s)", rpc.Method, tokenPrefix(tok))
 		writeRPCError(w, rpc.ID, -32001, "unauthorized")
 		return
 	}
 
 	switch rpc.Method {
 	case "initialize":
+		log.Printf("ak-tgclaude: mcp: initialize chat=%d", rt.route.ChatID)
 		writeRPCResult(w, rpc.ID, m.initializeResult(rpc.Params))
 	case "tools/list":
+		log.Printf("ak-tgclaude: mcp: tools/list chat=%d", rt.route.ChatID)
 		writeRPCResult(w, rpc.ID, toolsListResult())
 	case "tools/call":
-		writeRPCResult(w, rpc.ID, m.callTool(req.Context(), route, rpc.Params))
+		writeRPCResult(w, rpc.ID, m.callTool(req.Context(), rt, rpc.Params))
 	case "ping":
 		writeRPCResult(w, rpc.ID, map[string]any{})
 	default:
+		log.Printf("ak-tgclaude: mcp: unknown method %q", rpc.Method)
 		writeRPCError(w, rpc.ID, -32601, "method not found: "+rpc.Method)
+	}
+}
+
+// tokenPrefix returns a short, log-safe prefix of a bearer token (it is a route
+// capability, not the bot secret, but there is no reason to log it in full).
+func tokenPrefix(t string) string {
+	switch {
+	case t == "":
+		return "(none)"
+	case len(t) > 8:
+		return t[:8] + "…"
+	default:
+		return t
 	}
 }
 
@@ -315,16 +334,20 @@ func (m *mcpServer) callTool(ctx context.Context, rt mcpRoute, params json.RawMe
 		Arguments json.RawMessage `json:"arguments"`
 	}
 	if err := json.Unmarshal(params, &call); err != nil {
+		log.Printf("ak-tgclaude: mcp: tools/call chat=%d: bad params: %v", rt.route.ChatID, err)
 		return toolError("invalid tools/call params: " + err.Error())
 	}
 	d, err := descriptorFromCall(call.Name, call.Arguments, rt.docDir)
 	if err != nil {
+		log.Printf("ak-tgclaude: mcp: tools/call %s chat=%d: rejected: %v", call.Name, rt.route.ChatID, err)
 		return toolError(err.Error())
 	}
 	id, err := sendDescriptor(ctx, d, rt.route, m.sender)
 	if err != nil {
+		log.Printf("ak-tgclaude: mcp: tools/call %s chat=%d: telegram error: %v", call.Name, rt.route.ChatID, err)
 		return toolError("Telegram rejected the message: " + deliveryError(err))
 	}
+	log.Printf("ak-tgclaude: mcp: tools/call %s chat=%d -> message_id=%d", call.Name, rt.route.ChatID, id)
 	return toolText(fmt.Sprintf("delivered (message_id %d)", id))
 }
 
