@@ -66,6 +66,7 @@ type mcpRoute struct {
 type mcpServer struct {
 	sender  Sender
 	version string
+	debug   bool // log the handshake chatter (every request, initialize, tools/list)
 	ln      net.Listener
 	srv     *http.Server
 
@@ -74,12 +75,12 @@ type mcpServer struct {
 }
 
 // newMCPServer binds a localhost listener and starts serving JSON-RPC at /mcp.
-func newMCPServer(sender Sender, version string) (*mcpServer, error) {
+func newMCPServer(sender Sender, version string, debug bool) (*mcpServer, error) {
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		return nil, fmt.Errorf("mcp: listen: %w", err)
 	}
-	m := &mcpServer{sender: sender, version: version, ln: ln, routes: make(map[string]mcpRoute)}
+	m := &mcpServer{sender: sender, version: version, debug: debug, ln: ln, routes: make(map[string]mcpRoute)}
 	// Catch-all (not just "/mcp") so EVERY request is logged in handle, including
 	// one to a wrong path — which the mux would otherwise answer 404 without
 	// logging, hiding a client that dials the wrong URL.
@@ -126,6 +127,15 @@ func (m *mcpServer) lookup(token string) (mcpRoute, bool) {
 
 // Close stops the HTTP server.
 func (m *mcpServer) Close() error { return m.srv.Close() }
+
+// debugf logs the MCP handshake chatter — only under --debug. The operationally
+// meaningful lines (tools/call outcomes, unauthorized, unknown method) log
+// unconditionally.
+func (m *mcpServer) debugf(format string, args ...any) {
+	if m.debug {
+		log.Printf(format, args...)
+	}
+}
 
 // randomToken returns a 256-bit random bearer token, hex-encoded.
 func randomToken() (string, error) {
@@ -175,7 +185,7 @@ func (m *mcpServer) handle(w http.ResponseWriter, req *http.Request) {
 	// probe (which we answer 405) and a request with a bad/absent token. This
 	// disambiguates "no mcp: lines" between "the client never dialed" and "it
 	// dialed but we answered before logging".
-	log.Printf("ak-tgclaude: mcp: <- %s %s auth=%t", req.Method, req.URL.Path, req.Header.Get("Authorization") != "")
+	m.debugf("ak-tgclaude: mcp: <- %s %s auth=%t", req.Method, req.URL.Path, req.Header.Get("Authorization") != "")
 	if req.URL.Path != "/mcp" {
 		http.NotFound(w, req)
 		return
@@ -204,7 +214,7 @@ func (m *mcpServer) handle(w http.ResponseWriter, req *http.Request) {
 
 	// Notifications (no id) are acknowledged with 202 and no body.
 	if len(rpc.ID) == 0 {
-		log.Printf("ak-tgclaude: mcp: notification %q", rpc.Method)
+		m.debugf("ak-tgclaude: mcp: notification %q", rpc.Method)
 		w.WriteHeader(http.StatusAccepted)
 		return
 	}
@@ -217,10 +227,10 @@ func (m *mcpServer) handle(w http.ResponseWriter, req *http.Request) {
 
 	switch rpc.Method {
 	case "initialize":
-		log.Printf("ak-tgclaude: mcp: initialize chat=%d", rt.route.ChatID)
+		m.debugf("ak-tgclaude: mcp: initialize chat=%d", rt.route.ChatID)
 		writeRPCResult(w, rpc.ID, m.initializeResult(rpc.Params))
 	case "tools/list":
-		log.Printf("ak-tgclaude: mcp: tools/list chat=%d", rt.route.ChatID)
+		m.debugf("ak-tgclaude: mcp: tools/list chat=%d", rt.route.ChatID)
 		writeRPCResult(w, rpc.ID, toolsListResult())
 	case "tools/call":
 		writeRPCResult(w, rpc.ID, m.callTool(req.Context(), rt, rpc.Params))

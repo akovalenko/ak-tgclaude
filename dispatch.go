@@ -420,7 +420,7 @@ func runDispatch(args []string) {
 
 	// The outbound transport: a dispatcher-owned MCP server the responders deliver
 	// through. Created before either responder kind (the stub calls it too).
-	mcp, err := newMCPServer(client, version)
+	mcp, err := newMCPServer(client, version, cfg.Debug)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "ak-tgclaude: dispatch: %v\n", err)
 		os.Exit(1)
