@@ -20,6 +20,15 @@ bot_token = "123456789:AA...replace-me..."
 # through ak-tgclaude send.
 # agent = "faq-responder"
 
+# Extra raw arguments appended to the responder's `claude -p` (e.g. pick the model
+# or reasoning effort). Any current/future claude flag works here; also repeatable
+# --claude-arg (merged with this list). Flags ak-tgclaude owns (--permission-mode,
+# --setting-sources, --mcp-config/--strict-mcp-config, --allowedTools, --settings,
+# --agent, --resume/--continue, -p/--output-format/--input-format, and the
+# skip-permissions escapes) are REJECTED at startup — they govern the sandbox,
+# transport, session, and output parsing.
+# claude_args = ["--model", "opus", "--effort", "high"]
+
 # Access profile: "qa" (read-only, default) | "dev" | "ops".
 # Only "qa" is implemented for now; dev/ops are reserved for a future
 # remote-development pivot. The profile drives the responder's permissions and

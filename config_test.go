@@ -3,6 +3,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -123,6 +124,44 @@ func TestParseConfigDenyEnvs(t *testing.T) {
 	// Additive: file [FOO] + flag [BAR]. Names, not paths — no ~/absolute munging.
 	if len(c.DenyEnvs) != 2 || c.DenyEnvs[0] != "FOO" || c.DenyEnvs[1] != "BAR" {
 		t.Errorf("DenyEnvs merge wrong: %v", c.DenyEnvs)
+	}
+}
+
+func TestParseConfigClaudeArgs(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "bot.toml")
+	if err := os.WriteFile(path, []byte("claude_args = [\"--model\", \"opus\"]\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// Additive: file [--model opus] + flag [--effort high]; safe flags pass.
+	c, err := parseConfig([]string{"--config", path, "--claude-arg", "--effort", "--claude-arg", "high"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(c.ClaudeArgs, " "); got != "--model opus --effort high" {
+		t.Errorf("ClaudeArgs merge wrong: %q", got)
+	}
+}
+
+func TestParseConfigClaudeArgsGuard(t *testing.T) {
+	// Each ak-tgclaude-owned flag is rejected, in both `--flag value` and
+	// `--flag=value` forms, so a passthrough can't silently override the sandbox,
+	// transport, session, or output parsing.
+	for _, bad := range []string{
+		"--permission-mode", "--setting-sources", "--mcp-config", "--strict-mcp-config",
+		"--allowedTools", "--settings", "--output-format", "--input-format",
+		"--agent", "--resume", "-r", "--continue", "-c", "-p", "--print",
+		"--dangerously-skip-permissions",
+	} {
+		if _, err := parseConfig([]string{"--claude-arg", bad, "--claude-arg", "x"}); err == nil {
+			t.Errorf("claude-arg %q should be rejected", bad)
+		}
+		if _, err := parseConfig([]string{"--claude-arg", bad + "=x"}); err == nil {
+			t.Errorf("claude-arg %q (=form) should be rejected", bad)
+		}
+	}
+	// A safe flag with a value that itself looks flag-ish stays allowed.
+	if _, err := parseConfig([]string{"--claude-arg", "--model", "--claude-arg", "opus"}); err != nil {
+		t.Errorf("--model opus should be allowed: %v", err)
 	}
 }
 

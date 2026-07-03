@@ -51,11 +51,12 @@ const outboxEnv = "AK_TGCLAUDE_OUTBOX"
 
 // claudeResponder spawns a headless `claude -p` for each update.
 type claudeResponder struct {
-	agent    string // --agent <name>; empty => the configured default agent
-	cwd      string // responder cwd (the materialized scaffold: settings.json + skills)
-	project  string // the project the agent answers about ($AK_TGCLAUDE_PROJECT)
-	cacheDir string // isolated Go cache root, injected into the process env
-	debug    bool   // pass --debug to claude -p (diagnostics to stderr)
+	agent      string   // --agent <name>; empty => the configured default agent
+	cwd        string   // responder cwd (the materialized scaffold: settings.json + skills)
+	project    string   // the project the agent answers about ($AK_TGCLAUDE_PROJECT)
+	cacheDir   string   // isolated Go cache root, injected into the process env
+	debug      bool     // pass --debug to claude -p (diagnostics to stderr)
+	claudeArgs []string // operator passthrough appended to claude -p (validated at config load)
 }
 
 // Respond runs `claude -p [--agent] [--resume] --output-format json`, feeding
@@ -63,7 +64,7 @@ type claudeResponder struct {
 // (route-pinned by MCPToken). It returns the session id parsed from the JSON
 // result.
 func (c *claudeResponder) Respond(ctx context.Context, req RespondRequest) (RespondResult, error) {
-	cmd := exec.CommandContext(ctx, "claude", buildClaudeArgs(c.agent, req.SessionID, req.DocDir, req.MCPURL, req.MCPToken, c.debug)...)
+	cmd := exec.CommandContext(ctx, "claude", buildClaudeArgs(c.agent, req.SessionID, req.DocDir, req.MCPURL, req.MCPToken, c.debug, c.claudeArgs)...)
 	cmd.Dir = c.cwd
 	cmd.Env = c.env(req.DocDir)
 	cmd.Stdin = strings.NewReader(buildPrompt(c.project, req.DocDir, req.Prompt, c.debug))
@@ -178,8 +179,10 @@ func buildPrompt(project, outbox, message string, debug bool) string {
 // the model's context — plus --strict-mcp-config) and permits its send tools
 // (--allowedTools; their availability comes from the agent's tools: frontmatter),
 // and overlays a per-invocation --settings that grants write to just this
-// invocation's outbox (merged on top of the static settings).
-func buildClaudeArgs(agent, sessionID, docDir, mcpURL, mcpToken string, debug bool) []string {
+// invocation's outbox (merged on top of the static settings). Any operator
+// passthrough (extra) is appended last — validated against the denylist at config
+// load, so it cannot name a flag set above.
+func buildClaudeArgs(agent, sessionID, docDir, mcpURL, mcpToken string, debug bool, extra []string) []string {
 	args := []string{
 		"-p", "--output-format", "json",
 		"--setting-sources", "project",
@@ -208,6 +211,9 @@ func buildClaudeArgs(agent, sessionID, docDir, mcpURL, mcpToken string, debug bo
 	if sessionID != "" {
 		args = append(args, "--resume", sessionID)
 	}
+	// Operator passthrough last; the prompt is on stdin, so there is no positional
+	// for a trailing value to collide with.
+	args = append(args, extra...)
 	return args
 }
 

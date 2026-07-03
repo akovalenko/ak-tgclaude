@@ -9,17 +9,22 @@ import (
 func TestBuildClaudeArgs(t *testing.T) {
 	base := "-p --output-format json --setting-sources project --permission-mode dontAsk"
 
-	// No docDir and no MCP endpoint, no debug => bare args (no overlay, no MCP wiring).
-	if got := strings.Join(buildClaudeArgs("", "", "", "", "", false), " "); got != base {
+	// No docDir and no MCP endpoint, no debug, no passthrough => bare args.
+	if got := strings.Join(buildClaudeArgs("", "", "", "", "", false, nil), " "); got != base {
 		t.Errorf("bare args = %q", got)
 	}
 
 	// --debug (alone) is inserted right after the base flags when enabled.
-	if got := strings.Join(buildClaudeArgs("", "", "", "", "", true), " "); got != base+" --debug" {
+	if got := strings.Join(buildClaudeArgs("", "", "", "", "", true, nil), " "); got != base+" --debug" {
 		t.Errorf("debug args = %q", got)
 	}
 
-	got := buildClaudeArgs("eputs-telegram-guide", "sess-7", "/run/out/outbox-A1", "http://127.0.0.1:9/mcp", "tok9", false)
+	// Operator passthrough is appended verbatim, after everything else.
+	if got := strings.Join(buildClaudeArgs("", "", "", "", "", false, []string{"--model", "opus", "--effort", "high"}), " "); got != base+" --model opus --effort high" {
+		t.Errorf("passthrough args = %q", got)
+	}
+
+	got := buildClaudeArgs("eputs-telegram-guide", "sess-7", "/run/out/outbox-A1", "http://127.0.0.1:9/mcp", "tok9", false, nil)
 	joined := strings.Join(got, " ")
 	// MCP wiring: the inline config (url + Authorization token), strict-only, and
 	// the send tools permitted under dontAsk.

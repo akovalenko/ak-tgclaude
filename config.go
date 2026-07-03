@@ -75,6 +75,16 @@ type Config struct {
 	// uses the cwd's configured default agent.
 	Agent string `toml:"agent"`
 
+	// ClaudeArgs are extra raw arguments appended to the responder's `claude -p`
+	// invocation — e.g. ["--model", "opus", "--effort", "high"]. They pass through
+	// verbatim, so any current or future claude flag works without a dedicated
+	// knob. Flags ak-tgclaude owns (the security, MCP-transport, session, and
+	// print/format flags — see claudeArgDenylist) are REJECTED at startup rather
+	// than allowed to silently override the sandbox/transport ak-tgclaude sets;
+	// everything else (model, effort, verbosity, …) passes. Repeatable via
+	// --claude-arg (additive with this list).
+	ClaudeArgs []string `toml:"claude_args"`
+
 	// WireSkills lists skill templates to materialize into the responder scaffold
 	// and preload into the built-in agent. Each entry is a path to a skill
 	// DIRECTORY (containing SKILL.md): the whole tree is copied, so bundled
@@ -238,6 +248,8 @@ func parseConfig(args []string) (*Config, error) {
 	profile := fs.String("profile", "", "access profile: qa|dev|ops (default qa, read-only)")
 	project := fs.String("project", "", "path to the project the responder consults on (read-only)")
 	agent := fs.String("agent", "", "responder agent name for `claude -p --agent` (default: the shipped faq-responder)")
+	var claudeArgs stringList
+	fs.Var(&claudeArgs, "claude-arg", "extra raw argument appended to the responder's `claude -p` (one token each, e.g. --claude-arg=--model --claude-arg=opus); repeatable, merged with claude_args; ak-tgclaude-owned flags are rejected")
 	responder := fs.String("responder", "", "responder implementation: claude|stub (default claude; stub replies a fixed line for Telegram I/O tests)")
 	workdir := fs.String("workdir", "", "static canon-only workspace root: $workdir/project is the responder cwd (regenerated from canon each start, trusted once) and $workdir/state holds the session store (default: an ephemeral cwd, removed on exit)")
 	maxConcurrent := fs.Int("max-concurrent", 0, "max responders running at once (per-chat is always serialized; default 4)")
@@ -282,6 +294,11 @@ func parseConfig(args []string) (*Config, error) {
 	}
 	if *agent != "" {
 		c.Agent = *agent
+	}
+	// claude_args is additive: --claude-arg appends to the file list (a one-off
+	// flag on top of config), like the other repeatable lists.
+	if len(claudeArgs) > 0 {
+		c.ClaudeArgs = append(c.ClaudeArgs, claudeArgs...)
 	}
 	if *responder != "" {
 		c.Responder = *responder
@@ -393,7 +410,60 @@ func parseConfig(args []string) (*Config, error) {
 		}
 	}
 
+	// Reject any operator claude_arg that names a flag ak-tgclaude owns, so a stray
+	// passthrough cannot silently weaken the sandbox or break the transport.
+	if err := validateClaudeArgs(c.ClaudeArgs); err != nil {
+		return nil, err
+	}
+
 	return &c, nil
+}
+
+// claudeArgDenylist are the `claude -p` flags ak-tgclaude sets itself: the
+// security gate (--permission-mode, --setting-sources, the skip-permissions
+// escapes), the MCP transport (--mcp-config, --strict-mcp-config, --allowedTools),
+// the per-invocation --settings overlay, the session flags the dispatcher manages
+// (--agent, --resume/-r, --continue/-c), and the print/format flags it parses
+// (-p/--print, --output-format, --input-format). An operator claude_arg naming one
+// is rejected at startup: claude's duplicate-flag precedence is undocumented, so
+// letting it through could silently override the sandbox/transport or break output
+// parsing rather than predictably win. Everything NOT here (--model, --effort,
+// --verbose, --add-dir, …) passes through untouched.
+var claudeArgDenylist = map[string]bool{
+	"-p": true, "--print": true,
+	"--output-format": true, "--input-format": true,
+	"--setting-sources":   true,
+	"--permission-mode":   true,
+	"--mcp-config":        true,
+	"--strict-mcp-config": true,
+	"--allowedTools":      true,
+	"--settings":          true,
+	"--agent":             true,
+	"--resume":            true, "-r": true,
+	"--continue": true, "-c": true,
+	"--dangerously-skip-permissions":       true,
+	"--allow-dangerously-skip-permissions": true,
+}
+
+// validateClaudeArgs rejects any passthrough token that names an ak-tgclaude-owned
+// flag (see claudeArgDenylist). It matches both `--flag value` and `--flag=value`
+// forms (the token before '='); a bare value (not starting with '-') is a flag's
+// argument and is not itself checked.
+func validateClaudeArgs(args []string) error {
+	for _, a := range args {
+		if !strings.HasPrefix(a, "-") {
+			continue
+		}
+		flag := a
+		if i := strings.IndexByte(a, '='); i >= 0 {
+			flag = a[:i]
+		}
+		if claudeArgDenylist[flag] {
+			return fmt.Errorf("claude_arg %q is managed by ak-tgclaude and cannot be overridden "+
+				"(it governs the sandbox, MCP transport, session, or output format) — remove it", flag)
+		}
+	}
+	return nil
 }
 
 func (c *Config) applyDefaults() {

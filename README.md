@@ -38,6 +38,7 @@ project   = "~/code/myproject"  # the codebase consulted on (read-only under qa)
 # wire_skills = ["~/lib/eputs-qa-knowledge"]  # domain skill(s) preloaded into the responder
 # deny_reads = ["~/code/myproject/secrets.env"]  # extra paths the responder must never read
 # deny_envs  = ["MY_SECRET"]     # extra env-var names to scrub (ANTHROPIC keys are always scrubbed)
+# claude_args = ["--model", "opus", "--effort", "high"]  # extra raw `claude -p` flags (ak-tgclaude-owned flags rejected)
 # runtime_base = ""             # base for the ephemeral cwd (default: $XDG_RUNTIME_DIR)
 # state_dir    = ""             # durable state (default: $XDG_STATE_HOME/ak-tgclaude)
 ```
@@ -71,6 +72,20 @@ ak-tgclaude dispatch --bot-token 123:ABC --profile qa --project ~/code/myproject
   or control character is **rejected at startup**, because the sandbox filesystem
   rules glob-match and would otherwise silently protect/expose the wrong files
   (spaces and quotes are fine). Rename or symlink around such a path.
+- **Extra `claude` flags (`claude_args`, repeatable `--claude-arg`).** Raw
+  arguments appended verbatim to the responder's `claude -p` — e.g. `--model`,
+  `--effort`, `--verbose` — so any current or future claude flag works without a
+  dedicated knob (additive: `--claude-arg` merges onto the file list). The flags
+  ak-tgclaude **owns** are rejected **at startup** with a clear error, rather than
+  allowed to silently override what the design pins: the security gate
+  (`--permission-mode`, `--setting-sources`, the skip-permissions escapes), the MCP
+  transport (`--mcp-config`, `--strict-mcp-config`, `--allowedTools`), the
+  per-invocation `--settings`, the session flags the dispatcher manages (`--agent`,
+  `--resume`/`-r`, `--continue`/`-c`), and the print/format flags it parses
+  (`-p`/`--print`, `--output-format`, `--input-format`). claude's duplicate-flag
+  precedence is undocumented, so an override is refused rather than trusted to win.
+  Everything else passes through — you can break the bot's *behavior*, but not its
+  sandbox.
 
 ## Runtime layout (directories)
 
