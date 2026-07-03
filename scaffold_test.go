@@ -457,3 +457,41 @@ func TestMaterializeAgentVariant(t *testing.T) {
 		t.Errorf("norefuse agent should not carry the untrusted-input refusal framing")
 	}
 }
+
+func TestInjectMCPTools(t *testing.T) {
+	const tmpl = "---\nname: x\ntools: Read, Skill{{MCP_TOOLS}}\n---\nbody"
+
+	// Non-empty: appended with a leading separator; no marker left behind.
+	got := string(injectMCPTools([]byte(tmpl), []string{"mcp__tg__a", "mcp__tg__b"}))
+	if want := "tools: Read, Skill, mcp__tg__a, mcp__tg__b\n"; !strings.Contains(got, want) {
+		t.Errorf("non-empty inject: got %q, want a line containing %q", got, want)
+	}
+	if strings.Contains(got, mcpToolsPlaceholder) {
+		t.Errorf("placeholder left unsubstituted:\n%s", got)
+	}
+
+	// Empty: the marker vanishes with NO dangling comma (the concern that motivated
+	// putting the separator inside the expansion).
+	empty := string(injectMCPTools([]byte(tmpl), nil))
+	if want := "tools: Read, Skill\n"; !strings.Contains(empty, want) {
+		t.Errorf("empty inject should leave a clean list: got %q, want a line containing %q", empty, want)
+	}
+	if strings.Contains(empty, "Skill,") {
+		t.Errorf("empty inject left a dangling comma:\n%s", empty)
+	}
+}
+
+func TestMaterializeAgentInjectsMCPTools(t *testing.T) {
+	// Both variants get the real send tools substituted onto the tools: line from
+	// the single mcpTools source, with no {{MCP_TOOLS}} marker surviving.
+	for _, noRefuse := range []bool{false, true} {
+		body := agentBody(t, noRefuse)
+		if strings.Contains(body, mcpToolsPlaceholder) {
+			t.Errorf("noRefuse=%v: {{MCP_TOOLS}} left unsubstituted:\n%s", noRefuse, body)
+		}
+		want := "tools: Read, Grep, Glob, Bash, Write, Edit, Skill, " + strings.Join(mcpTools, ", ")
+		if !strings.Contains(body, want) {
+			t.Errorf("noRefuse=%v: MCP tools not appended to tools: as expected\nwant line: %q\ngot:\n%s", noRefuse, want, body)
+		}
+	}
+}

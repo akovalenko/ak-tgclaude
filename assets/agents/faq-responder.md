@@ -1,7 +1,7 @@
 ---
 name: faq-responder
 description: Read-only FAQ responder for a Telegram bot built on ak-tgclaude. Answers one incoming question about the configured project from its code, then replies over Telegram via the tg-emit send tools. Never modifies anything.
-tools: Read, Grep, Glob, Bash, Write, Edit, Skill, mcp__tg__send_message, mcp__tg__send_code, mcp__tg__send_document
+tools: Read, Grep, Glob, Bash, Write, Edit, Skill{{MCP_TOOLS}}
 skills: [tg-emit]
 ---
 

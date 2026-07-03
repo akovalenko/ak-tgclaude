@@ -334,6 +334,27 @@ func materializeScaffold(cwd string, p scaffoldParams) error {
 // the built-in assets pass through unchanged.
 const projectPlaceholder = "{{PROJECT}}"
 
+// mcpToolsPlaceholder is replaced in the responder agent's `tools:` frontmatter
+// with the dispatcher's MCP send tools when the agent is materialized. The MCP
+// tool names are a property of the invocation — they gate on the same mcpTools
+// slice that builds --allowedTools (see mcp.go) — not of the authored agent, so
+// the template carries only this marker and the names live in exactly one place.
+const mcpToolsPlaceholder = "{{MCP_TOOLS}}"
+
+// injectMCPTools replaces the {{MCP_TOOLS}} marker in an agent template with the
+// MCP send tools appended to its `tools:` frontmatter list. The expansion carries
+// its OWN leading ", " separator, and is empty when tools is empty — so the
+// authored `tools: …Skill{{MCP_TOOLS}}` yields a comma-clean list either way (no
+// dangling comma when there are no MCP tools). Data without the marker is returned
+// unchanged.
+func injectMCPTools(data []byte, tools []string) []byte {
+	clause := ""
+	if len(tools) > 0 {
+		clause = ", " + strings.Join(tools, ", ")
+	}
+	return []byte(strings.ReplaceAll(string(data), mcpToolsPlaceholder, clause))
+}
+
 // materializeFile writes data to dst (creating parent dirs) with mode,
 // substituting the project placeholder. It is the single copy path for every
 // agent/skill file, embedded or wired. An empty project leaves the placeholder
@@ -508,7 +529,8 @@ func copyTreeMaterialize(srcDir, dstDir, project string) error {
 // FAQ that declines off-topic to a do-what-you're-asked assistant. Machine
 // guards (sandbox, token deny-read, per-invocation write, pinned route) hold
 // either way, so the relaxed persona cannot exceed them. wiredSkills are appended
-// to the agent's `skills:` frontmatter so their bodies are preloaded at startup.
+// to the agent's `skills:` frontmatter so their bodies are preloaded at startup,
+// and the `tools:` line's {{MCP_TOOLS}} marker is expanded from the mcpTools source.
 func materializeAgent(claudeDir string, noRefuse bool, project string, wiredSkills []string) error {
 	src := "assets/agents/faq-responder.md"
 	if noRefuse {
@@ -519,6 +541,10 @@ func materializeAgent(claudeDir string, noRefuse bool, project string, wiredSkil
 		return err
 	}
 	data = appendAgentSkills(data, wiredSkills)
+	// Expand {{MCP_TOOLS}} in the tools: frontmatter from the single mcpTools source
+	// (mcp.go), the same slice that feeds --allowedTools — so the availability and
+	// permission gates never drift and the authored template stays MCP-agnostic.
+	data = injectMCPTools(data, mcpTools)
 	dst := filepath.Join(claudeDir, "agents", "faq-responder.md")
 	return materializeFile(dst, data, project, 0o600)
 }

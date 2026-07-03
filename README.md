@@ -582,8 +582,13 @@ update (text, code, attachments, "think and send more").
 Availability vs permission are two gates: the tools must appear in the responder
 agent's `tools:` frontmatter (availability — an agent `tools:` allowlist filters
 the toolset) **and** in `--allowedTools` (permission — under `--permission-mode
-dontAsk` an unlisted tool is denied). The scaffold's built-in agent lists all
-three; `dispatch` passes the same three to `--allowedTools`.
+dontAsk` an unlisted tool is denied). Both gates are fed from **one** source: the
+authored agent template carries no MCP tool names, only a `{{MCP_TOOLS}}` marker on
+its `tools:` line, which the scaffold expands (at materialization) from the same
+`mcpTools` list `dispatch` joins into `--allowedTools`. The MCP send tools are a
+property of the invocation, not of the agent prose, so adding one touches only that
+list — the marker's expansion carries its own leading separator (empty when there
+are no MCP tools), so the `tools:` list stays comma-clean either way.
 
 ### Document path confinement
 
