@@ -38,6 +38,7 @@ project   = "~/code/myproject"  # the codebase consulted on (read-only under qa)
 # wire_skills = ["~/lib/eputs-qa-knowledge"]  # domain skill(s) preloaded into the responder
 # deny_reads = ["~/code/myproject/secrets.env"]  # extra paths the responder must never read
 # deny_envs  = ["MY_SECRET"]     # extra env-var names to scrub (ANTHROPIC keys are always scrubbed)
+# allow_domains = ["api.github.com"]  # extra sandbox egress domains, on top of the Go-build defaults
 # claude_args = ["--model", "opus", "--effort", "high"]  # extra raw `claude -p` flags (ak-tgclaude-owned flags rejected)
 # allow_silent = false          # true DISABLES the delivery guard (below); default false = guard on
 # undelivered_text = "Sorry, I could not answer that."  # fallback reply if the guard's re-prompt still sent nothing
@@ -336,6 +337,18 @@ variable names, not paths — no `~`/relative resolution — and are added on to
 the defaults (never replacing them; duplicates are ignored). Each becomes a
 `sandbox.credentials.envVars` deny entry.
 
+**Extra egress domains — `allow_domains` / `--allow-domain`.** The responder's
+sandbox permits egress only to the **Go-build defaults**
+(`proxy.golang.org`/`sum.golang.org`/`storage.googleapis.com`). To let its
+**sandboxed Bash** (a `curl`, a `go get` from another host) reach more hosts, list
+them in `allow_domains` (or repeat `--allow-domain <domain>`; additive and
+de-duplicated — the defaults are never dropped). They land in
+`sandbox.network.allowedDomains`. A leading `*.` matches **subdomains only**, not
+the apex (list the apex too if you need it). This is the **egress** layer, distinct
+from a `WebFetch(domain:X)` grant in `tools`: that scopes the WebFetch **tool** and,
+under `claude -p`, does **not** open sandbox egress — so a responder `curl`/`go get`
+to a host needs *this* knob, not a WebFetch grant.
+
 ## Responder (agent + emission skill)
 
 The responder is a Claude Code **agent** launched per message. ak-tgclaude ships
@@ -482,7 +495,8 @@ deployment, the generated file:
 - enables the sandbox with `autoAllowBashIfSandboxed` (grep/`go`/`ak-tgclaude
   send` run without prompts) and `allowUnsandboxedCommands: false` (no escape);
 - points the Go caches (`GOCACHE`/`GOMODCACHE`/…) at an **isolated** dir, and
-  allows egress only to `proxy.golang.org`/`sum.golang.org`/`storage.googleapis.com`;
+  allows egress to `proxy.golang.org`/`sum.golang.org`/`storage.googleapis.com`
+  (plus any operator `allow_domains`);
 - grants sandbox writes to only the cache dir — **not** the outbox (that is
   per-invocation), and **deny-reads** the outbox area (see below);
 - installs the **token guard**: `sandbox.credentials.files` deny-read on the

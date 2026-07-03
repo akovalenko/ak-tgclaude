@@ -149,6 +149,44 @@ func TestBuildSettingsDenyEnvsAdditive(t *testing.T) {
 	}
 }
 
+func TestBuildSettingsAllowDomainsAdditive(t *testing.T) {
+	// The Go-build defaults are ALWAYS present; operator NetworkDomains (allow_domains)
+	// are additive and de-duplicated (an already-default domain must not double), with
+	// the defaults first.
+	s := buildSettings(scaffoldParams{
+		CacheDir:       "/c",
+		NetworkDomains: []string{"api.github.com", "proxy.golang.org"},
+	})
+	got := s.Sandbox.Network.AllowedDomains
+	// defaults first (3), then the new api.github.com; the duplicate proxy.golang.org
+	// is dropped.
+	want := []string{"proxy.golang.org", "sum.golang.org", "storage.googleapis.com", "api.github.com"}
+	if len(got) != len(want) {
+		t.Fatalf("allowed domains = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("allowed domain[%d] = %q, want %q (full %v)", i, got[i], want[i], got)
+		}
+	}
+}
+
+func TestBuildSettingsAllowDomainsDefaultsWhenEmpty(t *testing.T) {
+	// No operator domains => exactly the Go-build defaults (the additive merge must
+	// not drop the empty case).
+	s := buildSettings(scaffoldParams{CacheDir: "/c"})
+	got := s.Sandbox.Network.AllowedDomains
+	want := []string{"proxy.golang.org", "sum.golang.org", "storage.googleapis.com"}
+	if len(got) != len(want) {
+		t.Fatalf("allowed domains = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("allowed domain[%d] = %q, want %q", i, got[i], want[i])
+		}
+	}
+}
+
 func TestBuildSettingsNoTokenFile(t *testing.T) {
 	s := buildSettings(scaffoldParams{CacheDir: "/c"})
 	// Even without a bot token, the host secrets are always denied; only the bot

@@ -244,6 +244,17 @@ type Config struct {
 	// --deny-env (additive with this list).
 	DenyEnvs []string `toml:"deny_envs"`
 
+	// AllowDomains lists EXTRA egress domains added to the responder's sandbox
+	// network allowlist (sandbox.network.allowedDomains), on top of the always-present
+	// Go-build defaults (proxy.golang.org, sum.golang.org, storage.googleapis.com).
+	// This is the sandboxed-Bash egress layer — a responder `curl`/`go get` may reach
+	// the listed host — SEPARATE from a WebFetch(domain:X) tool grant (see Tools),
+	// which scopes the WebFetch tool and, under `claude -p`, does NOT open sandbox
+	// egress. A leading `*.` matches subdomains only, not the apex (list the apex too
+	// if you need it). Additive and de-duplicated (the Go defaults are never dropped).
+	// Repeatable via --allow-domain (additive with this list).
+	AllowDomains []string `toml:"allow_domains"`
+
 	// HelpText is the reply to /help and /start. Empty => a generic built-in
 	// blurb (defaultHelpText). Keeps the dispatcher domain-blind: any
 	// project-specific help comes from config, not baked into the binary.
@@ -348,6 +359,8 @@ func parseConfig(args []string) (*Config, error) {
 	fs.Var(&denyRead, "deny-read", "path the responder must never read, at both the Read-tool and sandboxed-Bash layers (repeatable; merged with deny_reads; ~ and relative resolved against the launch cwd)")
 	var denyEnvs stringList
 	fs.Var(&denyEnvs, "deny-env", "environment-variable NAME to scrub from the responder's sandbox, on top of the ANTHROPIC defaults (repeatable; merged with deny_envs)")
+	var allowDomains stringList
+	fs.Var(&allowDomains, "allow-domain", "extra egress domain added to the responder's sandbox network allowlist, on top of the Go-build defaults (repeatable; merged with allow_domains; a leading *. matches subdomains only, not the apex)")
 	open := fs.Bool("open", false, "OPEN ACCESS: allow every Telegram user (demo only; overrides the whitelist)")
 	if err := fs.Parse(args); err != nil {
 		return nil, err
@@ -445,6 +458,10 @@ func parseConfig(args []string) (*Config, error) {
 	// deny_envs is additive too (scrub one more secret env var ad-hoc).
 	if len(denyEnvs) > 0 {
 		c.DenyEnvs = append(c.DenyEnvs, denyEnvs...)
+	}
+	// allow_domains is additive too (open one more egress domain ad-hoc).
+	if len(allowDomains) > 0 {
+		c.AllowDomains = append(c.AllowDomains, allowDomains...)
 	}
 	if *open {
 		c.Open = true

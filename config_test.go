@@ -127,6 +127,22 @@ func TestParseConfigDenyEnvs(t *testing.T) {
 	}
 }
 
+func TestParseConfigAllowDomains(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "bot.toml")
+	if err := os.WriteFile(path, []byte("allow_domains = [\"api.github.com\"]\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	c, err := parseConfig([]string{"--config", path, "--allow-domain", "*.githubusercontent.com"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Additive: file [api.github.com] + flag [*.githubusercontent.com]. Domains, not
+	// paths — no ~/absolute munging (a leading *. must survive verbatim).
+	if len(c.AllowDomains) != 2 || c.AllowDomains[0] != "api.github.com" || c.AllowDomains[1] != "*.githubusercontent.com" {
+		t.Errorf("AllowDomains merge wrong: %v", c.AllowDomains)
+	}
+}
+
 func TestParseConfigClaudeArgs(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "bot.toml")
 	if err := os.WriteFile(path, []byte("claude_args = [\"--model\", \"opus\"]\n"), 0o600); err != nil {

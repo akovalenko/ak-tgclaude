@@ -98,7 +98,7 @@ type scaffoldParams struct {
 	TokenFile      string   // config file holding the token; "" if token came via --bot-token
 	HookBinary     string   // default "ak-tgclaude"
 	DenyEnvVars    []string // secrets to unset in the sandbox
-	NetworkDomains []string // sandbox egress allowlist
+	NetworkDomains []string // EXTRA egress domains (allow_domains), added to the always-present Go-build defaults
 	Policy         []string // persona fragment(s) merged into the agent (built-in names and/or custom .md paths; empty => normal)
 	Project        string   // knowledge root; substituted for {{PROJECT}} in agent/skill templates
 	WireSkills     []string // operator skill template DIRECTORIES to materialize + preload
@@ -239,9 +239,10 @@ func buildSettings(p scaffoldParams) *claudeSettings {
 		// pointing at this binary.
 		p.HookBinary = "ak-tgclaude"
 	}
-	if len(p.NetworkDomains) == 0 {
-		p.NetworkDomains = defaultNetworkDomains
-	}
+	// The Go-build defaults are ALWAYS present; operator NetworkDomains (allow_domains)
+	// are ADDITIVE (mirroring DenyEnvVars on the deny side), de-duplicated, defaults
+	// first — so a bot always builds Go out of the box and extra egress rides on top.
+	p.NetworkDomains = dedupStrings(append(append([]string{}, defaultNetworkDomains...), p.NetworkDomains...))
 
 	// The built-in secrets are ALWAYS scrubbed; operator DenyEnvVars are ADDITIVE
 	// (a naive replace would drop the ANTHROPIC keys). De-duplicated, order kept.
@@ -790,20 +791,21 @@ func runScaffold(args []string) {
 		os.Exit(1)
 	}
 	if err := materializeScaffold(project, scaffoldParams{
-		CacheDir:    filepath.Join(cfg.StateDir, "cache"),
-		OutboxRoot:  outboxRoot,
-		TokenFile:   cfg.ConfigPath,
-		Policy:      cfg.Policy,
-		Project:     cfg.Project,
-		WireSkills:  cfg.WireSkills,
-		AddSkills:   cfg.AddSkills,
-		AddAgents:   cfg.AddAgents,
-		DenyRead:    cfg.DenyRead,
-		Tools:       cfg.Tools,
-		DenyEnvVars: cfg.DenyEnvs,
-		HookBinary:  selfExePath(),
-		BangBug:     cfg.BangBug,
-		HookLogFile: cfg.hookLogFile(),
+		CacheDir:       filepath.Join(cfg.StateDir, "cache"),
+		OutboxRoot:     outboxRoot,
+		TokenFile:      cfg.ConfigPath,
+		Policy:         cfg.Policy,
+		Project:        cfg.Project,
+		WireSkills:     cfg.WireSkills,
+		AddSkills:      cfg.AddSkills,
+		AddAgents:      cfg.AddAgents,
+		DenyRead:       cfg.DenyRead,
+		Tools:          cfg.Tools,
+		DenyEnvVars:    cfg.DenyEnvs,
+		NetworkDomains: cfg.AllowDomains,
+		HookBinary:     selfExePath(),
+		BangBug:        cfg.BangBug,
+		HookLogFile:    cfg.hookLogFile(),
 	}); err != nil {
 		fmt.Fprintf(os.Stderr, "ak-tgclaude: scaffold: %v\n", err)
 		os.Exit(1)

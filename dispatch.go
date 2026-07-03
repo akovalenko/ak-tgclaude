@@ -545,20 +545,21 @@ func runDispatch(args []string) {
 			os.Exit(1)
 		}
 		if err := materializeScaffold(cwd, scaffoldParams{
-			CacheDir:    cacheDir,
-			OutboxRoot:  outboxRoot,
-			TokenFile:   cfg.ConfigPath,
-			Policy:      cfg.Policy,
-			Project:     cfg.Project,
-			WireSkills:  cfg.WireSkills,
-			AddSkills:   cfg.AddSkills,
-			AddAgents:   cfg.AddAgents,
-			DenyRead:    cfg.DenyRead,
-			Tools:       cfg.Tools,
-			DenyEnvVars: cfg.DenyEnvs,
-			HookBinary:  selfExePath(),
-			BangBug:     cfg.BangBug,
-			HookLogFile: cfg.hookLogFile(),
+			CacheDir:       cacheDir,
+			OutboxRoot:     outboxRoot,
+			TokenFile:      cfg.ConfigPath,
+			Policy:         cfg.Policy,
+			Project:        cfg.Project,
+			WireSkills:     cfg.WireSkills,
+			AddSkills:      cfg.AddSkills,
+			AddAgents:      cfg.AddAgents,
+			DenyRead:       cfg.DenyRead,
+			Tools:          cfg.Tools,
+			DenyEnvVars:    cfg.DenyEnvs,
+			NetworkDomains: cfg.AllowDomains,
+			HookBinary:     selfExePath(),
+			BangBug:        cfg.BangBug,
+			HookLogFile:    cfg.hookLogFile(),
 		}); err != nil {
 			fmt.Fprintf(os.Stderr, "ak-tgclaude: dispatch: %v\n", err)
 			os.Exit(1)

@@ -53,6 +53,16 @@ project = "~/code/example-project"
 # launch cwd (like every path here). Also --deny-read (repeatable; merged).
 # deny_reads = ["~/code/example-project/secrets.env", "~/.aws"]
 
+# Extra egress domains for the responder's sandbox (sandbox.network.allowedDomains),
+# ON TOP of the always-present Go-build defaults (proxy.golang.org, sum.golang.org,
+# storage.googleapis.com). This is the sandboxed-Bash egress layer — a responder
+# curl / go get may reach the listed host — SEPARATE from a WebFetch(domain:X) tool
+# grant (see tools below), which scopes the WebFetch TOOL and, under claude -p, does
+# NOT open sandbox egress. A leading *. matches subdomains only, NOT the apex
+# github.com (list both if you need the apex). Additive + de-duplicated. Also
+# --allow-domain (repeatable; merged).
+# allow_domains = ["*.githubusercontent.com", "api.github.com"]
+
 # Access control: Telegram user ids allowed to use the bot. Empty (the default)
 # denies everyone — the bot answers /start and /help with "no access for id N"
 # (so a user can report the id) and silently ignores everything else. To find
