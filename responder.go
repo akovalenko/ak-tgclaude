@@ -15,12 +15,11 @@ import (
 // tools (reachable at MCPURL, authorized by the route-pinned MCPToken); DocDir is
 // its writable area for document attachments and scratch files.
 type RespondRequest struct {
-	Prompt        string
-	SessionID     string // resume this session; empty => start a fresh one
-	DocDir        string // AK_TGCLAUDE_OUTBOX: writable dir for attachments/scratch
-	MCPConfigPath string // path to the responder's --mcp-config file (the claude responder)
-	MCPURL        string // dispatcher's MCP endpoint (the stub responder calls it directly)
-	MCPToken      string // this invocation's capability token (the server pins the route to it)
+	Prompt    string
+	SessionID string // resume this session; empty => start a fresh one
+	DocDir    string // AK_TGCLAUDE_OUTBOX: writable dir for attachments/scratch
+	MCPURL    string // dispatcher's MCP endpoint (inline --mcp-config for claude; direct call for the stub)
+	MCPToken  string // this invocation's capability token (the server pins the route to it)
 }
 
 // RespondResult reports the session the responder used (so the dispatcher can
@@ -64,7 +63,7 @@ type claudeResponder struct {
 // (route-pinned by MCPToken). It returns the session id parsed from the JSON
 // result.
 func (c *claudeResponder) Respond(ctx context.Context, req RespondRequest) (RespondResult, error) {
-	cmd := exec.CommandContext(ctx, "claude", buildClaudeArgs(c.agent, req.SessionID, req.DocDir, req.MCPConfigPath, c.debug)...)
+	cmd := exec.CommandContext(ctx, "claude", buildClaudeArgs(c.agent, req.SessionID, req.DocDir, req.MCPURL, req.MCPToken, c.debug)...)
 	cmd.Dir = c.cwd
 	cmd.Env = c.env(req.DocDir)
 	cmd.Stdin = strings.NewReader(buildPrompt(c.project, req.DocDir, req.Prompt, c.debug))
@@ -174,13 +173,13 @@ func buildPrompt(project, outbox, message string, debug bool) string {
 // responder cwd's project settings (--setting-sources project) so the generated
 // scaffold governs sandbox/permissions/hooks, runs headless deny-by-default
 // (--permission-mode dontAsk) so an unmatched tool is denied rather than hung
-// on, wires the dispatcher's MCP server as the ONLY MCP source (a --mcp-config
-// FILE — more robust than inline JSON, which some Claude Code versions silently
-// ignore, dialing no server at all — plus --strict-mcp-config) and permits its
-// send tools (--allowedTools; their availability comes from the agent's tools:
-// frontmatter), and overlays a per-invocation --settings that grants write to
-// just this invocation's outbox (merged on top of the static settings).
-func buildClaudeArgs(agent, sessionID, docDir, mcpConfigPath string, debug bool) []string {
+// on, wires the dispatcher's MCP server as the ONLY MCP source (--mcp-config with
+// the inline config JSON — the token rides in its Authorization header, out of
+// the model's context — plus --strict-mcp-config) and permits its send tools
+// (--allowedTools; their availability comes from the agent's tools: frontmatter),
+// and overlays a per-invocation --settings that grants write to just this
+// invocation's outbox (merged on top of the static settings).
+func buildClaudeArgs(agent, sessionID, docDir, mcpURL, mcpToken string, debug bool) []string {
 	args := []string{
 		"-p", "--output-format", "json",
 		"--setting-sources", "project",
@@ -193,9 +192,9 @@ func buildClaudeArgs(agent, sessionID, docDir, mcpConfigPath string, debug bool)
 	if debug {
 		args = append(args, "--debug")
 	}
-	if mcpConfigPath != "" {
+	if mcpURL != "" && mcpToken != "" {
 		args = append(args,
-			"--mcp-config", mcpConfigPath,
+			"--mcp-config", buildMCPConfig(mcpURL, mcpToken),
 			"--strict-mcp-config",
 			"--allowedTools", strings.Join(mcpTools, ","),
 		)

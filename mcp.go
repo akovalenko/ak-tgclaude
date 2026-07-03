@@ -475,26 +475,6 @@ func buildMCPConfig(url, token string) string {
 	return string(b)
 }
 
-// writeMCPConfig writes the responder's --mcp-config to a temp file and returns
-// its path; the caller removes it after the responder exits. A FILE is more
-// robust than passing the JSON inline on the command line: Claude Code loads a
-// --mcp-config file path reliably, whereas an inline JSON value is silently
-// ignored by some versions (which then dial no server at all — no tools). The
-// file holds the per-invocation capability token (a route capability, not the
-// bot secret), so it lives only for the invocation.
-func writeMCPConfig(url, token string) (string, error) {
-	f, err := os.CreateTemp("", "ak-tgclaude-mcp-*.json")
-	if err != nil {
-		return "", fmt.Errorf("mcp: config file: %w", err)
-	}
-	defer f.Close()
-	if _, err := f.WriteString(buildMCPConfig(url, token)); err != nil {
-		os.Remove(f.Name())
-		return "", fmt.Errorf("mcp: writing config: %w", err)
-	}
-	return f.Name(), nil
-}
-
 // mcpLoopbackClient talks to the dispatcher's own MCP server on localhost. It
 // forces Proxy:nil so a host HTTP(S)_PROXY does not swallow the loopback request
 // (the same trap the responder avoids via NO_PROXY) — the stub runs inside the

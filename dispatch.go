@@ -227,15 +227,6 @@ func (d *Dispatcher) handleUpdate(ctx context.Context, u Update) {
 	}
 	defer d.mcp.Unregister(token)
 
-	// The responder loads the MCP server from a --mcp-config FILE (robust; an
-	// inline JSON value is silently ignored by some Claude Code versions).
-	mcpCfg, err := writeMCPConfig(d.mcp.URL(), token)
-	if err != nil {
-		log.Printf("ak-tgclaude: mcp config for chat %d: %v", m.Chat.ID, err)
-		return
-	}
-	defer os.Remove(mcpCfg)
-
 	ulabel := userLabel(m.From)
 	log.Printf("ak-tgclaude: launch responder chat=%d user=%s msg=%d", m.Chat.ID, ulabel, m.MessageID)
 
@@ -248,12 +239,11 @@ func (d *Dispatcher) handleUpdate(ctx context.Context, u Update) {
 	start := time.Now()
 	sid, _ := d.store.SessionID(m.Chat.ID)
 	res, err := d.resp.Respond(ctx, RespondRequest{
-		Prompt:        m.Text,
-		SessionID:     sid,
-		DocDir:        docDir,
-		MCPConfigPath: mcpCfg,
-		MCPURL:        d.mcp.URL(),
-		MCPToken:      token,
+		Prompt:    m.Text,
+		SessionID: sid,
+		DocDir:    docDir,
+		MCPURL:    d.mcp.URL(),
+		MCPToken:  token,
 	})
 	stopTyping()
 	dur := time.Since(start).Round(time.Millisecond)

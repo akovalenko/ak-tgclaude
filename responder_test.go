@@ -9,22 +9,25 @@ import (
 func TestBuildClaudeArgs(t *testing.T) {
 	base := "-p --output-format json --setting-sources project --permission-mode dontAsk"
 
-	// No docDir and no MCP config, no debug => bare args (no overlay, no MCP wiring).
-	if got := strings.Join(buildClaudeArgs("", "", "", "", false), " "); got != base {
+	// No docDir and no MCP endpoint, no debug => bare args (no overlay, no MCP wiring).
+	if got := strings.Join(buildClaudeArgs("", "", "", "", "", false), " "); got != base {
 		t.Errorf("bare args = %q", got)
 	}
 
 	// --debug (alone) is inserted right after the base flags when enabled.
-	if got := strings.Join(buildClaudeArgs("", "", "", "", true), " "); got != base+" --debug" {
+	if got := strings.Join(buildClaudeArgs("", "", "", "", "", true), " "); got != base+" --debug" {
 		t.Errorf("debug args = %q", got)
 	}
 
-	got := buildClaudeArgs("eputs-telegram-guide", "sess-7", "/run/out/outbox-A1", "/tmp/mcp-A1.json", false)
+	got := buildClaudeArgs("eputs-telegram-guide", "sess-7", "/run/out/outbox-A1", "http://127.0.0.1:9/mcp", "tok9", false)
 	joined := strings.Join(got, " ")
-	// MCP wiring: the config FILE path, strict-only, and the send tools permitted
-	// under dontAsk.
-	if !strings.Contains(joined, "--mcp-config /tmp/mcp-A1.json") || !strings.Contains(joined, "--strict-mcp-config") {
-		t.Errorf("expected MCP config file args: %q", joined)
+	// MCP wiring: the inline config (url + Authorization token), strict-only, and
+	// the send tools permitted under dontAsk.
+	if !strings.Contains(joined, "--mcp-config ") || !strings.Contains(joined, "--strict-mcp-config") {
+		t.Errorf("expected MCP config args: %q", joined)
+	}
+	if !strings.Contains(joined, `"url":"http://127.0.0.1:9/mcp"`) || !strings.Contains(joined, "Bearer tok9") {
+		t.Errorf("MCP config should carry url + token: %q", joined)
 	}
 	if !strings.Contains(joined, "--allowedTools mcp__tg__send_message,mcp__tg__send_code,mcp__tg__send_document") {
 		t.Errorf("expected --allowedTools with the send tools: %q", joined)
