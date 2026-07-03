@@ -42,7 +42,7 @@ project   = "~/code/myproject"  # the codebase consulted on (read-only under qa)
 # claude_args = ["--model", "opus", "--effort", "high"]  # extra raw `claude -p` flags (ak-tgclaude-owned flags rejected)
 # allow_silent = false          # true DISABLES the delivery guard (below); default false = guard on
 # undelivered_text = "Sorry, I could not answer that."  # fallback reply if the guard's re-prompt still sent nothing
-# upload_command = "~/.config/wschat/share-upload.sh"  # large-file fallback: docs over ~40 MB uploaded and sent as a link (below)
+# upload_command = "~/uploaders/rsync-upload.sh"  # large-file fallback: docs over ~40 MB uploaded and sent as a link (below; see examples/)
 # tools = ["Agent", "WebFetch(domain:*.github.com)"]  # grant EXTRA tools: bare name→frontmatter, full spec→--allowedTools; sharp knob — see below
 # runtime_base = ""             # base for the ephemeral cwd (default: $XDG_RUNTIME_DIR)
 # state_dir    = ""             # durable state (default: $XDG_STATE_HOME/ak-tgclaude)
@@ -686,12 +686,15 @@ command is operator trust. Contract: invoked as argv `[command, <file>, <name>]`
 `<file>` is the local path and `<name>` is a **collision-free basename** (a random
 prefix + the original name, e.g. `a3f9c2e1-dist.tar.gz`) a smart uploader uses as
 its destination so two same-named files don't clobber each other on the share host
-(a simple one ignores arg2); it prints the public URL on stdout (first non-blank
-line) and exits 0, or exits non-zero with a message on stderr (surfaced to the
-model). `upload_max_mb` is the ceiling advertised to the responder in the tg-emit
-skill; enforcement sits 10% above it, so a file a touch over still uploads while a
-genuinely oversized one is rejected with a clear error. Off by default (no
-`upload_command`) — big documents then just hit Telegram's limit.
+(an uploader that doesn't need it may ignore arg2, as long as it does not *reject* a
+second argument); it prints the public URL on stdout (first non-blank line) and
+exits 0, or exits non-zero with a message on stderr (surfaced to the model). The
+name preserves the original filename, so it may contain non-ASCII (e.g. Cyrillic) —
+a uploader that builds a URL should percent-encode it. `upload_max_mb` is the
+ceiling advertised to the responder in the tg-emit skill; enforcement sits 10% above
+it, so a file a touch over still uploads while a genuinely oversized one is rejected
+with a clear error. Off by default (no `upload_command`) — big documents then just
+hit Telegram's limit. See [`examples/`](examples/) for a ready rsync uploader.
 
 Availability vs permission are two gates: the tools must appear in the responder
 agent's `tools:` frontmatter (availability — an agent `tools:` allowlist filters

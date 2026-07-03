@@ -260,7 +260,11 @@ type Config struct {
 	// <file> is the local path to upload, <name> is a collision-free basename (a
 	// random prefix + the original name, e.g. a3f9c2-dist.tar.gz) the uploader MAY
 	// use as the destination name so concurrent same-named files don't clobber each
-	// other on the share host; a simple uploader can ignore arg2. The command must
+	// other on the share host. An uploader that doesn't need it can ignore arg2 as
+	// long as it does not REJECT a second argument (a strict one-arg script must be
+	// relaxed). The name preserves the original filename, so it may hold non-ASCII
+	// (e.g. Cyrillic); an uploader that builds a URL should percent-encode it (see
+	// examples/rsync-upload.sh). The command must
 	// print the file's public URL on stdout (first non-blank line) and exit 0, or
 	// exit non-zero with a message on stderr. When set, a document larger than
 	// UploadThresholdMB is uploaded via this command (run UNSANDBOXED by the

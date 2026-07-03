@@ -171,10 +171,13 @@ project = "~/code/example-project"
 # as argv [command, <file>, <name>] — <file> is the local path, <name> is a
 # collision-free basename (random prefix + original name, e.g. a3f9c2e1-dist.tar.gz)
 # the uploader MAY use as its destination so two same-named files don't clobber each
-# other on the share host (a simple uploader can ignore arg2). It must print the
-# public URL on stdout (first non-blank line) and exit 0, or exit non-zero with a
-# message on stderr. Empty (default) => off; big documents then hit Telegram's limit.
-# upload_command = "~/.config/wschat/share-upload.sh"
+# other on the share host (an uploader that doesn't need arg2 may ignore it, but must
+# not REJECT a second argument). The name keeps the original filename, so it may hold
+# non-ASCII (e.g. Cyrillic) — an uploader building a URL should percent-encode it. It
+# must print the public URL on stdout (first non-blank line) and exit 0, or exit
+# non-zero with a message on stderr. See examples/rsync-upload.sh for a ready one.
+# Empty (default) => off; big documents then hit Telegram's limit.
+# upload_command = "~/uploaders/rsync-upload.sh"
 #
 # Size (MB) above which a document is uploaded rather than attached. Default 40
 # (headroom under Telegram's ~50 MB). Ignored without upload_command.
