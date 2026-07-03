@@ -1,6 +1,7 @@
 package main
 
 import (
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -167,4 +168,23 @@ func TestUnderAny(t *testing.T) {
 	if _, ok := underAny(abs, []string{filepath.Dir(filepath.Dir(abs))}); !ok {
 		t.Errorf("abs/clean matching failed")
 	}
+}
+
+func TestAppendHookLog(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "pretooluse.log")
+	appendHookLog(p, "first")
+	appendHookLog(p, "second")
+	b, err := os.ReadFile(p)
+	if err != nil {
+		t.Fatalf("log file not written: %v", err)
+	}
+	s := string(b)
+	if !strings.Contains(s, "first") || !strings.Contains(s, "second") {
+		t.Errorf("both entries should be appended: %q", s)
+	}
+	if n := strings.Count(s, "\n"); n != 2 {
+		t.Errorf("expected two log lines, got %d: %q", n, s)
+	}
+	// A bad path must be swallowed — diagnostic logging never breaks the gate.
+	appendHookLog(filepath.Join(t.TempDir(), "no-such-dir", "x.log"), "ignored")
 }

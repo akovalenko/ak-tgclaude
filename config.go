@@ -648,6 +648,16 @@ func defaultStateDir() string {
 	return ".ak-tgclaude-state"
 }
 
+// hookLogFile is where the PreToolUse hook appends its per-call log when --debug is
+// on, else "" (off). It lives under StateDir (durable, dispatcher-owned) because
+// Claude Code does not surface a hook's stderr to the dispatcher log.
+func (c *Config) hookLogFile() string {
+	if !c.Debug {
+		return ""
+	}
+	return filepath.Join(c.StateDir, "pretooluse.log")
+}
+
 // pathGlobMeta are the fnmatch/gitignore glob metacharacters (plus the `\`
 // escape) that must not appear literally in a configured path: the sandbox
 // filesystem rules (denyRead/allowWrite/credentials) glob-match, so a literal

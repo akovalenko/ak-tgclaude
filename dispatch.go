@@ -528,6 +528,7 @@ func runDispatch(args []string) {
 			DenyEnvVars: cfg.DenyEnvs,
 			HookBinary:  selfExePath(),
 			BangBug:     cfg.BangBug,
+			HookLogFile: cfg.hookLogFile(),
 		}); err != nil {
 			fmt.Fprintf(os.Stderr, "ak-tgclaude: dispatch: %v\n", err)
 			os.Exit(1)

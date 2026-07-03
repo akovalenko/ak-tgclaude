@@ -107,6 +107,7 @@ type scaffoldParams struct {
 	DenyRead       []string // operator paths denied at BOTH layers (Read-tool hook + sandbox Bash)
 	Tools          []string // EXTRA tools granted to the responder (into tools: frontmatter AND --allowedTools)
 	BangBug        bool     // pass --bang-bug to the hook (deny sandboxed Bash with the corrupted `\!`)
+	HookLogFile    string   // pass --log-file to the hook (append every PreToolUse call here; "" => off; set under --debug)
 }
 
 // defaultDenyEnvVars are the ambient secrets scrubbed from the responder's
@@ -270,6 +271,9 @@ func buildSettings(p scaffoldParams) *claudeSettings {
 	}
 	if p.BangBug {
 		hookCmd += " --bang-bug"
+	}
+	if p.HookLogFile != "" {
+		hookCmd += " --log-file " + shellQuote(p.HookLogFile)
 	}
 	s.Hooks = &hooksCfg{PreToolUse: []hookMatcher{{
 		Matcher: "*",
@@ -760,6 +764,7 @@ func runScaffold(args []string) {
 		DenyEnvVars: cfg.DenyEnvs,
 		HookBinary:  selfExePath(),
 		BangBug:     cfg.BangBug,
+		HookLogFile: cfg.hookLogFile(),
 	}); err != nil {
 		fmt.Fprintf(os.Stderr, "ak-tgclaude: scaffold: %v\n", err)
 		os.Exit(1)

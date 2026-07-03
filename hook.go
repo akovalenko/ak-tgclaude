@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -85,12 +87,21 @@ func runHookPreToolUse(args []string) {
 	var deny multiFlag
 	fs.Var(&deny, "deny-read", "path the responder must not read (repeatable)")
 	bangBug := fs.Bool("bang-bug", false, `deny sandboxed Bash whose command contains \! (bug #64301: the sandbox corrupts the bang char)`)
+	logFile := fs.String("log-file", "", "append every PreToolUse call (tool, decision, full input) to this file")
+
 	if err := fs.Parse(args); err != nil {
 		os.Exit(2)
 	}
 
+	// Read the whole input so it can be both decoded AND logged raw (the typed
+	// struct drops fields — e.g. WebFetch's url — that are useful for designing gates).
+	raw, err := io.ReadAll(os.Stdin)
+	if err != nil {
+		emitDecision("deny", "ak-tgclaude hook: could not read PreToolUse input")
+		return
+	}
 	var in preToolUseInput
-	if err := json.NewDecoder(os.Stdin).Decode(&in); err != nil {
+	if err := json.Unmarshal(raw, &in); err != nil {
 		// Fail safe: on unparseable input, deny rather than let a tool through.
 		emitDecision("deny", "ak-tgclaude hook: could not parse PreToolUse input")
 		return
@@ -98,12 +109,39 @@ func runHookPreToolUse(args []string) {
 
 	pol := envFilePolicy(deny)
 	pol.bangBug = *bangBug
-	switch decision, reason := decidePreToolUse(&in, pol); decision {
+	decision, reason := decidePreToolUse(&in, pol)
+	if *logFile != "" {
+		verdict := decision
+		if verdict == "" {
+			verdict = "defer"
+		}
+		// Full input, no length cap (the tail — e.g. a WebFetch url — is the point);
+		// newlines flattened so each call is one line. File, not stderr: Claude Code
+		// does not surface a hook's stderr to the dispatcher log even under --debug
+		// (verified 2026-07-03).
+		line := fmt.Sprintf("%s -> %s (%s) input=%s", in.ToolName, verdict, reason, strings.ReplaceAll(string(raw), "\n", " "))
+		appendHookLog(*logFile, line)
+	}
+	switch decision {
 	case "":
 		os.Exit(0) // defer: no output => normal permission/sandbox flow applies
 	default:
 		emitDecision(decision, reason)
 	}
+}
+
+// appendHookLog appends one timestamped line to path (created if missing). Claude
+// Code does NOT surface a hook's stderr to the dispatcher log, so a file is how
+// PreToolUse calls are observed. Best-effort: an open error is swallowed —
+// diagnostic logging must never break the gate. Concurrent hooks are safe: an
+// O_APPEND write this short is atomic on POSIX.
+func appendHookLog(path, line string) {
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
+	if err != nil {
+		return
+	}
+	log.New(f, "", log.LstdFlags).Println(line)
+	_ = f.Close() // unbuffered *os.File — Println already wrote; close error is moot
 }
 
 // decidePreToolUse returns "deny", "allow", or "" (defer).
