@@ -325,6 +325,9 @@ func (m *mcpServer) initializeResult(params json.RawMessage) map[string]any {
 func toolsListResult() map[string]any {
 	strProp := func(desc string) map[string]any { return map[string]any{"type": "string", "description": desc} }
 	boolProp := func(desc string) map[string]any { return map[string]any{"type": "boolean", "description": desc} }
+	// progressProp is shared by all send tools: an "along the way" note that is
+	// delivered but does not count as the answer for the delivery guard.
+	progressProp := boolProp("Mark this as an along-the-way progress note (not your answer): it is delivered, but does NOT count as your reply for the delivery check. Default false.")
 	return map[string]any{"tools": []map[string]any{
 		{
 			"name":        toolSendMessage,
@@ -332,9 +335,10 @@ func toolsListResult() map[string]any {
 			"inputSchema": map[string]any{
 				"type": "object",
 				"properties": map[string]any{
-					"text":   strProp("The message text."),
-					"html":   boolProp("Render as Telegram HTML (parse_mode=HTML); supply valid, escaped HTML. Default false (plain text)."),
-					"silent": boolProp("Deliver without a notification. Default false."),
+					"text":     strProp("The message text."),
+					"html":     boolProp("Render as Telegram HTML (parse_mode=HTML); supply valid, escaped HTML. Default false (plain text)."),
+					"silent":   boolProp("Deliver without a notification. Default false."),
+					"progress": progressProp,
 				},
 				"required": []string{"text"},
 			},
@@ -349,6 +353,7 @@ func toolsListResult() map[string]any {
 					"language": strProp("Optional source language tag (e.g. go, python)."),
 					"caption":  strProp("Optional line shown before the block."),
 					"silent":   boolProp("Deliver without a notification. Default false."),
+					"progress": progressProp,
 				},
 				"required": []string{"code"},
 			},
@@ -363,6 +368,7 @@ func toolsListResult() map[string]any {
 					"filename": strProp("Optional display name (default: the file's base name)."),
 					"caption":  strProp("Optional caption."),
 					"silent":   boolProp("Deliver without a notification. Default false."),
+					"progress": progressProp,
 				},
 				"required": []string{"path"},
 			},
@@ -394,8 +400,13 @@ func (m *mcpServer) callTool(ctx context.Context, tok string, rt mcpRoute, param
 		log.Printf("ak-tgclaude: mcp: tools/call %s chat=%d: telegram error: %v", call.Name, rt.route.ChatID, err)
 		return toolError("Telegram rejected the message: " + deliveryError(err))
 	}
-	m.recordDelivered(tok)
-	log.Printf("ak-tgclaude: mcp: tools/call %s chat=%d -> message_id=%d", call.Name, rt.route.ChatID, id)
+	// A progress note is delivered but does NOT count as the answer: the delivery
+	// guard keys on real sends, so a pre-reporting responder can narrate without
+	// blinding the "answer never got sent" check.
+	if !d.Progress {
+		m.recordDelivered(tok)
+	}
+	log.Printf("ak-tgclaude: mcp: tools/call %s chat=%d -> message_id=%d progress=%t", call.Name, rt.route.ChatID, id, d.Progress)
 	return toolText(fmt.Sprintf("delivered (message_id %d)", id))
 }
 
@@ -406,14 +417,15 @@ func descriptorFromCall(name string, args json.RawMessage, docDir string) (*Desc
 	switch name {
 	case toolSendMessage:
 		var a struct {
-			Text   string `json:"text"`
-			HTML   bool   `json:"html"`
-			Silent bool   `json:"silent"`
+			Text     string `json:"text"`
+			HTML     bool   `json:"html"`
+			Silent   bool   `json:"silent"`
+			Progress bool   `json:"progress"`
 		}
 		if err := json.Unmarshal(args, &a); err != nil {
 			return nil, fmt.Errorf("invalid %s arguments: %w", name, err)
 		}
-		d := &Descriptor{Kind: KindText, Text: a.Text, Silent: a.Silent}
+		d := &Descriptor{Kind: KindText, Text: a.Text, Silent: a.Silent, Progress: a.Progress}
 		if a.HTML {
 			d.Format = FormatHTML
 		}
@@ -424,11 +436,12 @@ func descriptorFromCall(name string, args json.RawMessage, docDir string) (*Desc
 			Language string `json:"language"`
 			Caption  string `json:"caption"`
 			Silent   bool   `json:"silent"`
+			Progress bool   `json:"progress"`
 		}
 		if err := json.Unmarshal(args, &a); err != nil {
 			return nil, fmt.Errorf("invalid %s arguments: %w", name, err)
 		}
-		d := &Descriptor{Kind: KindCode, Code: a.Code, Language: a.Language, Caption: a.Caption, Silent: a.Silent}
+		d := &Descriptor{Kind: KindCode, Code: a.Code, Language: a.Language, Caption: a.Caption, Silent: a.Silent, Progress: a.Progress}
 		return d, d.validate()
 	case toolSendDocument:
 		var a struct {
@@ -436,6 +449,7 @@ func descriptorFromCall(name string, args json.RawMessage, docDir string) (*Desc
 			Filename string `json:"filename"`
 			Caption  string `json:"caption"`
 			Silent   bool   `json:"silent"`
+			Progress bool   `json:"progress"`
 		}
 		if err := json.Unmarshal(args, &a); err != nil {
 			return nil, fmt.Errorf("invalid %s arguments: %w", name, err)
@@ -444,7 +458,7 @@ func descriptorFromCall(name string, args json.RawMessage, docDir string) (*Desc
 		if err != nil {
 			return nil, err
 		}
-		d := &Descriptor{Kind: KindDocument, Path: full, Filename: a.Filename, Caption: a.Caption, Silent: a.Silent}
+		d := &Descriptor{Kind: KindDocument, Path: full, Filename: a.Filename, Caption: a.Caption, Silent: a.Silent, Progress: a.Progress}
 		return d, d.validate()
 	default:
 		return nil, fmt.Errorf("unknown tool %q", name)

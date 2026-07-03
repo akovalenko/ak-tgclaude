@@ -100,7 +100,10 @@ ak-tgclaude dispatch --bot-token 123:ABC --profile qa --project ~/code/myproject
   **zero** messages and **re-prompts the same session once** to actually send; if it
   still sends nothing and `undelivered_text` is set, that fixed line goes out as a
   last resort (empty ⇒ the guard only re-prompts and logs). Set `allow_silent = true`
-  (or `--allow-silent`) only if a no-send turn is legitimate for your bot.
+  (or `--allow-silent`) only if a no-send turn is legitimate for your bot. **Progress
+  notes don't count:** a send tagged `progress: true` (an "along the way" status line)
+  is delivered but excluded from the tally, so a responder that narrates slow work
+  before answering doesn't blind the guard — only a real (untagged) send clears it.
 - **Extra tools (`tools`, repeatable `--tool`).** Grant the responder additional
   tools, adding each name to BOTH the agent's `tools:` frontmatter (availability)
   and `--allowedTools` (permission) in one move — the two must change together, so

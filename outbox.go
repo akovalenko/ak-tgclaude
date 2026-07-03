@@ -49,6 +49,12 @@ type Descriptor struct {
 
 	// Silent maps to Telegram's disable_notification.
 	Silent bool
+
+	// Progress marks an "along the way" message (a status/progress note, not the
+	// answer). It is delivered normally but does NOT count toward the delivery guard's
+	// send tally — so a pre-reporting responder can narrate its work without blinding
+	// the "answer never got sent" check (which keys on zero real sends).
+	Progress bool
 }
 
 // validate checks that the descriptor's kind-specific fields are populated.

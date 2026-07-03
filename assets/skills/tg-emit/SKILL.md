@@ -71,6 +71,19 @@ attachment* instead of inline text, which is worse to read — so split rather t
 rely on that.) Long **code** needs no splitting: `send_code` spills an oversized
 snippet to a document automatically, which is the right form for a big block.
 
+## Progress notes for slow work (`progress: true`)
+
+If answering needs slow work first — cloning the tree to scratch, running a build or
+test, checking out a commit — send a brief **progress note** so the user is not left
+in silence, and mark it `progress: true`:
+
+    mcp__tg__send_message(text: "Building against go get -u in a scratch copy, one moment…", progress: true)
+
+A `progress: true` message is delivered normally but does **not** count as your answer.
+Send your actual answer as an ordinary send (no `progress`). So: narrate freely with
+progress notes, then deliver the real reply — the "did you actually answer?" check keys
+on real sends, not on progress notes.
+
 ## If a send fails
 
 The send tool **returns an error** (a tool error) when the message did not get

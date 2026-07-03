@@ -124,6 +124,39 @@ func TestMCPDeliveredCount(t *testing.T) {
 	}
 }
 
+func TestMCPDeliveredCountSkipsProgress(t *testing.T) {
+	f := &fakeSender{}
+	m := newTestMCP(t, f)
+	tok, err := m.Register(Route{ChatID: 5}, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A progress note is delivered but must NOT count toward the delivery tally.
+	resp := postRPC(t, m.URL(), tok, map[string]any{
+		"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+		"params": map[string]any{
+			"name":      toolSendMessage,
+			"arguments": map[string]any{"text": "working...", "progress": true},
+		},
+	})
+	if isToolError(resp) {
+		t.Fatalf("progress send failed: %v", resp)
+	}
+	if len(f.snapshot()) != 1 {
+		t.Fatalf("progress note should still be delivered, got %d messages", len(f.snapshot()))
+	}
+	if n := m.DeliveredCount(tok); n != 0 {
+		t.Fatalf("progress send must NOT count: delivered=%d, want 0", n)
+	}
+	// A normal send counts.
+	if resp := callSendMessage(t, m, tok, "the answer", false); isToolError(resp) {
+		t.Fatalf("send failed: %v", resp)
+	}
+	if n := m.DeliveredCount(tok); n != 1 {
+		t.Fatalf("normal send after a progress note should count: delivered=%d, want 1", n)
+	}
+}
+
 func TestMCPDeliveredCountIgnoresFailedSend(t *testing.T) {
 	// A send Telegram rejects must NOT count as delivered — else the guard would
 	// think a dropped answer was delivered and never re-prompt.
