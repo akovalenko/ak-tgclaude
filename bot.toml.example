@@ -162,3 +162,26 @@ project = "~/code/example-project"
 # Durable dispatcher state (chat->session and message->session maps), which must
 # survive restarts. Default: $XDG_STATE_HOME/ak-tgclaude (~/.local/state/ak-tgclaude).
 # state_dir = ""
+
+# --- large-file fallback for send_document (optional) ---
+# Telegram's bot API caps an attachment near 50 MB. Point upload_command at an
+# UPLOADER script and any document over upload_threshold_mb is uploaded instead
+# and delivered to the chat as a link. The dispatcher runs it UNSANDBOXED (it needs
+# the network); the responder just calls send_document as usual. Contract: invoked
+# as argv [command, <file>, <name>] — <file> is the local path, <name> is a
+# collision-free basename (random prefix + original name, e.g. a3f9c2e1-dist.tar.gz)
+# the uploader MAY use as its destination so two same-named files don't clobber each
+# other on the share host (a simple uploader can ignore arg2). It must print the
+# public URL on stdout (first non-blank line) and exit 0, or exit non-zero with a
+# message on stderr. Empty (default) => off; big documents then hit Telegram's limit.
+# upload_command = "~/.config/wschat/share-upload.sh"
+#
+# Size (MB) above which a document is uploaded rather than attached. Default 40
+# (headroom under Telegram's ~50 MB). Ignored without upload_command.
+# upload_threshold_mb = 40
+#
+# Advertised max (MB) surfaced to the responder ("you can send files up to N MB").
+# Enforcement sits 10% above it, so a file a touch over still uploads; anything
+# larger is rejected with a clear "too large even for the cloud" error. 0 (default)
+# => no advertised number and no hard cap (only the threshold routing applies).
+# upload_max_mb = 300

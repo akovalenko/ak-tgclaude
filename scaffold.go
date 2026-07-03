@@ -99,6 +99,7 @@ type scaffoldParams struct {
 	HookBinary     string   // default "ak-tgclaude"
 	DenyEnvVars    []string // secrets to unset in the sandbox
 	NetworkDomains []string // EXTRA egress domains (allow_domains), added to the always-present Go-build defaults
+	UploadNote     string   // tg-emit {{UPLOAD_NOTE}} capability paragraph; empty => the large-file fallback is off
 	Policy         []string // persona fragment(s) merged into the agent (built-in names and/or custom .md paths; empty => normal)
 	Project        string   // knowledge root; substituted for {{PROJECT}} in agent/skill templates
 	WireSkills     []string // operator skill template DIRECTORIES to materialize + preload
@@ -364,7 +365,7 @@ func materializeScaffold(cwd string, p scaffoldParams) error {
 	if err := os.WriteFile(path, b, 0o600); err != nil {
 		return fmt.Errorf("writing %s: %w", path, err)
 	}
-	if err := materializeSkills(claudeDir, p.Project); err != nil {
+	if err := materializeSkills(claudeDir, p.Project, p.UploadNote); err != nil {
 		return err
 	}
 	// Wire operator skill templates into the scaffold (materialized + {{PROJECT}}
@@ -416,6 +417,35 @@ func injectMCPTools(data []byte, tools []string) []byte {
 	return []byte(strings.ReplaceAll(string(data), mcpToolsPlaceholder, clause))
 }
 
+// uploadNotePlaceholder is replaced in the tg-emit skill with the large-file
+// capability paragraph (uploadNote) when the fallback is configured, and with
+// nothing when it is off — so the shipped skill stays generic and the operator's
+// threshold/max numbers live in exactly one place (config).
+const uploadNotePlaceholder = "{{UPLOAD_NOTE}}"
+
+// injectUploadNote replaces the {{UPLOAD_NOTE}} marker with note (which carries its
+// own trailing blank line when present). Data without the marker is unchanged.
+func injectUploadNote(data []byte, note string) []byte {
+	return []byte(strings.ReplaceAll(string(data), uploadNotePlaceholder, note))
+}
+
+// uploadNote is the tg-emit capability paragraph for the large-file fallback, or ""
+// when it is off (no command) — the marker then vanishes. It carries its own
+// trailing blank line so it sits cleanly between sections. The threshold/max come
+// from config, keeping the numbers out of the shipped skill.
+func uploadNote(command string, thresholdMB, maxMB int) string {
+	if command == "" {
+		return ""
+	}
+	note := fmt.Sprintf("**Large files.** A file over ~%d MB can't go out as a Telegram attachment directly, "+
+		"but this bot handles it: write the file to your outbox and call `mcp__tg__send_document` as usual — "+
+		"anything over that limit is uploaded to cloud storage and delivered to the chat as a link.", thresholdMB)
+	if maxMB > 0 {
+		note += fmt.Sprintf(" You can send files up to ~%d MB this way; a file larger than that is rejected with an error.", maxMB)
+	}
+	return note + "\n\n"
+}
+
 // materializeFile writes data to dst (creating parent dirs) with mode,
 // substituting the project placeholder. It is the single copy path for every
 // agent/skill file, embedded or wired. An empty project leaves the placeholder
@@ -448,8 +478,10 @@ func scaffoldFileMode(src os.FileMode) os.FileMode {
 	return 0o600
 }
 
-// materializeSkills copies the embedded skills tree into <cwd>/.claude/skills.
-func materializeSkills(claudeDir, project string) error {
+// materializeSkills copies the embedded skills tree into <cwd>/.claude/skills,
+// substituting the {{UPLOAD_NOTE}} marker (in tg-emit) with the large-file
+// capability paragraph — empty when the fallback is off, so the marker vanishes.
+func materializeSkills(claudeDir, project, uploadNote string) error {
 	return fs.WalkDir(scaffoldAssets, "assets/skills", func(p string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
@@ -466,6 +498,7 @@ func materializeSkills(claudeDir, project string) error {
 		if err != nil {
 			return err
 		}
+		data = injectUploadNote(data, uploadNote)
 		// Embedded files carry no exec bit (embed.FS is always 0444), so 0o600.
 		return materializeFile(dst, data, project, 0o600)
 	})
@@ -803,6 +836,7 @@ func runScaffold(args []string) {
 		Tools:          cfg.Tools,
 		DenyEnvVars:    cfg.DenyEnvs,
 		NetworkDomains: cfg.AllowDomains,
+		UploadNote:     uploadNote(cfg.UploadCommand, cfg.UploadThresholdMB, cfg.UploadMaxMB),
 		HookBinary:     selfExePath(),
 		BangBug:        cfg.BangBug,
 		HookLogFile:    cfg.hookLogFile(),

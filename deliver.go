@@ -10,9 +10,16 @@ import (
 // spilling an oversized text/code message to a document. It is the shared
 // delivery core: the MCP tool handler builds a Descriptor from the tool call and
 // calls this to deliver synchronously, returning the Telegram message_id (or the
-// send error, which the handler surfaces to the model as a tool error).
-func sendDescriptor(ctx context.Context, d *Descriptor, r Route, s Sender) (int64, error) {
+// send error, which the handler surfaces to the model as a tool error). When up is
+// non-nil and a document exceeds its threshold, the file is uploaded and delivered
+// as a URL instead of a Telegram attachment (which caps near 50 MB).
+func sendDescriptor(ctx context.Context, d *Descriptor, r Route, s Sender, up *uploader) (int64, error) {
 	if d.Kind == KindDocument {
+		if up != nil {
+			if info, err := os.Stat(d.Path); err == nil && info.Size() > up.thresholdBytes {
+				return up.deliver(ctx, d, r, s, info.Size())
+			}
+		}
 		return s.SendDocument(ctx, r, d.Path, d.Filename, d.Caption, "", d.Silent)
 	}
 	text, mode := renderMessage(d)

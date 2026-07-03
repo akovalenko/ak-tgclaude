@@ -14,7 +14,7 @@ import (
 
 func newTestMCP(t *testing.T, sender Sender) *mcpServer {
 	t.Helper()
-	m, err := newMCPServer(sender, "test", false)
+	m, err := newMCPServer(sender, "test", false, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

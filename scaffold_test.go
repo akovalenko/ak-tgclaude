@@ -187,6 +187,66 @@ func TestBuildSettingsAllowDomainsDefaultsWhenEmpty(t *testing.T) {
 	}
 }
 
+func TestUploadNote(t *testing.T) {
+	// Off (no command) => empty, so the {{UPLOAD_NOTE}} marker vanishes.
+	if got := uploadNote("", 40, 300); got != "" {
+		t.Errorf("no command => empty note, got %q", got)
+	}
+	// On with an advertised max => both numbers appear and the ceiling is stated.
+	on := uploadNote("cmd", 40, 300)
+	if !strings.Contains(on, "~40 MB") || !strings.Contains(on, "~300 MB") {
+		t.Errorf("note missing threshold/max: %q", on)
+	}
+	if !strings.HasSuffix(on, "\n\n") {
+		t.Errorf("note must carry its own trailing blank line: %q", on)
+	}
+	// On without a max => the threshold line, but no advertised ceiling.
+	noMax := uploadNote("cmd", 40, 0)
+	if !strings.Contains(noMax, "~40 MB") || strings.Contains(noMax, "up to") {
+		t.Errorf("no-max note wrong: %q", noMax)
+	}
+}
+
+func TestInjectUploadNote(t *testing.T) {
+	in := []byte("done.\n\n{{UPLOAD_NOTE}}## Next")
+	if got := string(injectUploadNote(in, "")); got != "done.\n\n## Next" {
+		t.Errorf("off: %q", got)
+	}
+	if got := string(injectUploadNote(in, "NOTE\n\n")); got != "done.\n\nNOTE\n\n## Next" {
+		t.Errorf("on: %q", got)
+	}
+}
+
+func TestMaterializeScaffoldUploadNote(t *testing.T) {
+	skillPath := func(cwd string) string {
+		return filepath.Join(cwd, ".claude", "skills", "tg-emit", "SKILL.md")
+	}
+	// On: the note lands in tg-emit and the marker is gone.
+	on := t.TempDir()
+	if err := materializeScaffold(on, scaffoldParams{CacheDir: "/c", UploadNote: uploadNote("cmd", 40, 300)}); err != nil {
+		t.Fatal(err)
+	}
+	b, err := os.ReadFile(skillPath(on))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s := string(b); strings.Contains(s, "{{UPLOAD_NOTE}}") || !strings.Contains(s, "~300 MB") {
+		t.Errorf("note not injected / marker left: has-marker=%t has-note=%t", strings.Contains(s, "{{UPLOAD_NOTE}}"), strings.Contains(s, "~300 MB"))
+	}
+	// Off: marker vanishes, no note text.
+	off := t.TempDir()
+	if err := materializeScaffold(off, scaffoldParams{CacheDir: "/c"}); err != nil {
+		t.Fatal(err)
+	}
+	b2, err := os.ReadFile(skillPath(off))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s := string(b2); strings.Contains(s, "{{UPLOAD_NOTE}}") || strings.Contains(s, "Large files") {
+		t.Errorf("off: marker or note should be absent")
+	}
+}
+
 func TestBuildSettingsNoTokenFile(t *testing.T) {
 	s := buildSettings(scaffoldParams{CacheDir: "/c"})
 	// Even without a bot token, the host secrets are always denied; only the bot

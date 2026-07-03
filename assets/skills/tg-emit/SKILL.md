@@ -56,7 +56,7 @@ task — the only directory you can write to), then pass its path to
 
 Only files in your outbox can be attached; a path elsewhere is rejected.
 
-## Authoring / scratch files
+{{UPLOAD_NOTE}}## Authoring / scratch files
 
 For non-trivial work — drafting a document, preparing an attachment — you can
 **write, read, and edit** files in your **outbox** directory. A normal cycle is

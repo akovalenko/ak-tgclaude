@@ -65,7 +65,7 @@ func newTestDispatcher(t *testing.T, resp Responder, sender Sender) *Dispatcher 
 	if err != nil {
 		t.Fatal(err)
 	}
-	mcp, err := newMCPServer(sender, "test", false)
+	mcp, err := newMCPServer(sender, "test", false, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

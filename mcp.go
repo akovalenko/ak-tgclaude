@@ -6,6 +6,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -68,23 +69,25 @@ type mcpRoute struct {
 // per-invocation outbox dir was in the spool design). Claude Code attaches the
 // header under the hood, so the token never enters the model's context.
 type mcpServer struct {
-	sender  Sender
-	version string
-	debug   bool // log the handshake chatter (every request, initialize, tools/list)
-	ln      net.Listener
-	srv     *http.Server
+	sender   Sender
+	uploader *uploader // large-file fallback for send_document; nil = off
+	version  string
+	debug    bool // log the handshake chatter (every request, initialize, tools/list)
+	ln       net.Listener
+	srv      *http.Server
 
 	mu     sync.Mutex
 	routes map[string]mcpRoute
 }
 
-// newMCPServer binds a localhost listener and starts serving JSON-RPC at /mcp.
-func newMCPServer(sender Sender, version string, debug bool) (*mcpServer, error) {
+// newMCPServer binds a localhost listener and starts serving JSON-RPC at /mcp. up
+// is the optional large-file uploader (nil = the send_document fallback is off).
+func newMCPServer(sender Sender, version string, debug bool, up *uploader) (*mcpServer, error) {
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		return nil, fmt.Errorf("mcp: listen: %w", err)
 	}
-	m := &mcpServer{sender: sender, version: version, debug: debug, ln: ln, routes: make(map[string]mcpRoute)}
+	m := &mcpServer{sender: sender, uploader: up, version: version, debug: debug, ln: ln, routes: make(map[string]mcpRoute)}
 	// Catch-all (not just "/mcp") so EVERY request is logged in handle, including
 	// one to a wrong path — which the mux would otherwise answer 404 without
 	// logging, hiding a client that dials the wrong URL.
@@ -395,8 +398,16 @@ func (m *mcpServer) callTool(ctx context.Context, tok string, rt mcpRoute, param
 		log.Printf("ak-tgclaude: mcp: tools/call %s chat=%d: rejected: %v", call.Name, rt.route.ChatID, err)
 		return toolError(err.Error())
 	}
-	id, err := sendDescriptor(ctx, d, rt.route, m.sender)
+	id, err := sendDescriptor(ctx, d, rt.route, m.sender, m.uploader)
 	if err != nil {
+		// An upload-path failure (too large, uploader crashed, no URL) is surfaced
+		// to the model verbatim; only a genuine Telegram API error gets the "Telegram
+		// rejected" framing.
+		var ue *uploadError
+		if errors.As(err, &ue) {
+			log.Printf("ak-tgclaude: mcp: tools/call %s chat=%d: upload error: %v", call.Name, rt.route.ChatID, err)
+			return toolError(ue.Error())
+		}
 		log.Printf("ak-tgclaude: mcp: tools/call %s chat=%d: telegram error: %v", call.Name, rt.route.ChatID, err)
 		return toolError("Telegram rejected the message: " + deliveryError(err))
 	}

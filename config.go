@@ -255,6 +255,35 @@ type Config struct {
 	// Repeatable via --allow-domain (additive with this list).
 	AllowDomains []string `toml:"allow_domains"`
 
+	// UploadCommand enables the large-file fallback for send_document. It is a path
+	// to an operator UPLOADER script invoked as argv [command, <file>, <name>]:
+	// <file> is the local path to upload, <name> is a collision-free basename (a
+	// random prefix + the original name, e.g. a3f9c2-dist.tar.gz) the uploader MAY
+	// use as the destination name so concurrent same-named files don't clobber each
+	// other on the share host; a simple uploader can ignore arg2. The command must
+	// print the file's public URL on stdout (first non-blank line) and exit 0, or
+	// exit non-zero with a message on stderr. When set, a document larger than
+	// UploadThresholdMB is uploaded via this command (run UNSANDBOXED by the
+	// dispatcher — it needs the network) and delivered to the chat as that URL
+	// instead of a Telegram attachment (which caps near 50 MB). Empty => off. The
+	// referenced file stays confined to the responder's outbox; the command is
+	// operator trust. Path (leading ~ expanded). Also --upload-command.
+	UploadCommand string `toml:"upload_command"`
+
+	// UploadThresholdMB is the size (MB) above which a document goes via UploadCommand
+	// instead of a direct Telegram attachment. Default 40 (headroom under Telegram's
+	// ~50 MB bot limit). Ignored when UploadCommand is empty. Also --upload-threshold-mb.
+	UploadThresholdMB int `toml:"upload_threshold_mb"`
+
+	// UploadMaxMB is the ADVERTISED ceiling (MB) surfaced to the responder in the
+	// tg-emit skill ("you can send files up to N MB"). Enforcement sits slightly
+	// above it — a file larger than UploadMaxMB + 10% headroom is rejected with a
+	// clear "too large even for the cloud" error rather than handed to the uploader,
+	// so a file a touch over the advertised number still goes through. 0 => no
+	// advertised number and no hard cap (only the threshold routing applies).
+	// Ignored when UploadCommand is empty. Also --upload-max-mb.
+	UploadMaxMB int `toml:"upload_max_mb"`
+
 	// HelpText is the reply to /help and /start. Empty => a generic built-in
 	// blurb (defaultHelpText). Keeps the dispatcher domain-blind: any
 	// project-specific help comes from config, not baked into the binary.
@@ -361,6 +390,9 @@ func parseConfig(args []string) (*Config, error) {
 	fs.Var(&denyEnvs, "deny-env", "environment-variable NAME to scrub from the responder's sandbox, on top of the ANTHROPIC defaults (repeatable; merged with deny_envs)")
 	var allowDomains stringList
 	fs.Var(&allowDomains, "allow-domain", "extra egress domain added to the responder's sandbox network allowlist, on top of the Go-build defaults (repeatable; merged with allow_domains; a leading *. matches subdomains only, not the apex)")
+	uploadCommand := fs.String("upload-command", "", "path to an uploader script (argv [cmd, file, name]; prints the URL on stdout + exit 0, else non-zero with stderr) — enables the large-file fallback: a document over --upload-threshold-mb is uploaded and delivered as a link")
+	uploadThresholdMB := fs.Int("upload-threshold-mb", 0, "size in MB above which a document is uploaded via --upload-command instead of sent as a Telegram attachment (default 40; ignored without --upload-command)")
+	uploadMaxMB := fs.Int("upload-max-mb", 0, "advertised max upload size in MB surfaced to the responder; a file over this +10% is rejected as too large (0 = no advertised number / no hard cap)")
 	open := fs.Bool("open", false, "OPEN ACCESS: allow every Telegram user (demo only; overrides the whitelist)")
 	if err := fs.Parse(args); err != nil {
 		return nil, err
@@ -463,6 +495,16 @@ func parseConfig(args []string) (*Config, error) {
 	if len(allowDomains) > 0 {
 		c.AllowDomains = append(c.AllowDomains, allowDomains...)
 	}
+	// The upload knobs are single-valued: a set flag overrides the file (0/"" = unset).
+	if *uploadCommand != "" {
+		c.UploadCommand = *uploadCommand
+	}
+	if *uploadThresholdMB != 0 {
+		c.UploadThresholdMB = *uploadThresholdMB
+	}
+	if *uploadMaxMB != 0 {
+		c.UploadMaxMB = *uploadMaxMB
+	}
 	if *open {
 		c.Open = true
 	}
@@ -477,6 +519,9 @@ func parseConfig(args []string) (*Config, error) {
 	c.StateDir = resolvePath(c.StateDir)
 	c.RuntimeBase = resolvePath(c.RuntimeBase)
 	c.ConfigPath = resolvePath(c.ConfigPath)
+	// UploadCommand is a path (exec'd by the dispatcher, not sandbox-glob-matched, so
+	// no validatePath); resolve ~ and make it absolute like every other path.
+	c.UploadCommand = resolvePath(c.UploadCommand)
 	for i := range c.WireSkills {
 		c.WireSkills[i] = resolvePath(c.WireSkills[i])
 	}
@@ -625,6 +670,11 @@ func (c *Config) applyDefaults() {
 	if c.StateDir == "" {
 		c.StateDir = defaultStateDir()
 	}
+	// Default the upload threshold only when the fallback is enabled — 40 MB leaves
+	// headroom under Telegram's ~50 MB bot-attachment limit.
+	if c.UploadCommand != "" && c.UploadThresholdMB == 0 {
+		c.UploadThresholdMB = 40
+	}
 	// RuntimeBase is resolved at cwd-materialization time (it depends on whether
 	// $XDG_RUNTIME_DIR exists when the dispatcher starts), so it stays empty here.
 }
@@ -673,6 +723,18 @@ func (c *Config) validate() error {
 	}
 	if c.Workdir != "" && c.RuntimeBase != "" {
 		return fmt.Errorf("runtime_base is meaningless with workdir: the responder cwd is the fixed $workdir/project, never ephemeral")
+	}
+	if c.UploadCommand != "" {
+		// Fail fast on a misconfigured uploader rather than at the first big file.
+		if _, err := os.Stat(c.UploadCommand); err != nil {
+			return fmt.Errorf("upload_command %s: %w", c.UploadCommand, err)
+		}
+		if c.UploadThresholdMB < 1 {
+			return fmt.Errorf("upload_threshold_mb must be >= 1, got %d", c.UploadThresholdMB)
+		}
+		if c.UploadMaxMB != 0 && c.UploadMaxMB < c.UploadThresholdMB {
+			return fmt.Errorf("upload_max_mb (%d) must be >= upload_threshold_mb (%d)", c.UploadMaxMB, c.UploadThresholdMB)
+		}
 	}
 	return nil
 }

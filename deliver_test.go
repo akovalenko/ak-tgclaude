@@ -16,7 +16,7 @@ func TestSendDescriptorRenders(t *testing.T) {
 		{Kind: KindCode, Code: "package main", Language: "go"},
 		{Kind: KindDocument, Path: "/abs/x.pdf", Filename: "x.pdf"},
 	} {
-		if _, err := sendDescriptor(context.Background(), d, route, f); err != nil {
+		if _, err := sendDescriptor(context.Background(), d, route, f, nil); err != nil {
 			t.Fatalf("sendDescriptor(%+v): %v", d, err)
 		}
 	}
@@ -44,10 +44,10 @@ func TestSendDescriptorRenders(t *testing.T) {
 func TestSendDescriptorSpillsOversized(t *testing.T) {
 	f := &fakeSender{}
 	big := strings.Repeat("x", telegramTextLimit+10)
-	if _, err := sendDescriptor(context.Background(), &Descriptor{Kind: KindCode, Code: big, Language: "go"}, Route{ChatID: 1}, f); err != nil {
+	if _, err := sendDescriptor(context.Background(), &Descriptor{Kind: KindCode, Code: big, Language: "go"}, Route{ChatID: 1}, f, nil); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := sendDescriptor(context.Background(), &Descriptor{Kind: KindText, Text: big}, Route{ChatID: 1}, f); err != nil {
+	if _, err := sendDescriptor(context.Background(), &Descriptor{Kind: KindText, Text: big}, Route{ChatID: 1}, f, nil); err != nil {
 		t.Fatal(err)
 	}
 	calls := f.snapshot()

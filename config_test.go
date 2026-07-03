@@ -143,6 +143,60 @@ func TestParseConfigAllowDomains(t *testing.T) {
 	}
 }
 
+func TestParseConfigUpload(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "bot.toml")
+	body := "upload_command = \"/opt/up.sh\"\nupload_threshold_mb = 30\nupload_max_mb = 250\n"
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// The upload knobs are single-valued: --upload-max-mb overrides the file's 250.
+	c, err := parseConfig([]string{"--config", path, "--upload-max-mb", "300"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.UploadCommand != "/opt/up.sh" {
+		t.Errorf("UploadCommand = %q", c.UploadCommand)
+	}
+	if c.UploadThresholdMB != 30 {
+		t.Errorf("UploadThresholdMB = %d, want 30", c.UploadThresholdMB)
+	}
+	if c.UploadMaxMB != 300 {
+		t.Errorf("UploadMaxMB = %d, want 300 (flag overrides file)", c.UploadMaxMB)
+	}
+}
+
+func TestParseConfigUploadDefaultThreshold(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "bot.toml")
+	if err := os.WriteFile(path, []byte("upload_command = \"/opt/up.sh\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	c, err := parseConfig([]string{"--config", path})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Threshold defaults to 40 only when the fallback is enabled.
+	if c.UploadThresholdMB != 40 {
+		t.Errorf("default threshold = %d, want 40", c.UploadThresholdMB)
+	}
+}
+
+func TestValidateUploadCommandMissing(t *testing.T) {
+	c := &Config{BotToken: "x", Profile: ProfileQA, Responder: ResponderClaude, Project: "/p",
+		MaxConcurrent: 1, OutboxTTL: "2h", UploadCommand: "/no/such/uploader", UploadThresholdMB: 40}
+	if err := c.validate(); err == nil || !strings.Contains(err.Error(), "upload_command") {
+		t.Fatalf("want upload_command existence error, got %v", err)
+	}
+}
+
+func TestValidateUploadMaxBelowThreshold(t *testing.T) {
+	script := writeScript(t, `echo x`) // exists, so the stat check passes
+	c := &Config{BotToken: "x", Profile: ProfileQA, Responder: ResponderClaude, Project: "/p",
+		MaxConcurrent: 1, OutboxTTL: "2h", UploadCommand: script, UploadThresholdMB: 40, UploadMaxMB: 30}
+	if err := c.validate(); err == nil || !strings.Contains(err.Error(), "upload_max_mb") {
+		t.Fatalf("want upload_max_mb < threshold error, got %v", err)
+	}
+}
+
 func TestParseConfigClaudeArgs(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "bot.toml")
 	if err := os.WriteFile(path, []byte("claude_args = [\"--model\", \"opus\"]\n"), 0o600); err != nil {

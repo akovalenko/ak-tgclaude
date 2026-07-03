@@ -491,8 +491,11 @@ func runDispatch(args []string) {
 	client := NewClient(cfg.BotToken)
 
 	// The outbound transport: a dispatcher-owned MCP server the responders deliver
-	// through. Created before either responder kind (the stub calls it too).
-	mcp, err := newMCPServer(client, version, cfg.Debug)
+	// through. Created before either responder kind (the stub calls it too). The
+	// uploader (nil unless upload_command is set) gives send_document its large-file
+	// fallback — run here, in the unsandboxed dispatcher.
+	uploader := newUploader(cfg.UploadCommand, cfg.UploadThresholdMB, cfg.UploadMaxMB)
+	mcp, err := newMCPServer(client, version, cfg.Debug, uploader)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "ak-tgclaude: dispatch: %v\n", err)
 		os.Exit(1)
@@ -557,6 +560,7 @@ func runDispatch(args []string) {
 			Tools:          cfg.Tools,
 			DenyEnvVars:    cfg.DenyEnvs,
 			NetworkDomains: cfg.AllowDomains,
+			UploadNote:     uploadNote(cfg.UploadCommand, cfg.UploadThresholdMB, cfg.UploadMaxMB),
 			HookBinary:     selfExePath(),
 			BangBug:        cfg.BangBug,
 			HookLogFile:    cfg.hookLogFile(),
