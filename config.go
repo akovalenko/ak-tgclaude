@@ -124,10 +124,13 @@ type Config struct {
 	// per chat, but different chats run concurrently up to this bound. Default 4.
 	MaxConcurrent int `toml:"max_concurrent"`
 
-	// NoRefuse materializes the do-what-you're-asked responder variant (does not
-	// decline off-topic messages). Machine guards still apply, so it cannot
-	// exceed the read-only sandboxed contract.
-	NoRefuse bool `toml:"no_refuse"`
+	// Policy selects the responder's persona/stance, composed into the base agent
+	// at {{POLICY}}: a built-in name — "normal" (declines off-topic, the default),
+	// "norefuse" (do-what-you're-asked), "introspect" (candid/debug: precise about
+	// failures, explains the machinery, shares context meta) — OR a path to a custom
+	// .md fragment. Machine guards still apply, so no persona can exceed the
+	// read-only sandboxed contract. Also --policy.
+	Policy string `toml:"policy"`
 
 	// BangBug makes the PreToolUse hook deny sandboxed Bash whose command contains
 	// a `\!` — the signature of Claude Code bug #64301, where the sandbox
@@ -254,7 +257,7 @@ func parseConfig(args []string) (*Config, error) {
 	responder := fs.String("responder", "", "responder implementation: claude|stub (default claude; stub replies a fixed line for Telegram I/O tests)")
 	workdir := fs.String("workdir", "", "static canon-only workspace root: $workdir/project is the responder cwd (regenerated from canon each start, trusted once) and $workdir/state holds the session store (default: an ephemeral cwd, removed on exit)")
 	maxConcurrent := fs.Int("max-concurrent", 0, "max responders running at once (per-chat is always serialized; default 4)")
-	noRefuse := fs.Bool("norefuse", false, "materialize the do-what-you're-asked responder (does not decline off-topic; machine guards still apply)")
+	policy := fs.String("policy", "", "responder persona composed into the agent: normal (declines off-topic, default) | norefuse (do-what-you're-asked) | introspect (candid/debug) | a path to a custom .md fragment")
 	ephemeralSessions := fs.Bool("ephemeral-sessions", false, "keep chat→session bindings in memory only (never persisted; offset still persists; each restart starts fresh)")
 	bill := fs.Bool("bill", false, "after each answer, send the run's dollar cost as a bare \"$n.nnn\" message (only when present and non-zero)")
 	debug := fs.Bool("debug", false, "pass --debug to the responder's `claude -p` so its diagnostics (incl. MCP handshake/tool-call transport) reach the dispatcher log via stderr; verbose")
@@ -318,8 +321,8 @@ func parseConfig(args []string) (*Config, error) {
 	if *maxConcurrent != 0 {
 		c.MaxConcurrent = *maxConcurrent
 	}
-	if *noRefuse {
-		c.NoRefuse = true
+	if *policy != "" {
+		c.Policy = *policy
 	}
 	if *ephemeralSessions {
 		c.EphemeralSessions = true
@@ -383,6 +386,11 @@ func parseConfig(args []string) (*Config, error) {
 	for i := range c.DenyRead {
 		c.DenyRead[i] = resolvePath(c.DenyRead[i])
 	}
+	// A policy given as a PATH (custom fragment) resolves like the other paths; a
+	// built-in NAME is left untouched.
+	if policyIsPath(c.Policy) {
+		c.Policy = resolvePath(c.Policy)
+	}
 
 	// Fail fast on a path we cannot represent literally in the sandbox glob rules
 	// or the hook shell command, rather than silently mis-match (dangerous for a
@@ -417,6 +425,19 @@ func parseConfig(args []string) (*Config, error) {
 		if err := validatePath(fmt.Sprintf("deny_reads[%d]", i), s); err != nil {
 			return nil, err
 		}
+	}
+
+	// The policy is either a built-in name or a readable custom fragment file —
+	// fail at startup on an unknown name or a missing file, not mid-run.
+	if policyIsPath(c.Policy) {
+		if err := validatePath("policy", c.Policy); err != nil {
+			return nil, err
+		}
+		if _, err := os.Stat(c.Policy); err != nil {
+			return nil, fmt.Errorf("policy fragment %s: %w", c.Policy, err)
+		}
+	} else if !builtinPolicies[c.Policy] {
+		return nil, fmt.Errorf("unknown policy %q (built-in: normal, norefuse, introspect; or a path to a .md fragment)", c.Policy)
 	}
 
 	// Reject any operator claude_arg that names a flag ak-tgclaude owns, so a stray
@@ -484,6 +505,9 @@ func (c *Config) applyDefaults() {
 	}
 	if c.Agent == "" {
 		c.Agent = defaultAgent
+	}
+	if c.Policy == "" {
+		c.Policy = defaultPolicy
 	}
 	if c.MaxConcurrent == 0 {
 		c.MaxConcurrent = 4

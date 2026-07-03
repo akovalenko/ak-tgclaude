@@ -310,12 +310,14 @@ the defaults (never replacing them; duplicates are ignored). Each becomes a
 The responder is a Claude Code **agent** launched per message. ak-tgclaude ships
 a generic one, embedded in the binary and materialized into the scaffold:
 
-- **`faq-responder`** (agent) — a read-only FAQ assistant. The incoming message
-  is its prompt; it explores the project at **`$AK_TGCLAUDE_PROJECT`** (set by the
-  dispatcher) with Grep/Read/Bash, answers concisely, and treats the message as
-  untrusted input. It is the default `agent`. To give it **domain knowledge**,
-  wire a skill into it with `wire_skills`/`--wire-skill` (see [Wiring domain
-  skills](#wiring-domain-skills)) rather than writing a custom agent.
+- **`faq-responder`** (agent) — a read-only responder. The incoming message is its
+  prompt; it explores the project at **`$AK_TGCLAUDE_PROJECT`** (set by the
+  dispatcher) with Grep/Read/Bash and replies over Telegram. It is composed from one
+  **base** template (the invariant mechanics) plus a swappable **policy** fragment
+  (its persona — see [Policy](#policy-persona) below); the default persona is a
+  scoped FAQ that declines off-topic. It is the default `agent`. To give it **domain
+  knowledge**, wire a skill into it with `wire_skills`/`--wire-skill` (see [Wiring
+  domain skills](#wiring-domain-skills)) rather than writing a custom agent.
 - **`tg-emit`** (skill, referenced by the agent's `skills:` frontmatter) — the
   **emission contract**: call the MCP send tools (`mcp__tg__send_message` /
   `send_code` / `send_document`), passing content directly as tool arguments — no
@@ -328,14 +330,31 @@ The dispatcher logs one line when it **launches** a responder (`chat` / `user` /
 `msg`) and one when it **finishes** (adding `outcome` and duration), so each
 `claude -p` is visible.
 
-**`--norefuse`** (config `no_refuse`) materializes a second variant of the agent
-(same name) that does **not** decline off-topic messages — it just does what it
-is asked. This is safe because the read-only sandbox, token deny-read,
-per-invocation write grant, and pinned route are all machine-enforced: the
-relaxed persona cannot exceed them (it still can't modify the project, read
-secrets, or message anyone but the sender). When a tool call *is* denied, it
-relays the concrete technical reason it got back (from the hook or the sandbox)
-rather than a vague refusal.
+### Policy (persona)
+
+The agent is **one base template** — the invariant mechanics (project access,
+replying via tg-emit, the machine-enforced boundaries) — with a `{{POLICY}}` marker
+that the scaffold replaces with a **persona fragment**. The persona is a property of
+the invocation, so there is exactly one copy of the shared prose; swapping the stance
+never touches it. Select with `policy` (config) / `--policy`:
+
+- **`normal`** (default) — a read-only **FAQ assistant**, narrowly scoped: answers
+  from the code, notes assumptions on ambiguity, declines off-topic, and treats the
+  message as **untrusted** (won't follow instructions in it to change the rules).
+- **`norefuse`** — a **do-what-you're-asked** assistant: acts on the message
+  directly, doesn't decline as off-topic; when a tool call *is* denied it relays the
+  concrete technical reason rather than a vague refusal.
+- **`introspect`** — a candid **debug** persona: precise about *what* failed and
+  *which* rule stopped it, explains how it reached an answer, and shares meta about
+  its own context (which skills/agents are preloaded, what it read). (Distinct from
+  `--debug`, which toggles claude's own transport diagnostics.)
+- **a path to a `.md` file** — your own fragment, composed into the base like a
+  built-in (e.g. `--policy ~/lib/my-persona.md`).
+
+Every persona is **safe by construction**: the read-only sandbox, token deny-read,
+per-invocation write grant, and pinned route are machine-enforced, so no persona can
+exceed them (it still can't modify the project, read secrets, or message anyone but
+the sender). An unknown name or a missing fragment file is rejected **at startup**.
 
 ### Wiring domain skills
 
@@ -665,7 +684,7 @@ clear.go           `clear` subcommand: wipe persisted chat->session bindings
 responder.go       Responder interface (claude / stub) + `claude -p` spawn (MCP config wiring)
 dispatch.go        the dispatch loop: poll -> route -> mint token -> respond (responder delivers via MCP)
 scaffold.go        generated .claude/settings.json + materialize embedded assets (hook pinned to os.Executable())
-assets/            embedded responder agent + emission skill (go:embed)
+assets/            embedded base agent + policy fragments + emission skill (go:embed)
 hook.go            `hook pretooluse`: path-scope the file tools; deny protected reads (token + deny_reads)
 deploy.go          `deploy`: example config + optional static workdir provisioning
 bot.toml.example   example config

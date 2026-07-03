@@ -175,6 +175,41 @@ func TestParseConfigClaudeArgsGuard(t *testing.T) {
 	}
 }
 
+func TestParseConfigPolicy(t *testing.T) {
+	// Default is normal.
+	c, err := parseConfig(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Policy != "normal" {
+		t.Errorf("default policy = %q, want normal", c.Policy)
+	}
+	// A built-in name is accepted.
+	if c, err := parseConfig([]string{"--policy", "introspect"}); err != nil || c.Policy != "introspect" {
+		t.Errorf("policy introspect: err=%v policy=%q", err, c.Policy)
+	}
+	// An unknown built-in name is rejected at startup.
+	if _, err := parseConfig([]string{"--policy", "bogus"}); err == nil {
+		t.Errorf("unknown policy name should be rejected")
+	}
+	// A path form must exist: a missing file is rejected.
+	if _, err := parseConfig([]string{"--policy", "/no/such/policy.md"}); err == nil {
+		t.Errorf("missing policy file should be rejected")
+	}
+	// An existing .md path is accepted (and kept as the resolved absolute path).
+	f := filepath.Join(t.TempDir(), "p.md")
+	if err := os.WriteFile(f, []byte("persona"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	c2, err := parseConfig([]string{"--policy", f})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c2.Policy != f {
+		t.Errorf("policy path = %q, want %q", c2.Policy, f)
+	}
+}
+
 func TestParseConfigResolvesRelativePaths(t *testing.T) {
 	// Every path field is absolutized against the launch cwd, so it is
 	// unambiguous once the responder consumes it from the scaffold cwd.

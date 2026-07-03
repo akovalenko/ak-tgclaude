@@ -190,10 +190,10 @@ func TestMaterializeScaffoldWritesValidJSON(t *testing.T) {
 	}
 }
 
-func agentBody(t *testing.T, noRefuse bool) string {
+func agentBody(t *testing.T, policy string) string {
 	t.Helper()
 	cwd := t.TempDir()
-	if err := materializeScaffold(cwd, scaffoldParams{CacheDir: "/c", NoRefuse: noRefuse}); err != nil {
+	if err := materializeScaffold(cwd, scaffoldParams{CacheDir: "/c", Policy: policy}); err != nil {
 		t.Fatal(err)
 	}
 	b, err := os.ReadFile(filepath.Join(cwd, ".claude", "agents", defaultAgent+".md"))
@@ -437,24 +437,58 @@ func TestWireSkillDedupsAndInsertsWhenAbsent(t *testing.T) {
 	}
 }
 
-func TestMaterializeAgentVariant(t *testing.T) {
-	// Same agent NAME either way (so --agent selection is unchanged).
-	def := agentBody(t, false)
-	nr := agentBody(t, true)
-	for _, body := range []string{def, nr} {
+func TestMaterializeAgentComposesPolicy(t *testing.T) {
+	// "" defaults to normal; every policy composes into the SAME agent name (so
+	// --agent selection is unchanged) and shares the base mechanics, with no
+	// {{POLICY}} marker surviving.
+	def := agentBody(t, "")
+	nr := agentBody(t, "norefuse")
+	intro := agentBody(t, "introspect")
+	for _, body := range []string{def, nr, intro} {
 		if !strings.Contains(body, "name: "+defaultAgent) {
-			t.Errorf("variant lost the agent name:\n%s", body)
+			t.Errorf("policy lost the agent name:\n%s", body)
+		}
+		if strings.Contains(body, policyPlaceholder) {
+			t.Errorf("{{POLICY}} left unsubstituted:\n%s", body)
+		}
+		// The shared base mechanics travel with every persona.
+		if !strings.Contains(body, "## Replying") || !strings.Contains(body, "## Boundaries") {
+			t.Errorf("policy dropped the shared base sections:\n%s", body)
 		}
 	}
-	// Default declines off-topic; --norefuse does not.
-	if !strings.Contains(def, "out of scope") {
-		t.Errorf("default agent should mention scope: %q", def)
+	// normal (the default) declines off-topic and carries the untrusted-input framing.
+	if !strings.Contains(def, "out of scope") || !strings.Contains(def, "untrusted") {
+		t.Errorf("normal policy should scope + treat input as untrusted:\n%s", def)
 	}
-	if !strings.Contains(nr, "Do NOT decline") {
-		t.Errorf("norefuse agent should say not to decline: %q", nr)
+	// norefuse says not to decline and drops the untrusted framing.
+	if !strings.Contains(nr, "NOT** decline") {
+		t.Errorf("norefuse policy should say not to decline:\n%s", nr)
 	}
-	if strings.Contains(nr, "untrusted input") {
-		t.Errorf("norefuse agent should not carry the untrusted-input refusal framing")
+	if strings.Contains(nr, "untrusted") {
+		t.Errorf("norefuse policy should not carry the untrusted-input framing:\n%s", nr)
+	}
+	// introspect is the candid/debug persona.
+	if !strings.Contains(intro, "introspect") || !strings.Contains(intro, "precise") {
+		t.Errorf("introspect policy should be the candid/debug persona:\n%s", intro)
+	}
+}
+
+func TestMaterializeAgentCustomPolicyFile(t *testing.T) {
+	// A --policy path composes an operator's own fragment into the base.
+	f := filepath.Join(t.TempDir(), "my-policy.md")
+	if err := os.WriteFile(f, []byte("You are a CUSTOM persona for this bot.\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	body := agentBody(t, f)
+	if !strings.Contains(body, "You are a CUSTOM persona for this bot.") {
+		t.Errorf("custom policy fragment not composed in:\n%s", body)
+	}
+	if strings.Contains(body, policyPlaceholder) {
+		t.Errorf("{{POLICY}} left unsubstituted with a custom policy:\n%s", body)
+	}
+	// An unknown built-in NAME (not a path) is an error, not a silent miss.
+	if err := materializeScaffold(t.TempDir(), scaffoldParams{CacheDir: "/c", Policy: "bogus"}); err == nil {
+		t.Errorf("unknown policy name should error")
 	}
 }
 
@@ -482,16 +516,16 @@ func TestInjectMCPTools(t *testing.T) {
 }
 
 func TestMaterializeAgentInjectsMCPTools(t *testing.T) {
-	// Both variants get the real send tools substituted onto the tools: line from
-	// the single mcpTools source, with no {{MCP_TOOLS}} marker surviving.
-	for _, noRefuse := range []bool{false, true} {
-		body := agentBody(t, noRefuse)
+	// The tools: line (in the shared base, so policy-independent) gets the real send
+	// tools substituted from the single mcpTools source, no {{MCP_TOOLS}} surviving.
+	for _, policy := range []string{"normal", "norefuse", "introspect"} {
+		body := agentBody(t, policy)
 		if strings.Contains(body, mcpToolsPlaceholder) {
-			t.Errorf("noRefuse=%v: {{MCP_TOOLS}} left unsubstituted:\n%s", noRefuse, body)
+			t.Errorf("policy=%s: {{MCP_TOOLS}} left unsubstituted:\n%s", policy, body)
 		}
 		want := "tools: Read, Grep, Glob, Bash, Write, Edit, Skill, " + strings.Join(mcpTools, ", ")
 		if !strings.Contains(body, want) {
-			t.Errorf("noRefuse=%v: MCP tools not appended to tools: as expected\nwant line: %q\ngot:\n%s", noRefuse, want, body)
+			t.Errorf("policy=%s: MCP tools not appended to tools: as expected\nwant line: %q\ngot:\n%s", policy, want, body)
 		}
 	}
 }

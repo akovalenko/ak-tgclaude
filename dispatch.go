@@ -466,7 +466,7 @@ func runDispatch(args []string) {
 			CacheDir:    cacheDir,
 			OutboxRoot:  outboxRoot,
 			TokenFile:   cfg.ConfigPath,
-			NoRefuse:    cfg.NoRefuse,
+			Policy:      cfg.Policy,
 			Project:     cfg.Project,
 			WireSkills:  cfg.WireSkills,
 			AddSkills:   cfg.AddSkills,

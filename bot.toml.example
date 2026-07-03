@@ -102,10 +102,13 @@ project = "~/code/example-project"
 # --bang-bug.
 # bang_bug = false
 
-# Materialize the do-what-you're-asked responder variant (does not decline
-# off-topic messages). Machine guards (read-only sandbox, token deny, per-chat
-# route) still apply, so it can't exceed the read-only contract. Also --norefuse.
-# no_refuse = false
+# Responder persona, composed into the base agent at {{POLICY}}: "normal"
+# (declines off-topic, the default) | "norefuse" (do-what-you're-asked) |
+# "introspect" (candid/debug: precise about failures, explains the machinery,
+# shares context meta) | a path to your own .md fragment. Machine guards (read-only
+# sandbox, token deny, per-chat route) apply to every persona, so none can exceed
+# the read-only contract. Also --policy.
+# policy = "normal"
 
 # Static workdir. When set, the responder cwd is $workdir/project — regenerated
 # from canon on every start (contents reset, then re-materialized, so a removed

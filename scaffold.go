@@ -99,7 +99,7 @@ type scaffoldParams struct {
 	HookBinary     string   // default "ak-tgclaude"
 	DenyEnvVars    []string // secrets to unset in the sandbox
 	NetworkDomains []string // sandbox egress allowlist
-	NoRefuse       bool     // materialize the do-what-you're-asked agent variant
+	Policy         string   // persona fragment composed into the agent (built-in name or custom .md path; "" => normal)
 	Project        string   // knowledge root; substituted for {{PROJECT}} in agent/skill templates
 	WireSkills     []string // operator skill template DIRECTORIES to materialize + preload
 	AddSkills      []string // generic skill DIRECTORIES copied verbatim, NOT preloaded (on-demand)
@@ -324,7 +324,7 @@ func materializeScaffold(cwd string, p scaffoldParams) error {
 	if err := addAgents(claudeDir, p.AddAgents); err != nil {
 		return err
 	}
-	return materializeAgent(claudeDir, p.NoRefuse, p.Project, wired)
+	return materializeAgent(claudeDir, p.Policy, p.Project, wired)
 }
 
 // projectPlaceholder is replaced with the project path when an agent or skill
@@ -523,23 +523,69 @@ func copyTreeMaterialize(srcDir, dstDir, project string) error {
 	})
 }
 
-// materializeAgent writes the chosen responder agent variant into
-// <cwd>/.claude/agents/faq-responder.md. Both variants carry the same agent name
-// (so --agent selection is unchanged); noRefuse swaps the persona from a scoped
-// FAQ that declines off-topic to a do-what-you're-asked assistant. Machine
-// guards (sandbox, token deny-read, per-invocation write, pinned route) hold
-// either way, so the relaxed persona cannot exceed them. wiredSkills are appended
-// to the agent's `skills:` frontmatter so their bodies are preloaded at startup,
-// and the `tools:` line's {{MCP_TOOLS}} marker is expanded from the mcpTools source.
-func materializeAgent(claudeDir string, noRefuse bool, project string, wiredSkills []string) error {
-	src := "assets/agents/faq-responder.md"
-	if noRefuse {
-		src = "assets/agents/faq-responder.norefuse.md"
+// policyPlaceholder is replaced in the base agent template with the selected
+// persona fragment (a built-in from assets/policies, or an operator's custom .md).
+// The persona is a property of the invocation, not of the shared mechanics, so
+// the base carries only the marker and one copy of the invariant prose (project
+// access, replying, machine boundaries).
+const policyPlaceholder = "{{POLICY}}"
+
+// defaultPolicy is the persona composed when none is configured: the scoped FAQ
+// that declines off-topic.
+const defaultPolicy = "normal"
+
+// builtinPolicies are the persona fragments shipped in assets/policies. A
+// --policy value that is not one of these is treated as a path to a custom
+// fragment .md.
+var builtinPolicies = map[string]bool{"normal": true, "norefuse": true, "introspect": true}
+
+// policyIsPath reports whether a policy selector names a custom fragment FILE
+// (rather than a built-in): anything containing a path separator or ending in .md.
+func policyIsPath(policy string) bool {
+	return strings.ContainsRune(policy, filepath.Separator) || strings.HasSuffix(policy, ".md")
+}
+
+// loadPolicy returns the persona-fragment body for a policy selector: a built-in
+// name reads assets/policies/<name>.md from the embed; anything else is a path to
+// a custom fragment file read from disk. Empty selects defaultPolicy.
+func loadPolicy(policy string) ([]byte, error) {
+	if policy == "" {
+		policy = defaultPolicy
 	}
-	data, err := scaffoldAssets.ReadFile(src)
+	if policyIsPath(policy) {
+		data, err := os.ReadFile(policy)
+		if err != nil {
+			return nil, fmt.Errorf("reading custom policy %s: %w", policy, err)
+		}
+		return data, nil
+	}
+	if !builtinPolicies[policy] {
+		return nil, fmt.Errorf("unknown policy %q (built-in: normal, norefuse, introspect; or a path to a .md fragment)", policy)
+	}
+	return scaffoldAssets.ReadFile("assets/policies/" + policy + ".md")
+}
+
+// materializeAgent writes the responder agent into
+// <cwd>/.claude/agents/faq-responder.md, composed from one base template plus the
+// selected persona fragment: the base carries the invariant mechanics (project
+// access, replying, machine boundaries), and its {{POLICY}} marker is replaced by
+// the policy fragment (built-in name or custom path). Machine guards (sandbox,
+// token deny-read, per-invocation write, pinned route) hold regardless of persona,
+// so a relaxed policy cannot exceed them. wiredSkills are appended to the agent's
+// `skills:` frontmatter so their bodies are preloaded at startup, and the `tools:`
+// line's {{MCP_TOOLS}} marker is expanded from the mcpTools source.
+func materializeAgent(claudeDir, policy, project string, wiredSkills []string) error {
+	data, err := scaffoldAssets.ReadFile("assets/agents/faq-responder.md")
 	if err != nil {
 		return err
 	}
+	policyBody, err := loadPolicy(policy)
+	if err != nil {
+		return err
+	}
+	// Trim trailing newlines off the fragment so the base's blank line after
+	// {{POLICY}} is preserved rather than doubled.
+	data = []byte(strings.ReplaceAll(string(data), policyPlaceholder, strings.TrimRight(string(policyBody), "\n")))
 	data = appendAgentSkills(data, wiredSkills)
 	// Expand {{MCP_TOOLS}} in the tools: frontmatter from the single mcpTools source
 	// (mcp.go), the same slice that feeds --allowedTools — so the availability and
@@ -663,7 +709,7 @@ func runScaffold(args []string) {
 		CacheDir:    filepath.Join(cfg.StateDir, "cache"),
 		OutboxRoot:  outboxRoot,
 		TokenFile:   cfg.ConfigPath,
-		NoRefuse:    cfg.NoRefuse,
+		Policy:      cfg.Policy,
 		Project:     cfg.Project,
 		WireSkills:  cfg.WireSkills,
 		AddSkills:   cfg.AddSkills,
@@ -677,14 +723,10 @@ func runScaffold(args []string) {
 		os.Exit(1)
 	}
 
-	agentVariant := "faq (declines off-topic)"
-	if cfg.NoRefuse {
-		agentVariant = "norefuse (do-what-you're-asked)"
-	}
 	fmt.Printf("ak-tgclaude: scaffold materialized\n")
 	fmt.Printf("  project:  %s\n", project)
 	fmt.Printf("  settings: %s\n", filepath.Join(project, ".claude", "settings.json"))
-	fmt.Printf("  agent:    %s\n", agentVariant)
+	fmt.Printf("  policy:   %s\n", cfg.Policy)
 	if len(cfg.WireSkills) > 0 {
 		fmt.Printf("  wired:    %s (preloaded into the agent)\n", strings.Join(cfg.WireSkills, ", "))
 	}
