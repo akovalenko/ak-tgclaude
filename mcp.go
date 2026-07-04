@@ -16,6 +16,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 )
 
 // mcpServerName is the MCP server the dispatcher exposes to the responder; the
@@ -75,6 +76,8 @@ type mcpServer struct {
 	debug    bool // log the handshake chatter (every request, initialize, tools/list)
 	ln       net.Listener
 	srv      *http.Server
+
+	transcripts *TranscriptStore // bot-side transcript append (nil => feature off); set after construction
 
 	mu     sync.Mutex
 	routes map[string]mcpRoute
@@ -417,8 +420,55 @@ func (m *mcpServer) callTool(ctx context.Context, tok string, rt mcpRoute, param
 	if !d.Progress {
 		m.recordDelivered(tok)
 	}
+	// Record the bot's turn: every delivered message (progress notes too — they carry
+	// real ids a later reply_to may point at). ReplyTo is the incoming user message
+	// this reply threads to. Non-fatal on error.
+	if m.transcripts != nil {
+		brec := TranscriptRecord{
+			MsgID:   id,
+			TS:      time.Now(),
+			Role:    "bot",
+			ReplyTo: rt.route.ReplyTo,
+			Text:    botText(d),
+			Attach:  botAttach(d),
+		}
+		if err := m.transcripts.Append(rt.route.ChatID, brec, nil); err != nil {
+			log.Printf("ak-tgclaude: transcript(bot) chat=%d msg=%d: %v", rt.route.ChatID, id, err)
+		}
+	}
 	log.Printf("ak-tgclaude: mcp: tools/call %s chat=%d -> message_id=%d progress=%t", call.Name, rt.route.ChatID, id, d.Progress)
 	return toolText(fmt.Sprintf("delivered (message_id %d)", id))
+}
+
+// botText is the transcript text for a delivered descriptor: the message body, the
+// code, or a document's caption (the file itself is recorded as an attachment).
+func botText(d *Descriptor) string {
+	switch d.Kind {
+	case KindText:
+		return d.Text
+	case KindCode:
+		return d.Code
+	case KindDocument:
+		return d.Caption
+	}
+	return ""
+}
+
+// botAttach records a delivered document as transcript metadata (no bytes); other
+// kinds carry none.
+func botAttach(d *Descriptor) []TranscriptAttach {
+	if d.Kind != KindDocument {
+		return nil
+	}
+	name := d.Filename
+	if name == "" {
+		name = filepath.Base(d.Path)
+	}
+	var size int64
+	if fi, err := os.Stat(d.Path); err == nil {
+		size = fi.Size()
+	}
+	return []TranscriptAttach{{Kind: "document", Name: name, Size: size}}
 }
 
 // descriptorFromCall builds a validated Descriptor from a tool name and its JSON

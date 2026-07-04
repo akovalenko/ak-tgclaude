@@ -100,6 +100,53 @@ func TestMCPToolsCallDelivers(t *testing.T) {
 	}
 }
 
+func TestMCPRecordsBotTurn(t *testing.T) {
+	f := &fakeSender{}
+	m := newTestMCP(t, f)
+	root := t.TempDir()
+	m.transcripts = NewTranscriptStore(root)
+	tok, err := m.Register(Route{ChatID: 42, ReplyTo: 7}, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp := callSendMessage(t, m, tok, "the answer", false); isToolError(resp) {
+		t.Fatalf("unexpected tool error: %v", resp)
+	}
+
+	entries, err := os.ReadDir(filepath.Join(root, "42"))
+	if err != nil {
+		t.Fatalf("chat dir not created: %v", err)
+	}
+	var line string
+	for _, e := range entries {
+		if strings.HasSuffix(e.Name(), ".jsonl") {
+			b, _ := os.ReadFile(filepath.Join(root, "42", e.Name()))
+			line = strings.TrimSpace(string(b))
+		}
+	}
+	var rec TranscriptRecord
+	if err := json.Unmarshal([]byte(line), &rec); err != nil {
+		t.Fatalf("bad bot record %q: %v", line, err)
+	}
+	// The fake sender returns message_id = 1 for the first send; ReplyTo mirrors the
+	// route's incoming target.
+	if rec.Role != "bot" || rec.Text != "the answer" || rec.ReplyTo != 7 || rec.MsgID != 1 {
+		t.Errorf("bot record wrong: %+v", rec)
+	}
+}
+
+func TestMCPNoTranscriptStoreNoPanic(t *testing.T) {
+	f := &fakeSender{}
+	m := newTestMCP(t, f) // m.transcripts == nil (feature off)
+	tok, _ := m.Register(Route{ChatID: 1}, t.TempDir())
+	if resp := callSendMessage(t, m, tok, "hi", false); isToolError(resp) {
+		t.Fatalf("unexpected tool error: %v", resp)
+	}
+	if len(f.snapshot()) != 1 {
+		t.Fatal("delivery should work with no transcript store")
+	}
+}
+
 func TestMCPDeliveredCount(t *testing.T) {
 	m := newTestMCP(t, &fakeSender{})
 	tok, err := m.Register(Route{ChatID: 5, ReplyTo: 2}, t.TempDir())

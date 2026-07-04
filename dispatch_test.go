@@ -2,7 +2,10 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -85,6 +88,73 @@ func textUpdate(updateID, chatID, msgID int64, text string) Update {
 	return Update{
 		UpdateID: updateID,
 		Message:  &Message{MessageID: msgID, Text: text, Chat: Chat{ID: chatID}},
+	}
+}
+
+func TestHandleRecordsUserTurn(t *testing.T) {
+	resp := &fakeResponder{} // no replies => only the user turn is recorded
+	sender := &fakeSender{}
+	d := newTestDispatcher(t, resp, sender)
+	root := t.TempDir()
+	d.transcripts = NewTranscriptStore(root)
+
+	sent := time.Date(2026, 7, 4, 12, 0, 0, 0, time.Local) // noon: no midnight-rollover flake
+	up := Update{UpdateID: 1, Message: &Message{
+		MessageID: 100, Text: "recall this", Date: sent.Unix(),
+		Chat:    Chat{ID: 42},
+		From:    &User{ID: 5, Username: "anton", FirstName: "Anton"},
+		ReplyTo: &Message{MessageID: 55},
+	}}
+	d.handleUpdate(context.Background(), up)
+
+	lines := readLines(t, filepath.Join(root, "42", sent.Format("2006-01-02")+".jsonl"))
+	if len(lines) != 1 {
+		t.Fatalf("want 1 user line, got %d", len(lines))
+	}
+	var rec TranscriptRecord
+	if err := json.Unmarshal([]byte(lines[0]), &rec); err != nil {
+		t.Fatal(err)
+	}
+	if rec.MsgID != 100 || rec.Role != "user" || rec.ReplyTo != 55 || rec.Text != "recall this" {
+		t.Errorf("user record wrong: %+v", rec)
+	}
+	var meta transcriptMeta
+	b, _ := os.ReadFile(filepath.Join(root, "42", "meta.json"))
+	if err := json.Unmarshal(b, &meta); err != nil {
+		t.Fatal(err)
+	}
+	if meta.Username != "anton" || meta.FirstName != "Anton" || meta.UserCount != 1 {
+		t.Errorf("meta wrong: %+v", meta)
+	}
+}
+
+func TestAttachMeta(t *testing.T) {
+	doc := attachMeta(&Message{Document: &Document{}}, &Attachment{Filename: "spec.pdf", MimeType: "application/pdf", Size: 2048})
+	if len(doc) != 1 || doc[0].Kind != "document" || doc[0].Name != "spec.pdf" || doc[0].Size != 2048 || doc[0].Mime != "application/pdf" {
+		t.Errorf("document attach wrong: %+v", doc)
+	}
+	photo := attachMeta(&Message{Photo: []PhotoSize{{}}}, &Attachment{Filename: "photo.jpg", MimeType: "image/jpeg", Size: 100})
+	if len(photo) != 1 || photo[0].Kind != "photo" {
+		t.Errorf("photo attach wrong: %+v", photo)
+	}
+	if attachMeta(&Message{}, nil) != nil {
+		t.Error("nil attachment should yield nil")
+	}
+}
+
+func TestHandleTranscriptsOffWritesNothing(t *testing.T) {
+	resp := &fakeResponder{replies: []string{"answer"}}
+	sender := &fakeSender{}
+	d := newTestDispatcher(t, resp, sender) // d.transcripts == nil (feature off)
+	root := t.TempDir()
+
+	d.handleUpdate(context.Background(), textUpdate(1, 42, 7, "hi"))
+
+	if entries, _ := os.ReadDir(root); len(entries) != 0 {
+		t.Errorf("feature off should write nothing, found %v", entries)
+	}
+	if len(sender.snapshot()) != 1 {
+		t.Error("delivery should still work with the feature off")
 	}
 }
 

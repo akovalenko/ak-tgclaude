@@ -71,6 +71,14 @@ type Dispatcher struct {
 
 	requireDelivery bool   // guard: if the responder sent nothing, re-prompt once (then fall back)
 	undeliveredText string // fallback reply when the guard's re-prompt still delivered nothing ("" => none)
+
+	// transcripts records every turn (nil => feature off). transcriptRoot mirrors
+	// cfg.TranscriptRoot(); owner/ownerReadsAll drive the responder's read scope (the
+	// owner reads the whole root, others only their own chat) — used in Phase 4.
+	transcripts    *TranscriptStore
+	transcriptRoot string
+	owner          int64
+	ownerReadsAll  bool
 }
 
 // Run long-polls and dispatches updates to per-chat workers until ctx is
@@ -200,6 +208,30 @@ func messageSentAt(m *Message) time.Time {
 	return time.Unix(m.Date, 0)
 }
 
+// replyToID is the message_id the incoming message replies to, or 0 when it is not
+// a reply. It threads into the transcript record (the thread edge) and the prompt
+// hint.
+func replyToID(m *Message) int64 {
+	if m.ReplyTo != nil {
+		return m.ReplyTo.MessageID
+	}
+	return 0
+}
+
+// attachMeta renders an incoming attachment as transcript metadata (no bytes), or
+// nil when the message carried none. The kind mirrors incomingFile's two cases (a
+// document, or a photo).
+func attachMeta(m *Message, a *Attachment) []TranscriptAttach {
+	if a == nil {
+		return nil
+	}
+	kind := "document"
+	if m.Document == nil && len(m.Photo) > 0 {
+		kind = "photo"
+	}
+	return []TranscriptAttach{{Kind: kind, Name: a.Filename, Size: a.Size, Mime: a.MimeType}}
+}
+
 // handleUpdate processes one update: /clear resets the chat's session; anything
 // else is answered by a responder whose outbound messages are delivered to the
 // chat (replying to the incoming message).
@@ -299,6 +331,27 @@ func (d *Dispatcher) handleUpdate(ctx context.Context, u Update) {
 				log.Printf("ak-tgclaude: fetch-fail reply chat=%d: %v", m.Chat.ID, e)
 			}
 			return
+		}
+	}
+
+	// Record the user's turn BEFORE spawning the responder: so this turn is itself
+	// recallable, and so the chat's transcript subdir exists for the read scope. The
+	// dispatcher is the only writer (it holds the trusted chat_id and both sides).
+	if d.transcripts != nil {
+		var ident *ChatIdentity
+		if m.From != nil {
+			ident = &ChatIdentity{Username: m.From.Username, FirstName: m.From.FirstName}
+		}
+		rec := TranscriptRecord{
+			MsgID:   m.MessageID,
+			TS:      messageSentAt(m),
+			Role:    "user",
+			ReplyTo: replyToID(m),
+			Text:    incomingText(m),
+			Attach:  attachMeta(m, attach),
+		}
+		if err := d.transcripts.Append(m.Chat.ID, rec, ident); err != nil {
+			log.Printf("ak-tgclaude: transcript(user) chat=%d msg=%d: %v", m.Chat.ID, m.MessageID, err)
 		}
 	}
 
@@ -567,6 +620,19 @@ func runDispatch(args []string) {
 		os.Exit(1)
 	}
 
+	// The transcript store (nil unless the feature is on). Created here so it can be
+	// wired into both the user-side write (handleUpdate) and the bot-side write (the
+	// MCP server, below).
+	var transcripts *TranscriptStore
+	if root := cfg.TranscriptRoot(); root != "" {
+		if err := os.MkdirAll(root, 0o700); err != nil {
+			fmt.Fprintf(os.Stderr, "ak-tgclaude: dispatch: transcript dir %s: %v\n", root, err)
+			os.Exit(1)
+		}
+		transcripts = NewTranscriptStore(root)
+		log.Printf("ak-tgclaude: transcripts on, root %s (owner_reads_all=%v)", root, cfg.OwnerReadsAllTranscripts())
+	}
+
 	client := NewClient(cfg.BotToken)
 
 	// The outbound transport: a dispatcher-owned MCP server the responders deliver
@@ -580,6 +646,7 @@ func runDispatch(args []string) {
 		os.Exit(1)
 	}
 	defer mcp.Close()
+	mcp.transcripts = transcripts // bot-side transcript append happens in the MCP send path
 	log.Printf("ak-tgclaude: mcp server listening at %s", mcp.URL())
 
 	cwd, ephemeral, err := resolveResponderCwd(cfg)
@@ -720,6 +787,11 @@ func runDispatch(args []string) {
 
 		requireDelivery: !cfg.AllowSilent,
 		undeliveredText: cfg.UndeliveredText,
+
+		transcripts:    transcripts,
+		transcriptRoot: cfg.TranscriptRoot(),
+		owner:          cfg.Owner,
+		ownerReadsAll:  cfg.OwnerReadsAllTranscripts(),
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
