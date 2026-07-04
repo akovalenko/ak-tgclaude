@@ -40,6 +40,7 @@ type Update struct {
 // Message is a Telegram message (the fields the dispatcher needs).
 type Message struct {
 	MessageID int64    `json:"message_id"`
+	Date      int64    `json:"date"` // Unix send time (seconds); stamped into the prompt for temporal orientation
 	Text      string   `json:"text"`
 	Chat      Chat     `json:"chat"`
 	From      *User    `json:"from"`

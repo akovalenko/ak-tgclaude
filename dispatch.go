@@ -173,6 +173,16 @@ const redeliverPrompt = "Your previous turn ended without calling any send tool,
 	"by calling mcp__tg__send_message (or send_code / send_document). If you meant to decline, tell the user so " +
 	"via mcp__tg__send_message. Then end with the status word as usual."
 
+// messageSentAt is the message's Telegram send time as a local Time, or the zero
+// Time when the field is absent (so the prompt omits the stamp rather than
+// printing the 1970 epoch).
+func messageSentAt(m *Message) time.Time {
+	if m.Date <= 0 {
+		return time.Time{}
+	}
+	return time.Unix(m.Date, 0)
+}
+
 // handleUpdate processes one update: /clear resets the chat's session; anything
 // else is answered by a responder whose outbound messages are delivered to the
 // chat (replying to the incoming message).
@@ -268,6 +278,7 @@ func (d *Dispatcher) handleUpdate(ctx context.Context, u Update) {
 	sid, _ := d.store.SessionID(m.Chat.ID)
 	res, err := d.resp.Respond(ctx, RespondRequest{
 		Prompt:    m.Text,
+		SentAt:    messageSentAt(m),
 		SessionID: sid,
 		DocDir:    docDir,
 		MCPURL:    d.mcp.URL(),

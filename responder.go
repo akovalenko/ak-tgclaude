@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"time"
 )
 
 // RespondRequest is one invocation of the responder: answer Prompt, resuming
@@ -16,8 +17,9 @@ import (
 // its writable area for document attachments and scratch files.
 type RespondRequest struct {
 	Prompt    string
-	SessionID string // resume this session; empty => start a fresh one
-	DocDir    string // AK_TGCLAUDE_OUTBOX: writable dir for attachments/scratch
+	SentAt    time.Time // Telegram send time of the incoming message; zero => omit from the prompt
+	SessionID string    // resume this session; empty => start a fresh one
+	DocDir    string    // AK_TGCLAUDE_OUTBOX: writable dir for attachments/scratch
 	MCPURL    string // dispatcher's MCP endpoint (inline --mcp-config for claude; direct call for the stub)
 	MCPToken  string // this invocation's capability token (the server pins the route to it)
 }
@@ -68,7 +70,7 @@ func (c *claudeResponder) Respond(ctx context.Context, req RespondRequest) (Resp
 	cmd := exec.CommandContext(ctx, "claude", buildClaudeArgs(c.agent, req.SessionID, req.DocDir, req.MCPURL, req.MCPToken, c.debug, c.extraTools, c.claudeArgs)...)
 	cmd.Dir = c.cwd
 	cmd.Env = c.env(req.DocDir)
-	cmd.Stdin = strings.NewReader(buildPrompt(c.project, req.DocDir, req.Prompt))
+	cmd.Stdin = strings.NewReader(buildPrompt(c.project, req.DocDir, req.Prompt, req.SentAt))
 	var out bytes.Buffer
 	cmd.Stdout = &out
 	cmd.Stderr = os.Stderr
@@ -149,7 +151,13 @@ func mergeNoProxy(existing ...string) string {
 // outbox is where the responder writes a document before attaching it with the
 // send_document tool (plain/code replies go straight through the send tools, no
 // file needed).
-func buildPrompt(project, outbox, message string) string {
+//
+// sentAt, when non-zero, stamps the message with its Telegram send time so the
+// model can reason about elapsed time across a resumed conversation ("we spoke
+// about this yesterday"); each turn's prompt carries its own stamp, so the
+// accumulated session reads as a dated transcript. It is rendered in the host's
+// local time zone with the zone abbreviation, so it is unambiguous.
+func buildPrompt(project, outbox, message string, sentAt time.Time) string {
 	var b strings.Builder
 	b.WriteString("Project directory (read-only): ")
 	b.WriteString(project)
@@ -161,7 +169,13 @@ func buildPrompt(project, outbox, message string) string {
 	b.WriteString("\nThese are literal paths — pass them verbatim to the Write/Read tools " +
 		"(tool arguments are not shell-expanded); in shell commands the same paths are in " +
 		"$AK_TGCLAUDE_PROJECT / $AK_TGCLAUDE_OUTBOX.\n\n")
-	b.WriteString("Incoming Telegram message to answer:\n")
+	b.WriteString("Incoming Telegram message")
+	if !sentAt.IsZero() {
+		b.WriteString(" (sent ")
+		b.WriteString(sentAt.Format("2006-01-02 15:04 MST"))
+		b.WriteString(")")
+	}
+	b.WriteString(" to answer:\n")
 	b.WriteString(message)
 	return b.String()
 }

@@ -4,6 +4,7 @@ import (
 	"context"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestBuildClaudeArgs(t *testing.T) {
@@ -111,7 +112,8 @@ func TestMergeNoProxy(t *testing.T) {
 }
 
 func TestBuildPrompt(t *testing.T) {
-	p := buildPrompt("/home/bot/code", "/run/out/outbox-A1", "how does foo work?")
+	sent := time.Date(2026, 7, 3, 14, 5, 0, 0, time.UTC)
+	p := buildPrompt("/home/bot/code", "/run/out/outbox-A1", "how does foo work?", sent)
 	if !strings.Contains(p, "Project directory (read-only): /home/bot/code") {
 		t.Errorf("missing literal project path: %q", p)
 	}
@@ -124,9 +126,24 @@ func TestBuildPrompt(t *testing.T) {
 	if !strings.Contains(p, "PERSISTS across replies") {
 		t.Errorf("missing the outbox-persistence hint: %q", p)
 	}
+	// The send time is stamped into the message header (rendered in its own zone).
+	if !strings.Contains(p, "Incoming Telegram message (sent 2026-07-03 14:05 UTC) to answer:") {
+		t.Errorf("missing/malformed send-time stamp: %q", p)
+	}
 	// The untrusted message is appended last, verbatim.
 	if !strings.HasSuffix(p, "how does foo work?") {
 		t.Errorf("message should be appended last: %q", p)
+	}
+}
+
+// A zero SentAt omits the stamp entirely (no 1970 epoch leaking into the prompt).
+func TestBuildPromptOmitsZeroTime(t *testing.T) {
+	p := buildPrompt("/p", "/o", "hi", time.Time{})
+	if !strings.Contains(p, "Incoming Telegram message to answer:") {
+		t.Errorf("zero time should yield the unstamped header: %q", p)
+	}
+	if strings.Contains(p, "sent ") || strings.Contains(p, "1970") {
+		t.Errorf("zero time leaked a stamp: %q", p)
 	}
 }
 
