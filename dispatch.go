@@ -386,6 +386,17 @@ func (d *Dispatcher) handleUpdate(ctx context.Context, u Update) {
 		}
 		appendPrompt = d.personaFor(uid)
 	}
+	// This invocation's transcript read scope: the owner reads the whole root
+	// (cross-chat analytics), everyone else only their own chat. Empty when the
+	// feature is off. The identity comes from the trusted from.id, never the model.
+	var transcriptScope string
+	if d.transcriptRoot != "" {
+		if m.From != nil && d.owner != 0 && m.From.ID == d.owner && d.ownerReadsAll {
+			transcriptScope = d.transcriptRoot
+		} else {
+			transcriptScope = filepath.Join(d.transcriptRoot, strconv.FormatInt(m.Chat.ID, 10))
+		}
+	}
 	res, err := d.resp.Respond(ctx, RespondRequest{
 		Prompt:             incomingText(m),
 		SentAt:             messageSentAt(m),
@@ -395,6 +406,8 @@ func (d *Dispatcher) handleUpdate(ctx context.Context, u Update) {
 		MCPURL:             d.mcp.URL(),
 		MCPToken:           token,
 		AppendSystemPrompt: appendPrompt,
+		TranscriptScope:    transcriptScope,
+		ReplyToMsgID:       replyToID(m),
 	})
 	stopTyping()
 	dur := time.Since(start).Round(time.Millisecond)
@@ -450,11 +463,12 @@ func (d *Dispatcher) handleUpdate(ctx context.Context, u Update) {
 		rTypingCtx, rStopTyping := context.WithCancel(ctx)
 		go keepTyping(rTypingCtx, d.sender, m.Chat.ID)
 		res2, err := d.resp.Respond(ctx, RespondRequest{
-			Prompt:    redeliverPrompt,
-			SessionID: resumeID,
-			DocDir:    docDir,
-			MCPURL:    d.mcp.URL(),
-			MCPToken:  token,
+			Prompt:          redeliverPrompt,
+			SessionID:       resumeID,
+			DocDir:          docDir,
+			MCPURL:          d.mcp.URL(),
+			MCPToken:        token,
+			TranscriptScope: transcriptScope,
 		})
 		rStopTyping()
 		if err != nil {
@@ -696,6 +710,7 @@ func runDispatch(args []string) {
 		if err := materializeScaffold(cwd, scaffoldParams{
 			CacheDir:       cacheDir,
 			OutboxRoot:     outboxRoot,
+			TranscriptRoot: cfg.TranscriptRoot(),
 			TokenFile:      cfg.ConfigPath,
 			Project:        cfg.Project,
 			WireSkills:     cfg.WireSkills,

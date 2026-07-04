@@ -90,6 +90,28 @@ func TestBuildSettingsBangBug(t *testing.T) {
 	}
 }
 
+func TestBuildSettingsDeniesTranscriptRoot(t *testing.T) {
+	// The whole transcript root is deny-read at the Bash layer (each invocation
+	// carves its own scope back via the allowRead overlay).
+	s := buildSettings(scaffoldParams{CacheDir: "/c", TranscriptRoot: "/s/transcripts"})
+	found := false
+	for _, p := range s.Sandbox.Filesystem.DenyRead {
+		if p == "/s/transcripts" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("transcript root should be deny-read: %v", s.Sandbox.Filesystem.DenyRead)
+	}
+	// Absent when the feature is off.
+	off := buildSettings(scaffoldParams{CacheDir: "/c"})
+	for _, p := range off.Sandbox.Filesystem.DenyRead {
+		if p == "/s/transcripts" {
+			t.Errorf("no transcript deny-read when off: %v", off.Sandbox.Filesystem.DenyRead)
+		}
+	}
+}
+
 func TestBuildSettingsDenyRead(t *testing.T) {
 	// Operator --deny-read paths land at BOTH layers: sandbox.filesystem.denyRead
 	// (the Bash `cat`/`grep` path) and the hook's --deny-read (the Read tool).

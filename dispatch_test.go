@@ -142,6 +142,41 @@ func TestAttachMeta(t *testing.T) {
 	}
 }
 
+func TestScopeSelection(t *testing.T) {
+	cases := []struct {
+		name          string
+		root          string
+		owner         int64
+		ownerReadsAll bool
+		fromID        int64
+		wantScope     string
+	}{
+		{"feature off", "", 5, true, 5, ""},
+		{"owner reads all -> whole root", "/s/tr", 5, true, 5, "/s/tr"},
+		{"owner but reads-all off -> own subdir", "/s/tr", 5, false, 5, "/s/tr/42"},
+		{"non-owner -> own subdir", "/s/tr", 5, true, 9, "/s/tr/42"},
+		{"no owner configured -> own subdir", "/s/tr", 0, true, 9, "/s/tr/42"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			resp := &fakeResponder{}
+			d := newTestDispatcher(t, resp, &fakeSender{})
+			d.transcriptRoot = tc.root
+			d.owner = tc.owner
+			d.ownerReadsAll = tc.ownerReadsAll
+
+			up := Update{UpdateID: 1, Message: &Message{
+				MessageID: 7, Text: "hi", Chat: Chat{ID: 42}, From: &User{ID: tc.fromID},
+			}}
+			d.handleUpdate(context.Background(), up)
+
+			if resp.gotReq.TranscriptScope != tc.wantScope {
+				t.Errorf("scope = %q, want %q", resp.gotReq.TranscriptScope, tc.wantScope)
+			}
+		})
+	}
+}
+
 func TestHandleTranscriptsOffWritesNothing(t *testing.T) {
 	resp := &fakeResponder{replies: []string{"answer"}}
 	sender := &fakeSender{}

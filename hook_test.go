@@ -146,6 +146,26 @@ func TestEnvFilePolicy(t *testing.T) {
 	}
 }
 
+func TestEnvFilePolicyTranscriptScope(t *testing.T) {
+	t.Setenv(projectEnv, "/proj")
+	t.Setenv(outboxEnv, "/run/out/o1")
+	t.Setenv(transcriptEnv, "/s/transcripts/42")
+	pol := envFilePolicy(nil)
+
+	// Read is allowed under this chat's own transcript scope...
+	if d, _ := decidePreToolUse(fileInput("Read", "/s/transcripts/42/2026-07-04.jsonl"), pol); d != "allow" {
+		t.Errorf("read own transcript => %q, want allow", d)
+	}
+	// ...but a sibling chat's dir is not under the scope => deny (no cross-chat read).
+	if d, _ := decidePreToolUse(fileInput("Read", "/s/transcripts/99/2026-07-04.jsonl"), pol); d != "deny" {
+		t.Errorf("read sibling transcript => %q, want deny", d)
+	}
+	// The transcript is read-only: a Write is denied.
+	if d, _ := decidePreToolUse(fileInput("Write", "/s/transcripts/42/x"), pol); d != "deny" {
+		t.Errorf("write transcript => %q, want deny", d)
+	}
+}
+
 func TestUnderAny(t *testing.T) {
 	if _, ok := underAny("/a/b/c", []string{"/a/b"}); !ok {
 		t.Errorf("file under root should match")

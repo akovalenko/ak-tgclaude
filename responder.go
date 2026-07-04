@@ -27,6 +27,13 @@ type RespondRequest struct {
 	// Set only on a FRESH spawn (SessionID==""); it freezes into the session, so a
 	// resume neither needs nor re-sends it.
 	AppendSystemPrompt string
+	// TranscriptScope is this invocation's transcript READ scope: a chat's own subdir
+	// for a user, the whole root for the owner. It is opened to the sandbox (allowRead)
+	// and the Read tool (via the env var). Empty => no transcript access.
+	TranscriptScope string
+	// ReplyToMsgID is the message_id the incoming message replies to (0 => none),
+	// surfaced to the model as a prompt hint.
+	ReplyToMsgID int64
 }
 
 // RespondResult reports the session the responder used (so the dispatcher can
@@ -56,6 +63,12 @@ const projectEnv = "AK_TGCLAUDE_PROJECT"
 // attach via the send_document tool.
 const outboxEnv = "AK_TGCLAUDE_OUTBOX"
 
+// transcriptEnv names the responder's transcript READ scope (a chat's own subdir,
+// or the whole root for the owner). The PreToolUse hook folds it into readRoots so
+// the Read tool can reach it; the per-invocation sandbox allowRead grant opens it
+// to bash grep. Set only when the transcript feature is on. Empty => none.
+const transcriptEnv = "AK_TGCLAUDE_TRANSCRIPT_DIR"
+
 // claudeResponder spawns a headless `claude -p` for each update.
 type claudeResponder struct {
 	agent      string   // --agent <name>; empty => the configured default agent
@@ -72,9 +85,9 @@ type claudeResponder struct {
 // (route-pinned by MCPToken). It returns the session id parsed from the JSON
 // result.
 func (c *claudeResponder) Respond(ctx context.Context, req RespondRequest) (RespondResult, error) {
-	cmd := exec.CommandContext(ctx, "claude", buildClaudeArgs(c.agent, req.SessionID, req.AppendSystemPrompt, req.DocDir, req.MCPURL, req.MCPToken, c.debug, c.extraTools, c.claudeArgs)...)
+	cmd := exec.CommandContext(ctx, "claude", buildClaudeArgs(c.agent, req.SessionID, req.AppendSystemPrompt, req.DocDir, req.TranscriptScope, req.MCPURL, req.MCPToken, c.debug, c.extraTools, c.claudeArgs)...)
 	cmd.Dir = c.cwd
-	cmd.Env = c.env(req.DocDir)
+	cmd.Env = c.env(req.DocDir, req.TranscriptScope)
 	cmd.Stdin = strings.NewReader(buildPrompt(c.project, req.DocDir, req.Prompt, req.SentAt, req.Attachment))
 	var out bytes.Buffer
 	cmd.Stdout = &out
@@ -97,7 +110,7 @@ func (c *claudeResponder) Respond(ctx context.Context, req RespondRequest) (Resp
 // the server is never dialed and no tools appear. Forcing loopback into NO_PROXY
 // makes the MCP request go direct while everything else (the Anthropic API) still
 // honors the proxy. Existing NO_PROXY entries are preserved.
-func (c *claudeResponder) env(docDir string) []string {
+func (c *claudeResponder) env(docDir, transcriptScope string) []string {
 	noProxy := mergeNoProxy(os.Getenv("NO_PROXY"), os.Getenv("no_proxy"))
 	var out []string
 	for _, kv := range os.Environ() {
@@ -118,6 +131,11 @@ func (c *claudeResponder) env(docDir string) []string {
 		// dispatcher's RemoveAll cleans it (instead of accumulating in /tmp/claude-<uid>).
 		"TMPDIR="+docDir,
 	)
+	if transcriptScope != "" {
+		// The transcript read scope, so the sandboxed grep/cat can reach it (the hook
+		// also folds this env into the Read tool's readRoots).
+		out = append(out, transcriptEnv+"="+transcriptScope)
+	}
 	if c.cacheDir != "" {
 		// The isolated Go cache, so the sandboxed `go` inherits it (a settings-file
 		// env block does not reach tools under --setting-sources).
@@ -215,7 +233,7 @@ func buildPrompt(project, outbox, message string, sentAt time.Time, attach *Atta
 // --agent and freezes into the session, so it is omitted on --resume). Any operator
 // passthrough (extra) is appended last — validated against the denylist at config
 // load, so it cannot name a flag set above.
-func buildClaudeArgs(agent, sessionID, appendSystemPrompt, docDir, mcpURL, mcpToken string, debug bool, extraTools, extra []string) []string {
+func buildClaudeArgs(agent, sessionID, appendSystemPrompt, docDir, transcriptScope, mcpURL, mcpToken string, debug bool, extraTools, extra []string) []string {
 	args := []string{
 		"-p", "--output-format", "json",
 		"--setting-sources", "project",
@@ -239,7 +257,7 @@ func buildClaudeArgs(agent, sessionID, appendSystemPrompt, docDir, mcpURL, mcpTo
 			"--allowedTools", strings.Join(combineTools(mcpTools, extraTools), ","),
 		)
 	}
-	if s := buildInvocationSettings(docDir); s != "" {
+	if s := buildInvocationSettings(docDir, transcriptScope); s != "" {
 		args = append(args, "--settings", s)
 	}
 	if agent != "" {

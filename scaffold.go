@@ -95,6 +95,7 @@ type hookEntry struct {
 type scaffoldParams struct {
 	CacheDir       string   // isolated Go caches root
 	OutboxRoot     string   // parent of per-invocation outboxes (deny-read as a group)
+	TranscriptRoot string   // transcript store root: deny-read the whole root; per-invocation allowRead carves the scope back
 	TokenFile      string   // config file holding the token; "" if token came via --bot-token
 	HookBinary     string   // default "ak-tgclaude"
 	DenyEnvVars    []string // secrets to unset in the sandbox
@@ -261,6 +262,12 @@ func buildSettings(p scaffoldParams) *claudeSettings {
 	denyReadFS = append(denyReadFS, p.DenyRead...)
 	if p.OutboxRoot != "" {
 		denyReadFS = append(denyReadFS, p.OutboxRoot)
+	}
+	// Deny-read the whole transcript root at the Bash layer; each invocation carves
+	// its own scope (a chat's subdir, or the whole root for the owner) back via the
+	// per-invocation allowRead overlay — so one chat cannot grep another's history.
+	if p.TranscriptRoot != "" {
+		denyReadFS = append(denyReadFS, p.TranscriptRoot)
 	}
 
 	// credentials.files: SSH keys + Claude's auth token (always), plus the bot's
@@ -870,20 +877,27 @@ func appendAgentSkills(data []byte, add []string) []byte {
 //
 // The Write TOOL to the outbox is granted by the PreToolUse hook (path-scoped),
 // not here. Empty outbox => "".
-func buildInvocationSettings(outbox string) string {
-	if outbox == "" {
+func buildInvocationSettings(outbox, transcriptScope string) string {
+	if outbox == "" && transcriptScope == "" {
 		return ""
 	}
 	var s struct {
 		Sandbox struct {
 			Filesystem struct {
-				AllowWrite []string `json:"allowWrite"`
-				AllowRead  []string `json:"allowRead"`
+				AllowWrite []string `json:"allowWrite,omitempty"`
+				AllowRead  []string `json:"allowRead,omitempty"`
 			} `json:"filesystem"`
 		} `json:"sandbox"`
 	}
-	s.Sandbox.Filesystem.AllowWrite = []string{outbox}
-	s.Sandbox.Filesystem.AllowRead = []string{outbox}
+	if outbox != "" {
+		s.Sandbox.Filesystem.AllowWrite = []string{outbox}
+		s.Sandbox.Filesystem.AllowRead = []string{outbox}
+	}
+	if transcriptScope != "" {
+		// Read-only: carve the chat's own transcript subdir (or, for the owner, the
+		// whole root) back out of the static denyRead. Never AllowWrite.
+		s.Sandbox.Filesystem.AllowRead = append(s.Sandbox.Filesystem.AllowRead, transcriptScope)
+	}
 	b, _ := json.Marshal(&s)
 	return string(b)
 }
@@ -922,6 +936,7 @@ func runScaffold(args []string) {
 	if err := materializeScaffold(project, scaffoldParams{
 		CacheDir:       filepath.Join(cfg.StateDir, "cache"),
 		OutboxRoot:     outboxRoot,
+		TranscriptRoot: cfg.TranscriptRoot(),
 		TokenFile:      cfg.ConfigPath,
 		Project:        cfg.Project,
 		WireSkills:     cfg.WireSkills,
@@ -972,5 +987,5 @@ func runScaffold(args []string) {
 	fmt.Printf("the MCP send tools are NOT wired here — they need the running dispatcher):\n")
 	fmt.Printf("  cd %s\n", project)
 	fmt.Printf("  AK_TGCLAUDE_OUTBOX=%s claude -p --setting-sources project --permission-mode dontAsk \\\n", outboxRoot)
-	fmt.Printf("    --settings '%s'%s 'hello'\n", buildInvocationSettings(outboxRoot), agentFlag)
+	fmt.Printf("    --settings '%s'%s 'hello'\n", buildInvocationSettings(outboxRoot, ""), agentFlag)
 }

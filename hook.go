@@ -73,6 +73,9 @@ type filePolicy struct {
 func envFilePolicy(deny []string) filePolicy {
 	writeRoots := envRoots(outboxEnv)
 	readRoots := append(envRoots(projectEnv), writeRoots...)
+	// The transcript read scope (a chat's own subdir, or the whole root for the
+	// owner) is readable by the Read tool too; an unset env adds nothing.
+	readRoots = append(readRoots, envRoots(transcriptEnv)...)
 	return filePolicy{deny: deny, readRoots: readRoots, writeRoots: writeRoots}
 }
 
