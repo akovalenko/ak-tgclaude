@@ -90,10 +90,13 @@ type Chat struct {
 	ID int64 `json:"id"`
 }
 
-// User is the sender of a message (only id/username are used, for logging).
+// User is the sender of a message. id/username are used for logging and access
+// control; first_name feeds the transcript store's per-chat meta.json (so the owner
+// can tell a numeric chat_id apart from a person).
 type User struct {
-	ID       int64  `json:"id"`
-	Username string `json:"username"`
+	ID        int64  `json:"id"`
+	Username  string `json:"username"`
+	FirstName string `json:"first_name"`
 }
 
 // Client talks to the Telegram Bot API. It holds the bot token — the dispatcher

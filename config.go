@@ -360,6 +360,24 @@ type Config struct {
 	// which must survive restarts. Empty => $XDG_STATE_HOME/ak-tgclaude.
 	StateDir string `toml:"state_dir"`
 
+	// Transcripts enables the per-chat transcript store (transcript.go) and the
+	// tg-recall skill. Default OFF: it writes users' message text to disk, so it is
+	// opt-in for privacy. When off, nothing is recorded and tg-recall is not shipped
+	// to the responder. Also --transcripts.
+	Transcripts bool `toml:"transcripts"`
+
+	// TranscriptDir overrides the store root. Empty => <SessionDir>/transcripts
+	// (Workdir/state or StateDir). It must live OUTSIDE the responder outbox so it
+	// survives the session-TTL wipe (validate rejects a root under the project/workdir).
+	// Also --transcript-dir.
+	TranscriptDir string `toml:"transcript_dir"`
+
+	// OwnerReadsAll: when transcripts are on, the owner's responder reads the WHOLE
+	// transcripts root (cross-chat analytics) rather than just its own chat. nil =>
+	// default true; false scopes the owner like any other user. A *bool so the
+	// default-true survives an unset config. Also --owner-reads-all.
+	OwnerReadsAll *bool `toml:"owner_reads_all"`
+
 	// EphemeralSessions keeps the chat→session map in memory only: it is never
 	// written to disk, so every restart starts each chat fresh. The getUpdates
 	// offset still persists (a restart does not reprocess the backlog). Default
@@ -432,6 +450,9 @@ func parseConfig(args []string) (*Config, error) {
 	uploadMaxMB := fs.Int("upload-max-mb", 0, "advertised max upload size in MB surfaced to the responder; a file over this +10% is rejected as too large (0 = no advertised number / no hard cap)")
 	maxIncomingMB := fs.Int("max-incoming-mb", 0, "max size in MB of an incoming document to download into the responder's outbox (0 => default 20, the bot-API getFile ceiling)")
 	open := fs.Bool("open", false, "OPEN ACCESS: allow every Telegram user (demo only; overrides the whitelist)")
+	transcripts := fs.Bool("transcripts", false, "enable the per-chat transcript store + tg-recall recall (default off; records users' message text to disk)")
+	transcriptDir := fs.String("transcript-dir", "", "override the transcript store root (default <state>/transcripts; must be outside the responder outbox)")
+	ownerReadsAll := fs.Bool("owner-reads-all", true, "when transcripts are on, let the owner's responder read the whole transcripts root for cross-chat analytics; --owner-reads-all=false scopes the owner to its own chat like any user")
 	if err := fs.Parse(args); err != nil {
 		return nil, err
 	}
@@ -497,6 +518,20 @@ func parseConfig(args []string) (*Config, error) {
 	if *owner != 0 {
 		c.Owner = *owner
 	}
+	if *transcripts {
+		c.Transcripts = true
+	}
+	if *transcriptDir != "" {
+		c.TranscriptDir = *transcriptDir
+	}
+	// owner_reads_all defaults true (applyDefaults fills nil); only an explicitly
+	// passed --owner-reads-all overrides the file value. fs.Visit fires solely for
+	// flags actually set, so the CLI can turn it off without a --flag=false quirk.
+	fs.Visit(func(f *flag.Flag) {
+		if f.Name == "owner-reads-all" {
+			c.OwnerReadsAll = ownerReadsAll
+		}
+	})
 	if *ephemeralSessions {
 		c.EphemeralSessions = true
 	}
@@ -569,6 +604,7 @@ func parseConfig(args []string) (*Config, error) {
 	c.Project = resolvePath(c.Project)
 	c.Workdir = resolvePath(c.Workdir)
 	c.StateDir = resolvePath(c.StateDir)
+	c.TranscriptDir = resolvePath(c.TranscriptDir)
 	c.RuntimeBase = resolvePath(c.RuntimeBase)
 	c.ConfigPath = resolvePath(c.ConfigPath)
 	// UploadCommand is a path (exec'd by the dispatcher, not sandbox-glob-matched, so
@@ -608,6 +644,7 @@ func parseConfig(args []string) (*Config, error) {
 		{"project", c.Project},
 		{"workdir", c.Workdir},
 		{"state_dir", c.StateDir},
+		{"transcript_dir", c.TranscriptDir},
 		{"runtime_base", c.RuntimeBase},
 		{"config", c.ConfigPath},
 	} {
@@ -814,6 +851,10 @@ func (c *Config) applyDefaults() {
 	if c.StateDir == "" {
 		c.StateDir = defaultStateDir()
 	}
+	if c.OwnerReadsAll == nil {
+		t := true
+		c.OwnerReadsAll = &t
+	}
 	// Default the upload threshold only when the fallback is enabled — 40 MB leaves
 	// headroom under Telegram's ~50 MB bot-attachment limit.
 	if c.UploadCommand != "" && c.UploadThresholdMB == 0 {
@@ -883,6 +924,20 @@ func (c *Config) validate() error {
 			return fmt.Errorf("upload_max_mb (%d) must be >= upload_threshold_mb (%d)", c.UploadMaxMB, c.UploadThresholdMB)
 		}
 	}
+	// An explicit transcript_dir must not sit under the responder workspace, which is
+	// reset/wiped — the store must be durable (best-effort: the ephemeral-cwd case is
+	// unknowable at load time and relies on the safe default instead).
+	if c.Transcripts && c.TranscriptDir != "" {
+		unsafe := []string{c.Project}
+		if c.Workdir != "" {
+			unsafe = append(unsafe, filepath.Join(c.Workdir, "project"))
+		}
+		for _, u := range unsafe {
+			if u != "" && (c.TranscriptDir == u || strings.HasPrefix(c.TranscriptDir, u+string(os.PathSeparator))) {
+				return fmt.Errorf("transcript_dir %q is under %q — it would be wiped with the responder workspace; put it elsewhere", c.TranscriptDir, u)
+			}
+		}
+	}
 	return nil
 }
 
@@ -896,6 +951,26 @@ func (c *Config) SessionDir() string {
 		return filepath.Join(c.Workdir, "state")
 	}
 	return c.StateDir
+}
+
+// TranscriptRoot is the store root when the feature is on, else "". It defaults to
+// <SessionDir>/transcripts (outside the outbox, so it survives the session-TTL wipe
+// and restarts, per the design); transcript_dir overrides it.
+func (c *Config) TranscriptRoot() string {
+	if !c.Transcripts {
+		return ""
+	}
+	if c.TranscriptDir != "" {
+		return c.TranscriptDir
+	}
+	return filepath.Join(c.SessionDir(), "transcripts")
+}
+
+// OwnerReadsAllTranscripts reports whether the owner's responder reads the whole
+// transcripts root (default true; validate/applyDefaults guarantee non-nil, but a
+// nil is treated as the default here too).
+func (c *Config) OwnerReadsAllTranscripts() bool {
+	return c.OwnerReadsAll == nil || *c.OwnerReadsAll
 }
 
 // defaultStateDir is $XDG_STATE_HOME/ak-tgclaude, else ~/.local/state/ak-tgclaude.

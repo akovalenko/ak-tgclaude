@@ -197,6 +197,101 @@ func TestValidateUploadMaxBelowThreshold(t *testing.T) {
 	}
 }
 
+func TestParseConfigTranscriptsDefaultOff(t *testing.T) {
+	c, err := parseConfig(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.applyDefaults()
+	if c.Transcripts {
+		t.Error("transcripts should default off")
+	}
+	if c.TranscriptRoot() != "" {
+		t.Errorf("root should be empty when off, got %q", c.TranscriptRoot())
+	}
+	if !c.OwnerReadsAllTranscripts() {
+		t.Error("owner_reads_all should default true")
+	}
+	if c2, _ := parseConfig([]string{"--transcripts"}); !c2.Transcripts {
+		t.Error("--transcripts should enable the feature")
+	}
+}
+
+func TestConfigTranscriptRootDefault(t *testing.T) {
+	c, _ := parseConfig([]string{"--transcripts"})
+	c.StateDir = "/s"
+	c.applyDefaults() // keeps the set StateDir
+	if got := c.TranscriptRoot(); got != filepath.Join("/s", "transcripts") {
+		t.Errorf("default root: got %q", got)
+	}
+	// workdir moves the store under <workdir>/state (beside the session store).
+	cw, _ := parseConfig([]string{"--transcripts", "--workdir", "/w"})
+	cw.applyDefaults()
+	if got := cw.TranscriptRoot(); got != filepath.Join("/w", "state", "transcripts") {
+		t.Errorf("workdir root: got %q", got)
+	}
+}
+
+func TestConfigTranscriptDirOverride(t *testing.T) {
+	c, err := parseConfig([]string{"--transcripts", "--transcript-dir", "/data/tr"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.applyDefaults()
+	if got := c.TranscriptRoot(); got != "/data/tr" {
+		t.Errorf("override root: got %q", got)
+	}
+}
+
+func TestParseConfigOwnerReadsAll(t *testing.T) {
+	// Unset => default true.
+	c, _ := parseConfig(nil)
+	c.applyDefaults()
+	if !c.OwnerReadsAllTranscripts() {
+		t.Error("unset owner_reads_all should be true")
+	}
+	// CLI false wins.
+	cf, _ := parseConfig([]string{"--owner-reads-all=false"})
+	cf.applyDefaults()
+	if cf.OwnerReadsAllTranscripts() {
+		t.Error("--owner-reads-all=false should be false")
+	}
+	// File false wins when no flag is passed.
+	path := filepath.Join(t.TempDir(), "bot.toml")
+	if err := os.WriteFile(path, []byte("owner_reads_all = false\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cff, _ := parseConfig([]string{"--config", path})
+	cff.applyDefaults()
+	if cff.OwnerReadsAllTranscripts() {
+		t.Error("file owner_reads_all=false should win when no flag")
+	}
+	// CLI true overrides file false (fs.Visit only fires for a passed flag).
+	cft, _ := parseConfig([]string{"--config", path, "--owner-reads-all=true"})
+	cft.applyDefaults()
+	if !cft.OwnerReadsAllTranscripts() {
+		t.Error("--owner-reads-all=true should override file false")
+	}
+}
+
+func TestValidateTranscriptDirUnderProject(t *testing.T) {
+	c := &Config{BotToken: "x", Profile: ProfileQA, Responder: ResponderClaude, Project: "/proj",
+		MaxConcurrent: 1, MaxIncomingMB: 20, OutboxTTL: "2h", Transcripts: true, TranscriptDir: "/proj/tr"}
+	if err := c.validate(); err == nil || !strings.Contains(err.Error(), "transcript_dir") {
+		t.Fatalf("want transcript_dir-under-project error, got %v", err)
+	}
+	c.TranscriptDir = "/data/tr" // elsewhere: fine
+	if err := c.validate(); err != nil {
+		t.Fatalf("safe transcript_dir should validate, got %v", err)
+	}
+}
+
+func TestParseConfigTranscriptDirGlobRejected(t *testing.T) {
+	if _, err := parseConfig([]string{"--transcripts", "--transcript-dir", "/data/tr*"}); err == nil {
+		t.Error("glob metachar in transcript_dir should be rejected")
+	}
+}
+
 func TestParseConfigClaudeArgs(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "bot.toml")
 	if err := os.WriteFile(path, []byte("claude_args = [\"--model\", \"opus\"]\n"), 0o600); err != nil {
