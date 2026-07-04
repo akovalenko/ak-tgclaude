@@ -461,7 +461,7 @@ the stance can vary **per user**. Set the default with `policies` (config) /
 - **`introspect`** — a candid **debug** persona: precise about *what* failed and
   *which* rule stopped it, explains how it reached an answer, and shares meta about
   its own context (which skills/agents are preloaded, what it read). (Distinct from
-  `--debug`, which toggles claude's own transport diagnostics.)
+  the `--debug` flag, which is operator-side logging — see below.)
 - **`outbox-rw`** — a **do-the-read-write-work** stance: when a task needs read-write
   on the project (e.g. does it still build after a `go get -u`, check out a commit and
   run its tests), don't beg off as read-only — clone into the writable outbox with
@@ -512,6 +512,14 @@ the user and chat coincide, so the override applies cleanly.
 `introspect`), unless it has an explicit `policy_overrides` entry. One knob for
 "owner = admin" — the id must be supplied, since the Bot API's `getMe` does not
 reveal the bot's owner.
+
+**Checking who got what.** Run with `--debug` to see the persona each account
+resolves to: on a chat's **first spawn** the dispatcher logs the selector label (e.g.
+`selectors=[normal]` vs `selectors=[norefuse introspect]`) and the exact composed
+`--append-system-prompt` text. A non-owner with no `policy_overrides` entry gets the
+default `policies` — so if a test account shows `norefuse`, that is your **default**
+stance, not owner leakage. (Only on a fresh spawn: the persona freezes into the
+session, so `clear` the chat to re-check after a config change.)
 
 Every persona (or blend) is **safe by construction**: the read-only sandbox, token
 deny-read, per-invocation write grant, and pinned route are machine-enforced, so no

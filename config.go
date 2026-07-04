@@ -241,10 +241,13 @@ type Config struct {
 	// AllowSilent is set. Plain text.
 	UndeliveredText string `toml:"undelivered_text"`
 
-	// Debug passes `--debug` to the responder's `claude -p`, so its own diagnostics
-	// (MCP handshake/tool discovery/transport errors, etc.) go to the responder's
-	// stderr — which the dispatcher inherits, so they land in the dispatcher log.
-	// Verbose; for troubleshooting only. Default false. Also --debug.
+	// Debug turns on troubleshooting output, all to the dispatcher log: it passes
+	// `--debug` to the responder's `claude -p` (its own diagnostics — MCP handshake/
+	// tool discovery/transport errors — go to the responder's stderr, which the
+	// dispatcher inherits), dumps the responder's full final text after each run, and
+	// on a chat's FIRST spawn logs the persona that user resolved to (the selector
+	// label, e.g. [normal] vs [norefuse], and the composed --append-system-prompt
+	// text). Verbose; for troubleshooting only. Default false. Also --debug.
 	Debug bool `toml:"debug"`
 
 	// Project is the codebase the responder consults on (read-only under "qa").
@@ -427,7 +430,7 @@ func parseConfig(args []string) (*Config, error) {
 	ephemeralSessions := fs.Bool("ephemeral-sessions", false, "keep chat→session bindings in memory only (never persisted; offset still persists; each restart starts fresh)")
 	bill := fs.Bool("bill", false, "after each answer, send the run's dollar cost as a bare \"$n.nnn\" message (only when present and non-zero)")
 	allowSilent := fs.Bool("allow-silent", false, "DISABLE the delivery guard (on by default): allow a responder turn that sends nothing. Normally a no-send turn is re-prompted once, then answered with undelivered_text")
-	debug := fs.Bool("debug", false, "pass --debug to the responder's `claude -p` so its diagnostics (incl. MCP handshake/tool-call transport) reach the dispatcher log via stderr; verbose")
+	debug := fs.Bool("debug", false, "troubleshooting output to the dispatcher log: pass --debug to the responder's `claude -p` (MCP handshake/tool-call transport diagnostics), dump each run's final text, and on a chat's first spawn log the resolved persona (selector label + the composed --append-system-prompt); verbose")
 	bangBug := fs.Bool("bang-bug", false, `deny sandboxed Bash containing \! (workaround for bug #64301 corrupting the bang char); the responder writes such commands to a file instead`)
 	var allowUsers int64List
 	fs.Var(&allowUsers, "allow-user", "authorize a Telegram user id (repeatable; merged with allowed_users)")

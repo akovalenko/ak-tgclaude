@@ -66,8 +66,13 @@ type Dispatcher struct {
 	// persona injected via --append-system-prompt on a chat's FIRST spawn (frozen
 	// for the session). defaultPersona is the composed default; persona maps a
 	// Telegram user id to its resolved override persona (absent => the default).
-	defaultPersona string
-	persona        map[int64]string
+	// *Selectors are the matching fragment-name lists (e.g. [normal] vs
+	// [norefuse introspect]) — used only for the --debug persona dump, so the log
+	// shows which stance a user resolved to, not just the composed prose.
+	defaultPersona   string
+	persona          map[int64]string
+	defaultSelectors []string
+	personaSelectors map[int64][]string
 
 	requireDelivery bool   // guard: if the responder sent nothing, re-prompt once (then fall back)
 	undeliveredText string // fallback reply when the guard's re-prompt still delivered nothing ("" => none)
@@ -385,6 +390,15 @@ func (d *Dispatcher) handleUpdate(ctx context.Context, u Update) {
 			uid = m.From.ID
 		}
 		appendPrompt = d.personaFor(uid)
+		// With --debug, dump the persona this user resolved to as it is injected: the
+		// crisp selector label (e.g. [normal] vs [norefuse introspect]) answers "which
+		// stance did this account get", and the composed --append-system-prompt text
+		// below it is the exact dynamic prompt. Only on a fresh spawn — on resume the
+		// persona is already frozen into the session and not re-injected.
+		if d.debug {
+			log.Printf("ak-tgclaude: persona chat=%d user=%s selectors=%v — injected as --append-system-prompt:\n%s",
+				m.Chat.ID, ulabel, d.personaSelectorsFor(uid), appendPrompt)
+		}
 	}
 	// This invocation's transcript read scope: the owner reads the whole root
 	// (cross-chat analytics), everyone else only their own chat. Empty when the
@@ -552,6 +566,16 @@ func (d *Dispatcher) personaFor(userID int64) string {
 		return p
 	}
 	return d.defaultPersona
+}
+
+// personaSelectorsFor returns the fragment-name selectors a user resolves to (the
+// override list when configured, else the default) — the label form of personaFor,
+// used only by the --debug persona dump.
+func (d *Dispatcher) personaSelectorsFor(userID int64) []string {
+	if s, ok := d.personaSelectors[userID]; ok {
+		return s
+	}
+	return d.defaultSelectors
 }
 
 func userLabel(u *User) string {
@@ -772,13 +796,16 @@ func runDispatch(args []string) {
 		os.Exit(1)
 	}
 	personaByUser := make(map[int64]string, len(cfg.overrides))
+	selectorsByUser := make(map[int64][]string, len(cfg.overrides))
 	for uid := range cfg.overrides {
-		p, perr := loadPolicies(cfg.PersonaSelectors(uid))
+		sel := cfg.PersonaSelectors(uid)
+		p, perr := loadPolicies(sel)
 		if perr != nil {
 			fmt.Fprintf(os.Stderr, "ak-tgclaude: dispatch: composing persona for user %d: %v\n", uid, perr)
 			os.Exit(1)
 		}
 		personaByUser[uid] = string(p)
+		selectorsByUser[uid] = sel
 	}
 
 	d := &Dispatcher{
@@ -790,6 +817,8 @@ func runDispatch(args []string) {
 		authz:            authz,
 		defaultPersona:   string(defaultPersona),
 		persona:          personaByUser,
+		defaultSelectors: []string(cfg.Policies),
+		personaSelectors: selectorsByUser,
 		outboxRoot:       outboxRoot,
 		outboxTTL:        cfg.OutboxTTLDur(),
 		pollTimeout:      defaultPollTimeout,

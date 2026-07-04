@@ -1,9 +1,11 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -88,6 +90,66 @@ func textUpdate(updateID, chatID, msgID int64, text string) Update {
 	return Update{
 		UpdateID: updateID,
 		Message:  &Message{MessageID: msgID, Text: text, Chat: Chat{ID: chatID}},
+	}
+}
+
+func TestPersonaSelectorsFor(t *testing.T) {
+	d := &Dispatcher{
+		defaultSelectors: []string{"normal"},
+		personaSelectors: map[int64][]string{42: {"norefuse", "introspect"}},
+	}
+	// A configured user resolves to its override selectors (the --debug dump label).
+	if got := d.personaSelectorsFor(42); len(got) != 2 || got[0] != "norefuse" || got[1] != "introspect" {
+		t.Errorf("configured user selectors = %v, want [norefuse introspect]", got)
+	}
+	// An unknown user falls back to the default selectors — mirroring personaFor, so a
+	// non-admin account shows the default stance, not any per-user override.
+	if got := d.personaSelectorsFor(999); len(got) != 1 || got[0] != "normal" {
+		t.Errorf("unknown user selectors = %v, want [normal]", got)
+	}
+}
+
+func TestHandleDebugDumpsPersona(t *testing.T) {
+	// With --debug, a fresh spawn logs the resolved persona: the selector label plus
+	// the composed --append-system-prompt text. Models Anton's case — a non-owner
+	// account (id 5, no override) resolves to the DEFAULT stance, here norefuse.
+	resp := &fakeResponder{sid: "sess-1"}
+	d := newTestDispatcher(t, resp, &fakeSender{})
+	d.debug = true
+	d.defaultPersona = "You are a do-what-you're-asked assistant."
+	d.defaultSelectors = []string{"norefuse"}
+
+	var buf bytes.Buffer
+	log.SetOutput(&buf)
+	defer log.SetOutput(os.Stderr)
+
+	up := Update{UpdateID: 1, Message: &Message{
+		MessageID: 100, Text: "hi", Chat: Chat{ID: 42}, From: &User{ID: 5},
+	}}
+	d.handleUpdate(context.Background(), up)
+
+	out := buf.String()
+	if !strings.Contains(out, "persona chat=42 user=5") || !strings.Contains(out, "selectors=[norefuse]") {
+		t.Errorf("debug persona line missing/wrong:\n%s", out)
+	}
+	if !strings.Contains(out, "do-what-you're-asked") {
+		t.Errorf("debug dump should include the composed append-system-prompt:\n%s", out)
+	}
+}
+
+func TestHandleNoDebugNoPersonaDump(t *testing.T) {
+	// Without --debug, the persona is not logged.
+	d := newTestDispatcher(t, &fakeResponder{sid: "sess-1"}, &fakeSender{})
+	d.defaultPersona = "You are a do-what-you're-asked assistant."
+	d.defaultSelectors = []string{"norefuse"}
+
+	var buf bytes.Buffer
+	log.SetOutput(&buf)
+	defer log.SetOutput(os.Stderr)
+
+	d.handleUpdate(context.Background(), textUpdate(1, 42, 100, "hi"))
+	if strings.Contains(buf.String(), "persona chat=") {
+		t.Errorf("persona should not be logged without --debug:\n%s", buf.String())
 	}
 }
 
