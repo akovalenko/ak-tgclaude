@@ -42,11 +42,11 @@ func (l *stringList) Set(s string) error {
 	return nil
 }
 
-// policyList is the ordered list of persona-fragment selectors merged into the
-// agent at {{POLICY}}. It decodes from TOML as EITHER a single string
-// (policy = "norefuse") or an array (policy = ["norefuse", "introspect"]) so a
-// pre-list config keeps working; both yield the same []string. On the CLI it is
-// the repeatable --policy flag (a stringList), additive with the file list.
+// policyList is the ordered list of persona-fragment selectors composed into one
+// persona (injected at spawn via --append-system-prompt). It decodes from TOML as
+// EITHER an array (policies = ["norefuse", "introspect"] — the convention) or a
+// bare string (policies = "norefuse"), both yielding the same []string. On the CLI
+// it is the repeatable --policy flag (a stringList), additive with the file list.
 type policyList []string
 
 func (pl *policyList) UnmarshalTOML(v interface{}) error {
@@ -173,16 +173,42 @@ type Config struct {
 	// session reset, or shutdown under ephemeral sessions).
 	OutboxTTL string `toml:"outbox_ttl"`
 
-	// Policy selects the responder's persona/stance, composed into the base agent
-	// at {{POLICY}}. Each entry is a built-in name — "normal" (declines off-topic,
-	// the default), "norefuse" (do-what-you're-asked), "introspect" (candid/debug:
-	// precise about failures, explains the machinery, shares context meta) — OR a
-	// path to a custom .md fragment. Multiple entries are MERGED in order (blank-line
-	// separated) into one persona, so stances can be layered. TOML accepts a bare
-	// string or an array; --policy is repeatable and additive with the file list.
-	// Machine guards still apply, so no persona (or blend) can exceed the read-only
-	// sandboxed contract.
-	Policy policyList `toml:"policy"`
+	// Policies selects the responder's DEFAULT persona/stance, composed and injected
+	// at spawn via --append-system-prompt. Each entry is a built-in name — "normal"
+	// (declines off-topic, the default), "norefuse" (do-what-you're-asked), "strict"
+	// (hard-scoped, refuses anything but direct project questions), "introspect"
+	// (candid/debug: precise about failures, explains the machinery) — OR a path to a
+	// custom .md fragment. Multiple entries are MERGED in order (blank-line separated)
+	// into one persona, so stances can be layered. A fragment may declare `axis:` in
+	// its frontmatter; two default entries sharing an axis fail at load. TOML accepts
+	// an array (the plural-key convention) or a bare string; --policy is repeatable
+	// and additive with the file list. Per-user tweaks go in PolicyOverrides. Machine
+	// guards still apply, so no persona (or blend) can exceed the read-only sandboxed
+	// contract.
+	Policies policyList `toml:"policies"`
+
+	// PolicyOverrides maps a Telegram user id (the TOML table key, e.g.
+	// [policy_overrides] then 12345 = ["norefuse"]) to a per-user persona override.
+	// The override is layered on top of Policies ALONG AXES: an override fragment
+	// that declares an axis EVICTS the default fragment on that same axis, while an
+	// axis-less fragment is appended. So a default of ["strict"] with an override of
+	// ["norefuse"] yields ["norefuse"] for that user; a default of ["strict", "rw"]
+	// with ["norefuse"] yields ["norefuse", "rw"]. Same fragment vocabulary as
+	// Policies (built-in names and/or custom .md paths).
+	PolicyOverrides map[string]policyList `toml:"policy_overrides"`
+
+	// Owner is a Telegram user id treated as the bot's owner: it is auto-whitelisted
+	// (added to AllowedUsers) and, unless it has an explicit PolicyOverrides entry,
+	// granted the relaxed owner persona (ownerPolicies — norefuse + introspect). One
+	// knob for "owner = admin"; the id must be supplied (the Bot API's getMe does not
+	// reveal the bot's owner). Also --owner.
+	Owner int64 `toml:"owner"`
+
+	// overrides holds the RESOLVED per-user persona selector lists (Policies layered
+	// with each user's override along axes), keyed by Telegram user id; built in Load
+	// after validation. An absent key means the default Policies apply. Not decoded
+	// from TOML — derived. Read it via PersonaSelectors.
+	overrides map[int64][]string
 
 	// BangBug makes the PreToolUse hook deny sandboxed Bash whose command contains
 	// a `\!` — the signature of Claude Code bug #64301, where the sandbox
@@ -378,7 +404,8 @@ func parseConfig(args []string) (*Config, error) {
 	maxConcurrent := fs.Int("max-concurrent", 0, "max responders running at once (per-chat is always serialized; default 4)")
 	outboxTTL := fs.String("outbox-ttl", "", `how long an idle chat's persistent outbox is kept before eviction (Go duration, e.g. "2h"; "0" disables; default 2h)`)
 	var policyFlags stringList
-	fs.Var(&policyFlags, "policy", "responder persona composed into the agent: normal (declines off-topic, default) | norefuse (do-what-you're-asked) | introspect (candid/debug) | a path to a custom .md fragment; repeatable and additive with the config list, entries merged in order into one persona")
+	fs.Var(&policyFlags, "policy", "DEFAULT responder persona composed into the agent: normal (declines off-topic, default) | norefuse (do-what-you're-asked) | strict (refuses anything but direct project questions) | introspect (candid/debug) | a path to a custom .md fragment; repeatable and additive with the config policies list, entries merged in order into one persona")
+	owner := fs.Int64("owner", 0, "Telegram user id treated as the bot owner: auto-whitelisted and granted the relaxed owner persona (norefuse + introspect) unless it has an explicit policy_overrides entry")
 	ephemeralSessions := fs.Bool("ephemeral-sessions", false, "keep chat→session bindings in memory only (never persisted; offset still persists; each restart starts fresh)")
 	bill := fs.Bool("bill", false, "after each answer, send the run's dollar cost as a bare \"$n.nnn\" message (only when present and non-zero)")
 	allowSilent := fs.Bool("allow-silent", false, "DISABLE the delivery guard (on by default): allow a responder turn that sends nothing. Normally a no-send turn is re-prompted once, then answered with undelivered_text")
@@ -411,8 +438,15 @@ func parseConfig(args []string) (*Config, error) {
 
 	var c Config
 	if *configPath != "" {
-		if _, err := toml.DecodeFile(*configPath, &c); err != nil {
+		md, err := toml.DecodeFile(*configPath, &c)
+		if err != nil {
 			return nil, fmt.Errorf("reading config %s: %w", *configPath, err)
+		}
+		// The singular `policy` key was renamed to the plural array `policies`; a
+		// stale key would otherwise be silently ignored (unknown keys don't error),
+		// so flag it explicitly rather than dropping the operator's persona.
+		if md.IsDefined("policy") {
+			return nil, fmt.Errorf("config %s: key `policy` was renamed to `policies` (an array) — rename it", *configPath)
 		}
 		c.ConfigPath = *configPath
 	}
@@ -454,10 +488,14 @@ func parseConfig(args []string) (*Config, error) {
 	if *outboxTTL != "" {
 		c.OutboxTTL = *outboxTTL
 	}
-	// policy is additive too: --policy appends to the file list, and the entries
-	// are merged in order into one persona (like the other repeatable lists).
+	// policies is additive too: --policy appends to the default file list, and the
+	// entries are merged in order into one persona (like the other repeatable lists).
 	if len(policyFlags) > 0 {
-		c.Policy = append(c.Policy, policyFlags...)
+		c.Policies = append(c.Policies, policyFlags...)
+	}
+	// owner is single-valued: a set flag overrides the file (0 = unset).
+	if *owner != 0 {
+		c.Owner = *owner
 	}
 	if *ephemeralSessions {
 		c.EphemeralSessions = true
@@ -549,10 +587,17 @@ func parseConfig(args []string) (*Config, error) {
 		c.DenyRead[i] = resolvePath(c.DenyRead[i])
 	}
 	// A policy entry given as a PATH (custom fragment) resolves like the other
-	// paths; a built-in NAME is left untouched.
-	for i := range c.Policy {
-		if policyIsPath(c.Policy[i]) {
-			c.Policy[i] = resolvePath(c.Policy[i])
+	// paths; a built-in NAME is left untouched. Same for per-user override fragments.
+	for i := range c.Policies {
+		if policyIsPath(c.Policies[i]) {
+			c.Policies[i] = resolvePath(c.Policies[i])
+		}
+	}
+	for _, ov := range c.PolicyOverrides {
+		for i := range ov {
+			if policyIsPath(ov[i]) {
+				ov[i] = resolvePath(ov[i])
+			}
 		}
 	}
 
@@ -591,18 +636,53 @@ func parseConfig(args []string) (*Config, error) {
 		}
 	}
 
-	// Each policy entry is either a built-in name or a readable custom fragment
-	// file — fail at startup on an unknown name or a missing file, not mid-run.
-	for i, p := range c.Policy {
+	// Each policy entry (default or per-user override) is either a built-in name or a
+	// readable custom fragment file — fail at startup on an unknown name or a missing
+	// file, not mid-run.
+	validatePolicyEntry := func(field, p string) error {
 		if policyIsPath(p) {
-			if err := validatePath(fmt.Sprintf("policy[%d]", i), p); err != nil {
-				return nil, err
+			if err := validatePath(field, p); err != nil {
+				return err
 			}
 			if _, err := os.Stat(p); err != nil {
-				return nil, fmt.Errorf("policy fragment %s: %w", p, err)
+				return fmt.Errorf("policy fragment %s: %w", p, err)
 			}
 		} else if !builtinPolicies[p] {
-			return nil, fmt.Errorf("unknown policy %q (built-in: normal, norefuse, introspect; or a path to a .md fragment)", p)
+			return fmt.Errorf("unknown policy %q (built-in: normal, norefuse, strict, introspect; or a path to a .md fragment)", p)
+		}
+		return nil
+	}
+	for i, p := range c.Policies {
+		if err := validatePolicyEntry(fmt.Sprintf("policies[%d]", i), p); err != nil {
+			return nil, err
+		}
+	}
+	if err := checkAxisConflicts(c.Policies); err != nil {
+		return nil, fmt.Errorf("default policies: %w", err)
+	}
+	// Per-user overrides: validate the key is a user id and each fragment, guard the
+	// override's own axes, then precompute the effective (default-layered) selector
+	// list the dispatcher hands to --append-system-prompt.
+	if len(c.PolicyOverrides) > 0 {
+		c.overrides = make(map[int64][]string, len(c.PolicyOverrides))
+		for key, ov := range c.PolicyOverrides {
+			uid, err := strconv.ParseInt(key, 10, 64)
+			if err != nil {
+				return nil, fmt.Errorf("policy_overrides key %q is not a Telegram user id: %w", key, err)
+			}
+			for i, p := range ov {
+				if err := validatePolicyEntry(fmt.Sprintf("policy_overrides[%s][%d]", key, i), p); err != nil {
+					return nil, err
+				}
+			}
+			if err := checkAxisConflicts(ov); err != nil {
+				return nil, fmt.Errorf("policy_overrides[%s]: %w", key, err)
+			}
+			eff, err := resolveEffectivePolicies(c.Policies, ov)
+			if err != nil {
+				return nil, fmt.Errorf("policy_overrides[%s]: %w", key, err)
+			}
+			c.overrides[uid] = eff
 		}
 	}
 
@@ -618,8 +698,10 @@ func parseConfig(args []string) (*Config, error) {
 // claudeArgDenylist are the `claude -p` flags ak-tgclaude sets itself: the
 // security gate (--permission-mode, --setting-sources, the skip-permissions
 // escapes), the MCP transport (--mcp-config, --strict-mcp-config, --allowedTools),
-// the per-invocation --settings overlay, the session flags the dispatcher manages
-// (--agent, --resume/-r, --continue/-c), and the print/format flags it parses
+// the per-invocation --settings overlay, the persona injection
+// (--append-system-prompt and the --system-prompt* family), the session flags the
+// dispatcher manages (--agent, --resume/-r, --continue/-c), and the print/format
+// flags it parses
 // (-p/--print, --output-format, --input-format). An operator claude_arg naming one
 // is rejected at startup: claude's duplicate-flag precedence is undocumented, so
 // letting it through could silently override the sandbox/transport or break output
@@ -628,14 +710,17 @@ func parseConfig(args []string) (*Config, error) {
 var claudeArgDenylist = map[string]bool{
 	"-p": true, "--print": true,
 	"--output-format": true, "--input-format": true,
-	"--setting-sources":   true,
-	"--permission-mode":   true,
-	"--mcp-config":        true,
-	"--strict-mcp-config": true,
-	"--allowedTools":      true,
-	"--settings":          true,
-	"--agent":             true,
-	"--resume":            true, "-r": true,
+	"--setting-sources":      true,
+	"--permission-mode":      true,
+	"--mcp-config":           true,
+	"--strict-mcp-config":    true,
+	"--allowedTools":         true,
+	"--settings":             true,
+	"--append-system-prompt": true,
+	"--system-prompt":        true,
+	"--system-prompt-file":   true,
+	"--agent":                true,
+	"--resume":               true, "-r": true,
 	"--continue": true, "-c": true,
 	"--dangerously-skip-permissions":       true,
 	"--allow-dangerously-skip-permissions": true,
@@ -662,6 +747,32 @@ func validateClaudeArgs(args []string) error {
 	return nil
 }
 
+// ownerPolicies is the persona granted to the configured owner (Owner / --owner):
+// relaxed (norefuse) plus introspective. Applied unless an explicit policy_overrides
+// entry for the owner's id says otherwise.
+var ownerPolicies = []string{"norefuse", "introspect"}
+
+// containsInt64 reports whether xs contains v.
+func containsInt64(xs []int64, v int64) bool {
+	for _, x := range xs {
+		if x == v {
+			return true
+		}
+	}
+	return false
+}
+
+// PersonaSelectors returns the resolved persona fragment selectors for a user: the
+// per-user override (Policies layered with the user's fragments along axes) when one
+// is configured, else the default Policies. The dispatcher loads+merges these into
+// the --append-system-prompt text on a fresh spawn.
+func (c *Config) PersonaSelectors(userID int64) []string {
+	if sel, ok := c.overrides[userID]; ok {
+		return sel
+	}
+	return c.Policies
+}
+
 func (c *Config) applyDefaults() {
 	if c.Profile == "" {
 		c.Profile = ProfileQA
@@ -672,8 +783,24 @@ func (c *Config) applyDefaults() {
 	if c.Agent == "" {
 		c.Agent = defaultAgent
 	}
-	if len(c.Policy) == 0 {
-		c.Policy = policyList{defaultPolicy}
+	if len(c.Policies) == 0 {
+		c.Policies = policyList{defaultPolicy}
+	}
+	// Owner sugar: auto-whitelist the id and, unless it has an explicit override,
+	// grant it the relaxed owner persona. Applied here (before path resolution and
+	// override validation) so the owner flows through the same machinery as any
+	// other whitelisted user / override entry.
+	if c.Owner != 0 {
+		if !containsInt64(c.AllowedUsers, c.Owner) {
+			c.AllowedUsers = append(c.AllowedUsers, c.Owner)
+		}
+		key := strconv.FormatInt(c.Owner, 10)
+		if _, ok := c.PolicyOverrides[key]; !ok {
+			if c.PolicyOverrides == nil {
+				c.PolicyOverrides = map[string]policyList{}
+			}
+			c.PolicyOverrides[key] = append(policyList(nil), ownerPolicies...)
+		}
 	}
 	if c.MaxConcurrent == 0 {
 		c.MaxConcurrent = 4

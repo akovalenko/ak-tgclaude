@@ -288,10 +288,23 @@ func TestMaterializeScaffoldWritesValidJSON(t *testing.T) {
 	}
 }
 
-func agentBody(t *testing.T, policies ...string) string {
+// composedPersona returns the persona text loadPolicies composes for the given
+// selectors — exactly what the dispatcher injects via --append-system-prompt.
+func composedPersona(t *testing.T, policies ...string) string {
+	t.Helper()
+	b, err := loadPolicies(policies)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(b)
+}
+
+// neutralAgentBody materializes the scaffold and returns the (now persona-neutral)
+// responder agent body.
+func neutralAgentBody(t *testing.T) string {
 	t.Helper()
 	cwd := t.TempDir()
-	if err := materializeScaffold(cwd, scaffoldParams{CacheDir: "/c", Policy: policies}); err != nil {
+	if err := materializeScaffold(cwd, scaffoldParams{CacheDir: "/c"}); err != nil {
 		t.Fatal(err)
 	}
 	b, err := os.ReadFile(filepath.Join(cwd, ".claude", "agents", defaultAgent+".md"))
@@ -535,23 +548,37 @@ func TestWireSkillDedupsAndInsertsWhenAbsent(t *testing.T) {
 	}
 }
 
-func TestMaterializeAgentComposesPolicy(t *testing.T) {
-	// "" defaults to normal; every policy composes into the SAME agent name (so
-	// --agent selection is unchanged) and shares the base mechanics, with no
-	// {{POLICY}} marker surviving.
-	def := agentBody(t, "")
-	nr := agentBody(t, "norefuse")
-	intro := agentBody(t, "introspect")
-	for _, body := range []string{def, nr, intro} {
-		if !strings.Contains(body, "name: "+defaultAgent) {
-			t.Errorf("policy lost the agent name:\n%s", body)
+func TestMaterializeAgentIsPersonaNeutral(t *testing.T) {
+	// The materialized agent keeps its name and shared mechanics but carries NO
+	// persona: the {{POLICY}} marker is gone and no stance text is baked in (the
+	// persona now rides --append-system-prompt at spawn).
+	body := neutralAgentBody(t)
+	if !strings.Contains(body, "name: "+defaultAgent) {
+		t.Errorf("agent lost its name:\n%s", body)
+	}
+	if strings.Contains(body, policyPlaceholder) {
+		t.Errorf("{{POLICY}} marker survived in the neutral agent:\n%s", body)
+	}
+	if !strings.Contains(body, "## Replying") || !strings.Contains(body, "## Boundaries") {
+		t.Errorf("agent dropped the shared base sections:\n%s", body)
+	}
+	// No persona stance is baked in (these strings are persona-only).
+	for _, persona := range []string{"out of scope", "do-what-you're-asked", "introspection / debug"} {
+		if strings.Contains(body, persona) {
+			t.Errorf("persona text %q leaked into the neutral agent:\n%s", persona, body)
 		}
-		if strings.Contains(body, policyPlaceholder) {
-			t.Errorf("{{POLICY}} left unsubstituted:\n%s", body)
-		}
-		// The shared base mechanics travel with every persona.
-		if !strings.Contains(body, "## Replying") || !strings.Contains(body, "## Boundaries") {
-			t.Errorf("policy dropped the shared base sections:\n%s", body)
+	}
+}
+
+func TestComposePolicyText(t *testing.T) {
+	// "" defaults to normal; each selector composes to its distinctive persona text.
+	def := composedPersona(t, "")
+	nr := composedPersona(t, "norefuse")
+	intro := composedPersona(t, "introspect")
+	// Frontmatter (axis:) is stripped from the composed text.
+	for _, p := range []string{def, nr, intro} {
+		if strings.Contains(p, "axis:") || strings.HasPrefix(p, "---") {
+			t.Errorf("frontmatter leaked into composed persona:\n%s", p)
 		}
 	}
 	// normal (the default) declines off-topic and carries the untrusted-input framing.
@@ -571,21 +598,17 @@ func TestMaterializeAgentComposesPolicy(t *testing.T) {
 	}
 }
 
-func TestMaterializeAgentCustomPolicyFile(t *testing.T) {
-	// A --policy path composes an operator's own fragment into the base.
+func TestComposePolicyCustomFile(t *testing.T) {
+	// A --policy path composes an operator's own fragment.
 	f := filepath.Join(t.TempDir(), "my-policy.md")
 	if err := os.WriteFile(f, []byte("You are a CUSTOM persona for this bot.\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	body := agentBody(t, f)
-	if !strings.Contains(body, "You are a CUSTOM persona for this bot.") {
+	if body := composedPersona(t, f); !strings.Contains(body, "You are a CUSTOM persona for this bot.") {
 		t.Errorf("custom policy fragment not composed in:\n%s", body)
 	}
-	if strings.Contains(body, policyPlaceholder) {
-		t.Errorf("{{POLICY}} left unsubstituted with a custom policy:\n%s", body)
-	}
 	// An unknown built-in NAME (not a path) is an error, not a silent miss.
-	if err := materializeScaffold(t.TempDir(), scaffoldParams{CacheDir: "/c", Policy: []string{"bogus"}}); err == nil {
+	if _, err := loadPolicies([]string{"bogus"}); err == nil {
 		t.Errorf("unknown policy name should error")
 	}
 }
@@ -598,19 +621,74 @@ func TestMaterializeAgentMergesPolicies(t *testing.T) {
 	if err := os.WriteFile(f, []byte("EXTRA persona layered on top.\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	body := agentBody(t, "norefuse", f)
+	body := composedPersona(t, "norefuse", f)
 	if !strings.Contains(body, "NOT** decline") {
 		t.Errorf("merged policy dropped the norefuse fragment:\n%s", body)
 	}
 	if !strings.Contains(body, "EXTRA persona layered on top.") {
 		t.Errorf("merged policy dropped the custom fragment:\n%s", body)
 	}
-	if strings.Contains(body, policyPlaceholder) {
-		t.Errorf("{{POLICY}} left unsubstituted with a merged policy:\n%s", body)
-	}
 	// A blank line separates the two fragments (norefuse body then the custom one).
 	if !strings.Contains(body, "\n\nEXTRA persona layered on top.") {
 		t.Errorf("merged fragments not blank-line separated:\n%s", body)
+	}
+}
+
+func TestParseFragment(t *testing.T) {
+	// Frontmatter is stripped; axis is read.
+	axis, body := parseFragment([]byte("---\naxis: refusal\n---\nYou are strict.\n"))
+	if axis != "refusal" {
+		t.Errorf("axis = %q, want refusal", axis)
+	}
+	if strings.TrimSpace(string(body)) != "You are strict." {
+		t.Errorf("body = %q, want the persona text without frontmatter", body)
+	}
+	// No frontmatter => no axis, the whole thing is body.
+	if a, b := parseFragment([]byte("Just a persona.\n")); a != "" || strings.TrimSpace(string(b)) != "Just a persona." {
+		t.Errorf("plain fragment: axis=%q body=%q", a, b)
+	}
+	// A leading fence with no closing fence is all body (no panic, no axis).
+	if a, _ := parseFragment([]byte("---\nnot really frontmatter\n")); a != "" {
+		t.Errorf("unterminated frontmatter should yield no axis, got %q", a)
+	}
+	// A quoted axis value is unquoted.
+	if a, _ := parseFragment([]byte("---\naxis: \"refusal\"\n---\nx")); a != "refusal" {
+		t.Errorf("quoted axis = %q, want refusal", a)
+	}
+}
+
+func TestCheckAxisConflicts(t *testing.T) {
+	// Two refusal-axis built-ins conflict.
+	if err := checkAxisConflicts([]string{"normal", "norefuse"}); err == nil {
+		t.Errorf("normal + norefuse should conflict on axis refusal")
+	}
+	// One refusal + an axis-less one is fine.
+	if err := checkAxisConflicts([]string{"strict", "introspect"}); err != nil {
+		t.Errorf("strict + introspect should not conflict: %v", err)
+	}
+	// A single fragment never conflicts.
+	if err := checkAxisConflicts([]string{"norefuse"}); err != nil {
+		t.Errorf("single fragment should not conflict: %v", err)
+	}
+}
+
+func TestResolveEffectivePolicies(t *testing.T) {
+	// An override on the shared axis EVICTS the default fragment in place; an
+	// axis-less default (introspect) is untouched.
+	got, err := resolveEffectivePolicies([]string{"strict", "introspect"}, []string{"norefuse"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 || got[0] != "norefuse" || got[1] != "introspect" {
+		t.Errorf("eviction in place = %v, want [norefuse introspect]", got)
+	}
+	// An axis-less override just appends (nothing to evict).
+	if got, _ := resolveEffectivePolicies([]string{"strict"}, []string{"introspect"}); len(got) != 2 || got[0] != "strict" || got[1] != "introspect" {
+		t.Errorf("axis-less append = %v, want [strict introspect]", got)
+	}
+	// An empty override yields the base unchanged.
+	if got, _ := resolveEffectivePolicies([]string{"strict"}, nil); len(got) != 1 || got[0] != "strict" {
+		t.Errorf("empty override = %v, want [strict]", got)
 	}
 }
 
@@ -638,17 +716,15 @@ func TestInjectMCPTools(t *testing.T) {
 }
 
 func TestMaterializeAgentInjectsMCPTools(t *testing.T) {
-	// The tools: line (in the shared base, so policy-independent) gets the real send
-	// tools substituted from the single mcpTools source, no {{MCP_TOOLS}} surviving.
-	for _, policy := range []string{"normal", "norefuse", "introspect"} {
-		body := agentBody(t, policy)
-		if strings.Contains(body, mcpToolsPlaceholder) {
-			t.Errorf("policy=%s: {{MCP_TOOLS}} left unsubstituted:\n%s", policy, body)
-		}
-		want := "tools: Read, Grep, Glob, Bash, Write, Edit, Skill, " + strings.Join(mcpTools, ", ")
-		if !strings.Contains(body, want) {
-			t.Errorf("policy=%s: MCP tools not appended to tools: as expected\nwant line: %q\ngot:\n%s", policy, want, body)
-		}
+	// The tools: line (in the shared, persona-neutral base) gets the real send tools
+	// substituted from the single mcpTools source, no {{MCP_TOOLS}} surviving.
+	body := neutralAgentBody(t)
+	if strings.Contains(body, mcpToolsPlaceholder) {
+		t.Errorf("{{MCP_TOOLS}} left unsubstituted:\n%s", body)
+	}
+	want := "tools: Read, Grep, Glob, Bash, Write, Edit, Skill, " + strings.Join(mcpTools, ", ")
+	if !strings.Contains(body, want) {
+		t.Errorf("MCP tools not appended to tools: as expected\nwant line: %q\ngot:\n%s", want, body)
 	}
 }
 

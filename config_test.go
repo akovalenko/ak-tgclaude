@@ -251,17 +251,22 @@ func TestParseConfigPolicy(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := []string(c.Policy); len(got) != 1 || got[0] != "normal" {
-		t.Errorf("default policy = %v, want [normal]", got)
+	if got := []string(c.Policies); len(got) != 1 || got[0] != "normal" {
+		t.Errorf("default policies = %v, want [normal]", got)
 	}
 	// A built-in name is accepted.
-	if c, err := parseConfig([]string{"--policy", "introspect"}); err != nil || len(c.Policy) != 1 || c.Policy[0] != "introspect" {
-		t.Errorf("policy introspect: err=%v policy=%v", err, c.Policy)
+	if c, err := parseConfig([]string{"--policy", "introspect"}); err != nil || len(c.Policies) != 1 || c.Policies[0] != "introspect" {
+		t.Errorf("policy introspect: err=%v policies=%v", err, c.Policies)
 	}
-	// --policy is repeatable: entries accumulate in order.
+	// strict is a built-in (the new hard refusal stance).
+	if _, err := parseConfig([]string{"--policy", "strict"}); err != nil {
+		t.Errorf("strict should be a built-in policy: %v", err)
+	}
+	// --policy is repeatable: entries accumulate in order (norefuse is refusal-axis,
+	// introspect is axis-less, so they don't conflict).
 	if c, err := parseConfig([]string{"--policy", "norefuse", "--policy", "introspect"}); err != nil ||
-		len(c.Policy) != 2 || c.Policy[0] != "norefuse" || c.Policy[1] != "introspect" {
-		t.Errorf("repeatable policy: err=%v policy=%v, want [norefuse introspect]", err, c.Policy)
+		len(c.Policies) != 2 || c.Policies[0] != "norefuse" || c.Policies[1] != "introspect" {
+		t.Errorf("repeatable policy: err=%v policies=%v, want [norefuse introspect]", err, c.Policies)
 	}
 	// An unknown built-in name is rejected at startup — including when mixed with a
 	// valid one.
@@ -284,35 +289,134 @@ func TestParseConfigPolicy(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(c2.Policy) != 1 || c2.Policy[0] != f {
-		t.Errorf("policy path = %v, want [%q]", c2.Policy, f)
+	if len(c2.Policies) != 1 || c2.Policies[0] != f {
+		t.Errorf("policy path = %v, want [%q]", c2.Policies, f)
+	}
+}
+
+// Two default fragments on the same axis (normal/norefuse/strict all carry
+// axis: refusal) are a load-time error — the opt-in mutual-exclusion guard.
+func TestParseConfigPolicyAxisConflict(t *testing.T) {
+	if _, err := parseConfig([]string{"--policy", "normal", "--policy", "norefuse"}); err == nil {
+		t.Errorf("normal + norefuse share axis refusal — should be rejected")
+	}
+	if _, err := parseConfig([]string{"--policy", "strict", "--policy", "norefuse"}); err == nil {
+		t.Errorf("strict + norefuse share axis refusal — should be rejected")
+	}
+	// An axis-less fragment (introspect) alongside a refusal one is fine.
+	if _, err := parseConfig([]string{"--policy", "strict", "--policy", "introspect"}); err != nil {
+		t.Errorf("strict + introspect should be allowed: %v", err)
 	}
 }
 
 func TestParseConfigPolicyTOML(t *testing.T) {
-	// A bare string in TOML (the pre-list form) still decodes to a one-element list.
+	// A bare string in TOML still decodes to a one-element list.
 	strPath := filepath.Join(t.TempDir(), "str.toml")
-	if err := os.WriteFile(strPath, []byte("policy = \"introspect\"\n"), 0o600); err != nil {
+	if err := os.WriteFile(strPath, []byte("policies = \"introspect\"\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	c, err := parseConfig([]string{"--config", strPath})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(c.Policy) != 1 || c.Policy[0] != "introspect" {
-		t.Errorf("string TOML policy = %v, want [introspect]", c.Policy)
+	if len(c.Policies) != 1 || c.Policies[0] != "introspect" {
+		t.Errorf("string TOML policies = %v, want [introspect]", c.Policies)
 	}
 	// An array in TOML decodes in order; --policy is additive on top of it.
 	arrPath := filepath.Join(t.TempDir(), "arr.toml")
-	if err := os.WriteFile(arrPath, []byte("policy = [\"normal\", \"introspect\"]\n"), 0o600); err != nil {
+	if err := os.WriteFile(arrPath, []byte("policies = [\"norefuse\"]\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	c2, err := parseConfig([]string{"--config", arrPath, "--policy", "norefuse"})
+	c2, err := parseConfig([]string{"--config", arrPath, "--policy", "introspect"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(c2.Policy) != 3 || c2.Policy[0] != "normal" || c2.Policy[1] != "introspect" || c2.Policy[2] != "norefuse" {
-		t.Errorf("array TOML + flag policy = %v, want [normal introspect norefuse]", c2.Policy)
+	if len(c2.Policies) != 2 || c2.Policies[0] != "norefuse" || c2.Policies[1] != "introspect" {
+		t.Errorf("array TOML + flag policies = %v, want [norefuse introspect]", c2.Policies)
+	}
+	// The old singular `policy` key is a hard error (renamed to `policies`).
+	legacyPath := filepath.Join(t.TempDir(), "legacy.toml")
+	if err := os.WriteFile(legacyPath, []byte("policy = \"norefuse\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := parseConfig([]string{"--config", legacyPath}); err == nil {
+		t.Errorf("legacy `policy` key should be rejected")
+	}
+}
+
+// Per-user overrides layer on the default along axes: an override fragment evicts
+// the default fragment on its axis, an axis-less one appends. PersonaSelectors
+// exposes the resolved list.
+func TestParseConfigPolicyOverrides(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "ov.toml")
+	body := "policies = [\"strict\"]\n\n[policy_overrides]\n123 = [\"norefuse\", \"introspect\"]\n456 = [\"introspect\"]\n"
+	if err := os.WriteFile(p, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	c, err := parseConfig([]string{"--config", p})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 123: norefuse evicts strict (shared refusal axis), introspect appended.
+	if got := c.PersonaSelectors(123); len(got) != 2 || got[0] != "norefuse" || got[1] != "introspect" {
+		t.Errorf("override 123 = %v, want [norefuse introspect]", got)
+	}
+	// 456: introspect is axis-less, so strict stays and introspect appends.
+	if got := c.PersonaSelectors(456); len(got) != 2 || got[0] != "strict" || got[1] != "introspect" {
+		t.Errorf("override 456 = %v, want [strict introspect]", got)
+	}
+	// An unknown user gets the default.
+	if got := c.PersonaSelectors(999); len(got) != 1 || got[0] != "strict" {
+		t.Errorf("default persona = %v, want [strict]", got)
+	}
+}
+
+// A non-numeric override key, and an override list that itself conflicts on an
+// axis, both fail at load.
+func TestParseConfigPolicyOverridesInvalid(t *testing.T) {
+	badKey := filepath.Join(t.TempDir(), "badkey.toml")
+	if err := os.WriteFile(badKey, []byte("[policy_overrides]\nalice = [\"norefuse\"]\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := parseConfig([]string{"--config", badKey}); err == nil {
+		t.Errorf("non-numeric override key should be rejected")
+	}
+	badAxis := filepath.Join(t.TempDir(), "badaxis.toml")
+	if err := os.WriteFile(badAxis, []byte("[policy_overrides]\n7 = [\"normal\", \"norefuse\"]\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := parseConfig([]string{"--config", badAxis}); err == nil {
+		t.Errorf("override with two refusal fragments should be rejected")
+	}
+}
+
+// owner is auto-whitelisted and granted the relaxed owner persona, unless it has an
+// explicit override entry (which then wins).
+func TestParseConfigOwner(t *testing.T) {
+	c, err := parseConfig([]string{"--owner", "555"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsInt64(c.AllowedUsers, 555) {
+		t.Errorf("owner should be auto-whitelisted: allowed=%v", c.AllowedUsers)
+	}
+	// Default policies are [normal]; the owner bundle (norefuse+introspect) evicts
+	// normal on the refusal axis and appends introspect.
+	if got := c.PersonaSelectors(555); len(got) != 2 || got[0] != "norefuse" || got[1] != "introspect" {
+		t.Errorf("owner persona = %v, want [norefuse introspect]", got)
+	}
+	// An explicit override for the owner wins over the default owner bundle.
+	p := filepath.Join(t.TempDir(), "owner.toml")
+	if err := os.WriteFile(p, []byte("owner = 555\npolicies = [\"strict\"]\n\n[policy_overrides]\n555 = [\"introspect\"]\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	c2, err := parseConfig([]string{"--config", p})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// strict stays (introspect is axis-less); NOT the owner norefuse bundle.
+	if got := c2.PersonaSelectors(555); len(got) != 2 || got[0] != "strict" || got[1] != "introspect" {
+		t.Errorf("explicit owner override = %v, want [strict introspect]", got)
 	}
 }
 

@@ -63,6 +63,12 @@ type Dispatcher struct {
 	bill             bool   // send the run's dollar cost as a "$n.nnn" message after each answer
 	debug            bool   // log the responder's full final text after each run (troubleshooting)
 
+	// persona injected via --append-system-prompt on a chat's FIRST spawn (frozen
+	// for the session). defaultPersona is the composed default; persona maps a
+	// Telegram user id to its resolved override persona (absent => the default).
+	defaultPersona string
+	persona        map[int64]string
+
 	requireDelivery bool   // guard: if the responder sent nothing, re-prompt once (then fall back)
 	undeliveredText string // fallback reply when the guard's re-prompt still delivered nothing ("" => none)
 }
@@ -317,14 +323,25 @@ func (d *Dispatcher) handleUpdate(ctx context.Context, u Update) {
 
 	start := time.Now()
 	sid, _ := d.store.SessionID(m.Chat.ID)
+	// On a FRESH spawn, compose+inject this user's persona (it freezes into the
+	// session); on resume it is already there, so omit it.
+	var appendPrompt string
+	if sid == "" {
+		var uid int64
+		if m.From != nil {
+			uid = m.From.ID
+		}
+		appendPrompt = d.personaFor(uid)
+	}
 	res, err := d.resp.Respond(ctx, RespondRequest{
-		Prompt:     incomingText(m),
-		SentAt:     messageSentAt(m),
-		Attachment: attach,
-		SessionID:  sid,
-		DocDir:     docDir,
-		MCPURL:     d.mcp.URL(),
-		MCPToken:   token,
+		Prompt:             incomingText(m),
+		SentAt:             messageSentAt(m),
+		Attachment:         attach,
+		SessionID:          sid,
+		DocDir:             docDir,
+		MCPURL:             d.mcp.URL(),
+		MCPToken:           token,
+		AppendSystemPrompt: appendPrompt,
 	})
 	stopTyping()
 	dur := time.Since(start).Round(time.Millisecond)
@@ -461,6 +478,15 @@ func userID(u *User) int64 {
 
 // userLabel renders a message sender for logs: the numeric id, plus @username
 // when present. "?" if there is no sender (e.g. channel posts).
+// personaFor returns the --append-system-prompt persona for a user: its resolved
+// per-user override persona if one is configured, else the composed default.
+func (d *Dispatcher) personaFor(userID int64) string {
+	if p, ok := d.persona[userID]; ok {
+		return p
+	}
+	return d.defaultPersona
+}
+
 func userLabel(u *User) string {
 	if u == nil {
 		return "?"
@@ -604,7 +630,6 @@ func runDispatch(args []string) {
 			CacheDir:       cacheDir,
 			OutboxRoot:     outboxRoot,
 			TokenFile:      cfg.ConfigPath,
-			Policy:         cfg.Policy,
 			Project:        cfg.Project,
 			WireSkills:     cfg.WireSkills,
 			AddSkills:      cfg.AddSkills,
@@ -655,6 +680,25 @@ func runDispatch(args []string) {
 		}
 	}
 
+	// Precompute the persona injected via --append-system-prompt on a fresh spawn:
+	// the composed default, plus each per-user override's composed persona. The
+	// fragments were already validated (and read for their axes) at config load, so
+	// a failure here is unexpected — fail fast rather than mid-run.
+	defaultPersona, err := loadPolicies(cfg.Policies)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "ak-tgclaude: dispatch: composing default persona: %v\n", err)
+		os.Exit(1)
+	}
+	personaByUser := make(map[int64]string, len(cfg.overrides))
+	for uid := range cfg.overrides {
+		p, perr := loadPolicies(cfg.PersonaSelectors(uid))
+		if perr != nil {
+			fmt.Fprintf(os.Stderr, "ak-tgclaude: dispatch: composing persona for user %d: %v\n", uid, perr)
+			os.Exit(1)
+		}
+		personaByUser[uid] = string(p)
+	}
+
 	d := &Dispatcher{
 		client:           client,
 		sender:           client,
@@ -662,6 +706,8 @@ func runDispatch(args []string) {
 		store:            store,
 		resp:             resp,
 		authz:            authz,
+		defaultPersona:   string(defaultPersona),
+		persona:          personaByUser,
 		outboxRoot:       outboxRoot,
 		outboxTTL:        cfg.OutboxTTLDur(),
 		pollTimeout:      defaultPollTimeout,

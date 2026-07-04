@@ -364,10 +364,11 @@ a generic one, embedded in the binary and materialized into the scaffold:
 
 - **`faq-responder`** (agent) — a read-only responder. The incoming message is its
   prompt; it explores the project at **`$AK_TGCLAUDE_PROJECT`** (set by the
-  dispatcher) with Grep/Read/Bash and replies over Telegram. It is composed from one
-  **base** template (the invariant mechanics) plus a swappable **policy** fragment
-  (its persona — see [Policy](#policy-persona) below); the default persona is a
-  scoped FAQ that declines off-topic. It is the default `agent`. To give it **domain
+  dispatcher) with Grep/Read/Bash and replies over Telegram. It is one persona-neutral
+  **base** template (the invariant mechanics); its **persona** (see
+  [Policy](#policy-persona) below) is composed per-user and injected at spawn, so one
+  shared agent serves every chat. The default persona is a scoped FAQ that declines
+  off-topic. It is the default `agent`. To give it **domain
   knowledge**, wire a skill into it with `wire_skills`/`--wire-skill` (see [Wiring
   domain skills](#wiring-domain-skills)) rather than writing a custom agent.
 - **`tg-emit`** (skill, referenced by the agent's `skills:` frontmatter) — the
@@ -384,11 +385,12 @@ The dispatcher logs one line when it **launches** a responder (`chat` / `user` /
 
 ### Policy (persona)
 
-The agent is **one base template** — the invariant mechanics (project access,
-replying via tg-emit, the machine-enforced boundaries) — with a `{{POLICY}}` marker
-that the scaffold replaces with a **persona fragment**. The persona is a property of
-the invocation, so there is exactly one copy of the shared prose; swapping the stance
-never touches it. Select with `policy` (config) / `--policy`, each of which is one of:
+The agent is **one persona-neutral base** — the invariant mechanics (project access,
+replying via tg-emit, the machine-enforced boundaries). The **persona** is composed
+per message and injected at spawn via `--append-system-prompt` (which composes with
+`--agent` and freezes into the session), so one shared agent serves every chat and
+the stance can vary **per user**. Set the default with `policies` (config) /
+`--policy`, each selector one of:
 
 - **`normal`** (default) — a read-only **FAQ assistant**, narrowly scoped: answers
   from the code, notes assumptions on ambiguity, declines off-topic, and treats the
@@ -396,31 +398,59 @@ never touches it. Select with `policy` (config) / `--policy`, each of which is o
 - **`norefuse`** — a **do-what-you're-asked** assistant: acts on the message
   directly, doesn't decline as off-topic; when a tool call *is* denied it relays the
   concrete technical reason rather than a vague refusal.
+- **`strict`** — a **hard-scoped** FAQ: answers only direct questions about the
+  project from verifiable code, and declines anything else briefly, without
+  elaborating or guessing.
 - **`introspect`** — a candid **debug** persona: precise about *what* failed and
   *which* rule stopped it, explains how it reached an answer, and shares meta about
   its own context (which skills/agents are preloaded, what it read). (Distinct from
   `--debug`, which toggles claude's own transport diagnostics.)
-- **a path to a `.md` file** — your own fragment, composed into the base like a
-  built-in (e.g. `--policy ~/lib/my-persona.md`).
+- **a path to a `.md` file** — your own fragment, composed like a built-in (e.g.
+  `--policy ~/lib/my-persona.md`).
 
-`policy` is **repeatable** — give several selectors and they are **merged in order**
-(blank-line separated) into one persona, so stances layer (e.g. a built-in base plus a
-custom `.md` overlay). In TOML it accepts a bare string or an array; `--policy` is
-repeatable and **additive** with the config list (like `wire_skills` et al.):
+`policies` is a **list** — several selectors **merge in order** (blank-line
+separated) into one persona, so stances layer (a built-in base plus a custom `.md`
+overlay). In TOML it is an **array** (the plural-key convention; a bare string is also
+accepted); `--policy` is repeatable and **additive** with the config list.
 
 ```toml
-policy = ["norefuse", "~/lib/house-style.md"]   # or a bare string: policy = "normal"
+policies = ["norefuse", "~/lib/house-style.md"]   # or a bare string: policies = "normal"
 ```
 
+**Axes.** A fragment may declare an `axis:` in its YAML frontmatter — an **opt-in**
+mutual-exclusion guard. The refusal trio (`normal`/`norefuse`/`strict`) all carry
+`axis: refusal`, so two of them in one persona is a **load-time error**; `introspect`
+and axis-less custom fragments are purely additive. (The axis line is stripped from
+the composed text.)
+
+**Per-user overrides.** `[policy_overrides]` maps a Telegram user id to a persona
+layered on top of `policies` **along axes**: an override fragment that declares an
+axis **evicts** the default fragment on that same axis, an axis-less one appends. So
+with `policies = ["strict"]`, an override of `["norefuse"]` gives that user norefuse
+(not both):
+
+```toml
+policies = ["strict"]
+
+[policy_overrides]
+12345678 = ["norefuse", "introspect"]   # this user: norefuse (evicts strict) + introspect
 ```
---policy norefuse --policy ~/lib/house-style.md   # merged on top of any config entries
-```
+
+The persona freezes into the chat's session at its first spawn, so in a **group**
+chat the first user to trigger a spawn sets it until the session resets; in a **DM**
+the user and chat coincide, so the override applies cleanly.
+
+**Owner shortcut.** `owner = <id>` (or `--owner`) names a Telegram user id that is
+**auto-whitelisted** and granted the relaxed **owner persona** (`norefuse` +
+`introspect`), unless it has an explicit `policy_overrides` entry. One knob for
+"owner = admin" — the id must be supplied, since the Bot API's `getMe` does not
+reveal the bot's owner.
 
 Every persona (or blend) is **safe by construction**: the read-only sandbox, token
 deny-read, per-invocation write grant, and pinned route are machine-enforced, so no
 persona can exceed them (it still can't modify the project, read secrets, or message
-anyone but the sender). An unknown name or a missing fragment file is rejected **at
-startup**.
+anyone but the sender). An unknown name, a missing fragment file, an axis conflict, or
+a non-numeric override key is rejected **at startup**.
 
 ### Wiring domain skills
 

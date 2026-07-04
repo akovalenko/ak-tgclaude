@@ -23,6 +23,10 @@ type RespondRequest struct {
 	DocDir     string      // AK_TGCLAUDE_OUTBOX: writable dir for attachments/scratch
 	MCPURL     string      // dispatcher's MCP endpoint (inline --mcp-config for claude; direct call for the stub)
 	MCPToken   string      // this invocation's capability token (the server pins the route to it)
+	// AppendSystemPrompt is the composed persona injected via --append-system-prompt.
+	// Set only on a FRESH spawn (SessionID==""); it freezes into the session, so a
+	// resume neither needs nor re-sends it.
+	AppendSystemPrompt string
 }
 
 // RespondResult reports the session the responder used (so the dispatcher can
@@ -68,7 +72,7 @@ type claudeResponder struct {
 // (route-pinned by MCPToken). It returns the session id parsed from the JSON
 // result.
 func (c *claudeResponder) Respond(ctx context.Context, req RespondRequest) (RespondResult, error) {
-	cmd := exec.CommandContext(ctx, "claude", buildClaudeArgs(c.agent, req.SessionID, req.DocDir, req.MCPURL, req.MCPToken, c.debug, c.extraTools, c.claudeArgs)...)
+	cmd := exec.CommandContext(ctx, "claude", buildClaudeArgs(c.agent, req.SessionID, req.AppendSystemPrompt, req.DocDir, req.MCPURL, req.MCPToken, c.debug, c.extraTools, c.claudeArgs)...)
 	cmd.Dir = c.cwd
 	cmd.Env = c.env(req.DocDir)
 	cmd.Stdin = strings.NewReader(buildPrompt(c.project, req.DocDir, req.Prompt, req.SentAt, req.Attachment))
@@ -206,10 +210,12 @@ func buildPrompt(project, outbox, message string, sentAt time.Time, attach *Atta
 // the model's context — plus --strict-mcp-config) and permits its send tools
 // (--allowedTools; their availability comes from the agent's tools: frontmatter),
 // and overlays a per-invocation --settings that grants write to just this
-// invocation's outbox (merged on top of the static settings). Any operator
+// invocation's outbox (merged on top of the static settings). On a FRESH spawn it
+// also injects the composed persona via --append-system-prompt (which composes with
+// --agent and freezes into the session, so it is omitted on --resume). Any operator
 // passthrough (extra) is appended last — validated against the denylist at config
 // load, so it cannot name a flag set above.
-func buildClaudeArgs(agent, sessionID, docDir, mcpURL, mcpToken string, debug bool, extraTools, extra []string) []string {
+func buildClaudeArgs(agent, sessionID, appendSystemPrompt, docDir, mcpURL, mcpToken string, debug bool, extraTools, extra []string) []string {
 	args := []string{
 		"-p", "--output-format", "json",
 		"--setting-sources", "project",
@@ -238,6 +244,13 @@ func buildClaudeArgs(agent, sessionID, docDir, mcpURL, mcpToken string, debug bo
 	}
 	if agent != "" {
 		args = append(args, "--agent", agent)
+	}
+	// Persona: on a FRESH spawn, inject the composed persona as an appended system
+	// prompt. It composes with --agent (appended after the agent body) and freezes
+	// into the session, so it is NOT re-sent on --resume (verified behavior); passing
+	// it on a resume would be ignored anyway.
+	if sessionID == "" && appendSystemPrompt != "" {
+		args = append(args, "--append-system-prompt", appendSystemPrompt)
 	}
 	if sessionID != "" {
 		args = append(args, "--resume", sessionID)

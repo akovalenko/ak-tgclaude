@@ -11,21 +11,21 @@ func TestBuildClaudeArgs(t *testing.T) {
 	base := "-p --output-format json --setting-sources project --permission-mode dontAsk"
 
 	// No docDir and no MCP endpoint, no debug, no passthrough => bare args.
-	if got := strings.Join(buildClaudeArgs("", "", "", "", "", false, nil, nil), " "); got != base {
+	if got := strings.Join(buildClaudeArgs("", "", "", "", "", "", false, nil, nil), " "); got != base {
 		t.Errorf("bare args = %q", got)
 	}
 
 	// --debug (alone) is inserted right after the base flags when enabled.
-	if got := strings.Join(buildClaudeArgs("", "", "", "", "", true, nil, nil), " "); got != base+" --debug" {
+	if got := strings.Join(buildClaudeArgs("", "", "", "", "", "", true, nil, nil), " "); got != base+" --debug" {
 		t.Errorf("debug args = %q", got)
 	}
 
 	// Operator passthrough is appended verbatim, after everything else.
-	if got := strings.Join(buildClaudeArgs("", "", "", "", "", false, nil, []string{"--model", "opus", "--effort", "high"}), " "); got != base+" --model opus --effort high" {
+	if got := strings.Join(buildClaudeArgs("", "", "", "", "", "", false, nil, []string{"--model", "opus", "--effort", "high"}), " "); got != base+" --model opus --effort high" {
 		t.Errorf("passthrough args = %q", got)
 	}
 
-	got := buildClaudeArgs("eputs-telegram-guide", "sess-7", "/run/out/outbox-A1", "http://127.0.0.1:9/mcp", "tok9", false, nil, nil)
+	got := buildClaudeArgs("eputs-telegram-guide", "sess-7", "", "/run/out/outbox-A1", "http://127.0.0.1:9/mcp", "tok9", false, nil, nil)
 	joined := strings.Join(got, " ")
 	// MCP wiring: the inline config (url + Authorization token), strict-only, and
 	// the send tools permitted under dontAsk.
@@ -48,10 +48,30 @@ func TestBuildClaudeArgs(t *testing.T) {
 	}
 }
 
+func TestBuildClaudeArgsAppendSystemPrompt(t *testing.T) {
+	// On a FRESH spawn (empty sessionID), the persona is injected via
+	// --append-system-prompt.
+	fresh := strings.Join(buildClaudeArgs("faq-responder", "", "PERSONA TEXT", "", "", "", false, nil, nil), " ")
+	if !strings.Contains(fresh, "--append-system-prompt PERSONA TEXT") {
+		t.Errorf("fresh spawn should inject the persona: %q", fresh)
+	}
+	// On a RESUME the persona is frozen into the session, so it is NOT re-sent even
+	// if passed.
+	resume := strings.Join(buildClaudeArgs("faq-responder", "sess-1", "PERSONA TEXT", "", "", "", false, nil, nil), " ")
+	if strings.Contains(resume, "--append-system-prompt") {
+		t.Errorf("resume should not re-send the persona: %q", resume)
+	}
+	// Empty persona => no flag.
+	none := strings.Join(buildClaudeArgs("faq-responder", "", "", "", "", "", false, nil, nil), " ")
+	if strings.Contains(none, "--append-system-prompt") {
+		t.Errorf("empty persona should add no flag: %q", none)
+	}
+}
+
 func TestBuildClaudeArgsExtraTools(t *testing.T) {
 	// Operator extra tools join --allowedTools after the send tools, deduped; a
 	// duplicate of a send tool is not repeated.
-	got := strings.Join(buildClaudeArgs("", "", "", "http://127.0.0.1:9/mcp", "tok", false,
+	got := strings.Join(buildClaudeArgs("", "", "", "", "http://127.0.0.1:9/mcp", "tok", false,
 		[]string{"Agent", "WebFetch", "mcp__tg__send_message"}, nil), " ")
 	want := "--allowedTools mcp__tg__send_message,mcp__tg__send_code,mcp__tg__send_document,Agent,WebFetch"
 	if !strings.Contains(got, want) {
@@ -64,7 +84,7 @@ func TestBuildClaudeArgsScopedToolKeepsScope(t *testing.T) {
 	// literal — args are exec.Command elements, never shell-expanded), and two scopes
 	// of the same verb are BOTH kept as distinct permission rules — the opposite of
 	// the frontmatter, which collapses them to one bare name.
-	got := strings.Join(buildClaudeArgs("", "", "", "http://127.0.0.1:9/mcp", "tok", false,
+	got := strings.Join(buildClaudeArgs("", "", "", "", "http://127.0.0.1:9/mcp", "tok", false,
 		[]string{"WebFetch(domain:github.com)", "WebFetch(domain:*.github.com)"}, nil), " ")
 	want := "--allowedTools mcp__tg__send_message,mcp__tg__send_code,mcp__tg__send_document,WebFetch(domain:github.com),WebFetch(domain:*.github.com)"
 	if !strings.Contains(got, want) {

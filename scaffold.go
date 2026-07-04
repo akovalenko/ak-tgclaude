@@ -100,7 +100,6 @@ type scaffoldParams struct {
 	DenyEnvVars    []string // secrets to unset in the sandbox
 	NetworkDomains []string // EXTRA egress domains (allow_domains), added to the always-present Go-build defaults
 	UploadNote     string   // tg-emit {{UPLOAD_NOTE}} capability paragraph; empty => the large-file fallback is off
-	Policy         []string // persona fragment(s) merged into the agent (built-in names and/or custom .md paths; empty => normal)
 	Project        string   // knowledge root; substituted for {{PROJECT}} in agent/skill templates
 	WireSkills     []string // operator skill template DIRECTORIES to materialize + preload
 	AddSkills      []string // generic skill DIRECTORIES copied verbatim, NOT preloaded (on-demand)
@@ -386,7 +385,7 @@ func materializeScaffold(cwd string, p scaffoldParams) error {
 	if err := addAgents(claudeDir, p.AddAgents); err != nil {
 		return err
 	}
-	return materializeAgent(claudeDir, p.Policy, p.Project, wired, p.Tools)
+	return materializeAgent(claudeDir, p.Project, wired, p.Tools)
 }
 
 // projectPlaceholder is replaced with the project path when an agent or skill
@@ -617,11 +616,10 @@ func copyTreeMaterialize(srcDir, dstDir, project string) error {
 	})
 }
 
-// policyPlaceholder is replaced in the base agent template with the selected
-// persona fragment (a built-in from assets/policies, or an operator's custom .md).
-// The persona is a property of the invocation, not of the shared mechanics, so
-// the base carries only the marker and one copy of the invariant prose (project
-// access, replying, machine boundaries).
+// policyPlaceholder marks where a persona once sat in the base agent template. It
+// is now emptied at materialize time — the persona is composed per-user and
+// injected at spawn via --append-system-prompt — so the base carries only the
+// invariant prose (project access, replying, machine boundaries).
 const policyPlaceholder = "{{POLICY}}"
 
 // defaultPolicy is the persona composed when none is configured: the scoped FAQ
@@ -630,8 +628,10 @@ const defaultPolicy = "normal"
 
 // builtinPolicies are the persona fragments shipped in assets/policies. A
 // --policy value that is not one of these is treated as a path to a custom
-// fragment .md.
-var builtinPolicies = map[string]bool{"normal": true, "norefuse": true, "introspect": true}
+// fragment .md. The refusal-stance trio (normal/norefuse/strict) all carry
+// `axis: refusal` in their frontmatter, so at most one may appear in a resolved
+// persona (see checkAxisConflicts); introspect is axis-less and purely additive.
+var builtinPolicies = map[string]bool{"normal": true, "norefuse": true, "strict": true, "introspect": true}
 
 // policyIsPath reports whether a policy selector names a custom fragment FILE
 // (rather than a built-in): anything containing a path separator or ending in .md.
@@ -639,10 +639,11 @@ func policyIsPath(policy string) bool {
 	return strings.ContainsRune(policy, filepath.Separator) || strings.HasSuffix(policy, ".md")
 }
 
-// loadPolicy returns the persona-fragment body for a policy selector: a built-in
-// name reads assets/policies/<name>.md from the embed; anything else is a path to
-// a custom fragment file read from disk. Empty selects defaultPolicy.
-func loadPolicy(policy string) ([]byte, error) {
+// readPolicyRaw returns the raw bytes for a policy selector: a built-in name reads
+// assets/policies/<name>.md from the embed; anything else is a path to a custom
+// fragment file read from disk. Empty selects defaultPolicy. The bytes may carry a
+// leading `axis:` frontmatter block — use parseFragment to split it off.
+func readPolicyRaw(policy string) ([]byte, error) {
 	if policy == "" {
 		policy = defaultPolicy
 	}
@@ -654,53 +655,148 @@ func loadPolicy(policy string) ([]byte, error) {
 		return data, nil
 	}
 	if !builtinPolicies[policy] {
-		return nil, fmt.Errorf("unknown policy %q (built-in: normal, norefuse, introspect; or a path to a .md fragment)", policy)
+		return nil, fmt.Errorf("unknown policy %q (built-in: normal, norefuse, strict, introspect; or a path to a .md fragment)", policy)
 	}
 	return scaffoldAssets.ReadFile("assets/policies/" + policy + ".md")
 }
 
-// loadPolicies merges the persona-fragment bodies for a list of selectors into a
-// single fragment: each is loaded via loadPolicy, trimmed of surrounding blank
-// lines, and joined in order with a blank line between them, so several stances
-// (built-in names and/or custom paths) layer into one persona. An empty list
-// selects defaultPolicy — the single-selector behavior is just the one-element case.
+// parseFragment splits a policy fragment into its declared axis (empty if none)
+// and its body with any frontmatter removed. Frontmatter is an OPT-IN leading
+// `---` … `---` block; only `axis:` is read from it — the mutual-exclusion guard,
+// so two fragments sharing a non-empty axis cannot co-exist in one resolved
+// persona. A fragment with no leading fence (or no closing fence) is all body with
+// no axis, so the plain "just write an .md" case needs no ceremony. Parsed by hand
+// (no YAML dependency): the block is a handful of `key: value` lines and we want
+// only one key.
+func parseFragment(data []byte) (axis string, body []byte) {
+	rest, ok := strings.CutPrefix(string(data), "---\n")
+	if !ok {
+		return "", data
+	}
+	end := strings.Index(rest, "\n---")
+	if end < 0 {
+		return "", data // no closing fence — treat the whole thing as body
+	}
+	for _, line := range strings.Split(rest[:end], "\n") {
+		if v, ok := strings.CutPrefix(strings.TrimSpace(line), "axis:"); ok {
+			axis = strings.Trim(strings.TrimSpace(v), `"'`)
+		}
+	}
+	// Body is everything past the closing fence line.
+	return axis, []byte(strings.TrimPrefix(rest[end+len("\n---"):], "\n"))
+}
+
+// policyAxis returns the axis a policy selector declares (empty if none).
+func policyAxis(policy string) (string, error) {
+	raw, err := readPolicyRaw(policy)
+	if err != nil {
+		return "", err
+	}
+	axis, _ := parseFragment(raw)
+	return axis, nil
+}
+
+// loadPolicies merges the persona-fragment BODIES for a list of selectors into a
+// single fragment: each is read, its frontmatter stripped, trimmed of surrounding
+// blank lines, and joined in order with a blank line between them, so several
+// stances (built-in names and/or custom paths) layer into one persona. An empty
+// list selects defaultPolicy — the single-selector case is just one element.
 func loadPolicies(policies []string) ([]byte, error) {
 	if len(policies) == 0 {
 		policies = []string{defaultPolicy}
 	}
 	parts := make([]string, 0, len(policies))
 	for _, p := range policies {
-		body, err := loadPolicy(p)
+		raw, err := readPolicyRaw(p)
 		if err != nil {
 			return nil, err
 		}
+		_, body := parseFragment(raw)
 		parts = append(parts, strings.TrimSpace(string(body)))
 	}
 	return []byte(strings.Join(parts, "\n\n")), nil
 }
 
+// checkAxisConflicts reports an error if two selectors in the list declare the
+// same non-empty axis — the opt-in mutual-exclusion guard. It runs at config load
+// over the default set and over each per-user override list, so a contradictory
+// pairing (e.g. norefuse + strict) fails fast at startup, not mid-run.
+func checkAxisConflicts(policies []string) error {
+	seen := make(map[string]string, len(policies))
+	for _, p := range policies {
+		axis, err := policyAxis(p)
+		if err != nil {
+			return err
+		}
+		if axis == "" {
+			continue
+		}
+		if prev, ok := seen[axis]; ok {
+			return fmt.Errorf("policies %q and %q both declare axis %q — only one per axis", prev, p, axis)
+		}
+		seen[axis] = p
+	}
+	return nil
+}
+
+// resolveEffectivePolicies layers a per-user override list on top of the default
+// list along axes: an override fragment that declares an axis EVICTS the default
+// fragment on that same axis (replacing it in place); an axis-less override (or one
+// whose axis no default carries) is appended. So a default of {strict, rw} with a
+// user override of {norefuse} yields {norefuse, rw} — norefuse displaces strict on
+// the refusal axis, rw is untouched. The override list is assumed already free of
+// internal axis conflicts (checked at load).
+func resolveEffectivePolicies(base, override []string) ([]string, error) {
+	result := append([]string(nil), base...)
+	axisAt := make(map[string]int) // axis -> index in result
+	for i, p := range result {
+		axis, err := policyAxis(p)
+		if err != nil {
+			return nil, err
+		}
+		if axis != "" {
+			axisAt[axis] = i
+		}
+	}
+	for _, o := range override {
+		axis, err := policyAxis(o)
+		if err != nil {
+			return nil, err
+		}
+		if i, ok := axisAt[axis]; axis != "" && ok {
+			result[i] = o // evict the default fragment on this axis
+			continue
+		}
+		result = append(result, o)
+		if axis != "" {
+			axisAt[axis] = len(result) - 1
+		}
+	}
+	return result, nil
+}
+
 // materializeAgent writes the responder agent into
-// <cwd>/.claude/agents/faq-responder.md, composed from one base template plus the
-// selected persona fragment(s): the base carries the invariant mechanics (project
-// access, replying, machine boundaries), and its {{POLICY}} marker is replaced by
-// the merged policy fragment (built-in names and/or custom paths, joined in order).
-// Machine guards (sandbox, token deny-read, per-invocation write, pinned route)
-// hold regardless of persona, so a relaxed policy cannot exceed them. wiredSkills
-// are appended to the agent's `skills:` frontmatter so their bodies are preloaded
-// at startup, and the `tools:` line's {{MCP_TOOLS}} marker is expanded from the
-// mcpTools source.
-func materializeAgent(claudeDir string, policies []string, project string, wiredSkills, extraTools []string) error {
+// <cwd>/.claude/agents/faq-responder.md from the base template: the base carries
+// the invariant mechanics (project access, replying, machine boundaries) and is
+// persona-NEUTRAL — the persona is composed per-user and injected at spawn via
+// --append-system-prompt (see the dispatcher's persona resolution and
+// buildClaudeArgs), so one shared agent file serves every chat. Machine guards
+// (sandbox, token deny-read, per-invocation write, pinned route) hold regardless of
+// persona, so a relaxed policy cannot exceed them. wiredSkills are appended to the
+// agent's `skills:` frontmatter so their bodies are preloaded at startup, and the
+// `tools:` line's {{MCP_TOOLS}} marker is expanded from the mcpTools source.
+func materializeAgent(claudeDir string, project string, wiredSkills, extraTools []string) error {
 	data, err := scaffoldAssets.ReadFile("assets/agents/faq-responder.md")
 	if err != nil {
 		return err
 	}
-	policyBody, err := loadPolicies(policies)
-	if err != nil {
-		return err
+	// Persona is not baked here (it rides --append-system-prompt at spawn); drop the
+	// {{POLICY}} marker and collapse the blank hole it leaves.
+	body := strings.ReplaceAll(string(data), policyPlaceholder, "")
+	for strings.Contains(body, "\n\n\n") {
+		body = strings.ReplaceAll(body, "\n\n\n", "\n\n")
 	}
-	// Trim trailing newlines off the fragment so the base's blank line after
-	// {{POLICY}} is preserved rather than doubled.
-	data = []byte(strings.ReplaceAll(string(data), policyPlaceholder, strings.TrimRight(string(policyBody), "\n")))
+	data = []byte(body)
 	data = appendAgentSkills(data, wiredSkills)
 	// Expand {{MCP_TOOLS}} in the tools: frontmatter from the tg send tools plus any
 	// operator extras (config `tools`/--tool), reduced to availability NAMES via
@@ -827,7 +923,6 @@ func runScaffold(args []string) {
 		CacheDir:       filepath.Join(cfg.StateDir, "cache"),
 		OutboxRoot:     outboxRoot,
 		TokenFile:      cfg.ConfigPath,
-		Policy:         cfg.Policy,
 		Project:        cfg.Project,
 		WireSkills:     cfg.WireSkills,
 		AddSkills:      cfg.AddSkills,
@@ -848,7 +943,7 @@ func runScaffold(args []string) {
 	fmt.Printf("ak-tgclaude: scaffold materialized\n")
 	fmt.Printf("  project:  %s\n", project)
 	fmt.Printf("  settings: %s\n", filepath.Join(project, ".claude", "settings.json"))
-	fmt.Printf("  policy:   %s\n", strings.Join(cfg.Policy, " + "))
+	fmt.Printf("  policies: %s (default persona; injected at spawn)\n", strings.Join(cfg.Policies, " + "))
 	if len(cfg.WireSkills) > 0 {
 		fmt.Printf("  wired:    %s (preloaded into the agent)\n", strings.Join(cfg.WireSkills, ", "))
 	}
