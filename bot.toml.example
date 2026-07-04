@@ -145,12 +145,14 @@ project = "~/code/example-project"
 # --append-system-prompt: an ARRAY (plural key) of built-in names — "normal"
 # (declines off-topic, the default) | "norefuse" (do-what-you're-asked) | "strict"
 # (refuses anything but direct project questions) | "introspect" (candid/debug:
-# precise about failures, explains the machinery) — and/or paths to your own .md
-# fragments, merged in order into one persona. A fragment may declare `axis:` in its
-# frontmatter (e.g. the refusal trio normal/norefuse/strict all carry
-# `axis: refusal`); two entries sharing an axis fail at load. Machine guards
+# precise about failures, explains the machinery) | "outbox-rw" (do read-write tasks —
+# build/test a scratch clone — via the outbox instead of refusing as read-only) —
+# and/or paths to your own .md fragments, merged in order into one persona. A fragment
+# may declare `axis:` in its frontmatter (e.g. the refusal trio normal/norefuse/strict
+# all carry `axis: refusal`); two entries sharing an axis fail at load. Machine guards
 # (read-only sandbox, token deny, per-chat route) apply to every persona, so none
-# can exceed the read-only contract. Repeatable --policy is additive with this list.
+# can exceed the read-only contract. Repeatable --policy is additive with this list;
+# `ak-tgclaude <cmd> --policy help` prints the built-in catalog and exits.
 # policies = ["normal"]
 
 # Per-user persona overrides, keyed by Telegram user id. An override is layered on

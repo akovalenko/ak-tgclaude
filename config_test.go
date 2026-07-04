@@ -357,6 +357,11 @@ func TestParseConfigPolicy(t *testing.T) {
 	if _, err := parseConfig([]string{"--policy", "strict"}); err != nil {
 		t.Errorf("strict should be a built-in policy: %v", err)
 	}
+	// outbox-rw is a built-in and, being axis-less, stacks on a refusal stance.
+	if c, err := parseConfig([]string{"--policy", "strict", "--policy", "outbox-rw"}); err != nil ||
+		len(c.Policies) != 2 || c.Policies[0] != "strict" || c.Policies[1] != "outbox-rw" {
+		t.Errorf("strict + outbox-rw: err=%v policies=%v, want [strict outbox-rw]", err, c.Policies)
+	}
 	// --policy is repeatable: entries accumulate in order (norefuse is refusal-axis,
 	// introspect is axis-less, so they don't conflict).
 	if c, err := parseConfig([]string{"--policy", "norefuse", "--policy", "introspect"}); err != nil ||

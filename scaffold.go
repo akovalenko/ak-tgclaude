@@ -4,6 +4,7 @@ import (
 	"embed"
 	"encoding/json"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -648,12 +649,24 @@ const policyPlaceholder = "{{POLICY}}"
 // that declines off-topic.
 const defaultPolicy = "normal"
 
-// builtinPolicies are the persona fragments shipped in assets/policies. A
-// --policy value that is not one of these is treated as a path to a custom
-// fragment .md. The refusal-stance trio (normal/norefuse/strict) all carry
-// `axis: refusal` in their frontmatter, so at most one may appear in a resolved
-// persona (see checkAxisConflicts); introspect is axis-less and purely additive.
-var builtinPolicies = map[string]bool{"normal": true, "norefuse": true, "strict": true, "introspect": true}
+// builtinPolicyOrder lists the persona fragments shipped in assets/policies, in
+// catalog order — the single source of truth for the built-in set. It backs
+// builtinPolicies (membership), the `--policy help` catalog, and the "built-in: …"
+// hints in error messages, so a new fragment is added in exactly one place. The
+// refusal-stance trio (normal/norefuse/strict) all carry `axis: refusal` in their
+// frontmatter, so at most one may appear in a resolved persona (see
+// checkAxisConflicts); introspect and outbox-rw are axis-less and purely additive.
+var builtinPolicyOrder = []string{"normal", "norefuse", "strict", "introspect", "outbox-rw"}
+
+// builtinPolicies is the membership set derived from builtinPolicyOrder. A --policy
+// value that is not one of these is treated as a path to a custom fragment .md.
+var builtinPolicies = func() map[string]bool {
+	m := make(map[string]bool, len(builtinPolicyOrder))
+	for _, p := range builtinPolicyOrder {
+		m[p] = true
+	}
+	return m
+}()
 
 // policyIsPath reports whether a policy selector names a custom fragment FILE
 // (rather than a built-in): anything containing a path separator or ending in .md.
@@ -677,35 +690,38 @@ func readPolicyRaw(policy string) ([]byte, error) {
 		return data, nil
 	}
 	if !builtinPolicies[policy] {
-		return nil, fmt.Errorf("unknown policy %q (built-in: normal, norefuse, strict, introspect; or a path to a .md fragment)", policy)
+		return nil, fmt.Errorf("unknown policy %q (built-in: %s; or a path to a .md fragment)", policy, strings.Join(builtinPolicyOrder, ", "))
 	}
 	return scaffoldAssets.ReadFile("assets/policies/" + policy + ".md")
 }
 
-// parseFragment splits a policy fragment into its declared axis (empty if none)
-// and its body with any frontmatter removed. Frontmatter is an OPT-IN leading
-// `---` … `---` block; only `axis:` is read from it — the mutual-exclusion guard,
-// so two fragments sharing a non-empty axis cannot co-exist in one resolved
-// persona. A fragment with no leading fence (or no closing fence) is all body with
-// no axis, so the plain "just write an .md" case needs no ceremony. Parsed by hand
-// (no YAML dependency): the block is a handful of `key: value` lines and we want
-// only one key.
-func parseFragment(data []byte) (axis string, body []byte) {
+// parseFragment splits a policy fragment into its frontmatter fields (empty map if
+// none) and its body with the frontmatter removed. Frontmatter is an OPT-IN leading
+// `---` … `---` block of `key: value` lines; we read `axis` (the mutual-exclusion
+// guard, so two fragments sharing a non-empty axis cannot co-exist in one resolved
+// persona) and `summary` (the one-line gloss shown by `--policy help`). A fragment
+// with no leading fence (or no closing fence) is all body with no fields, so the
+// plain "just write an .md" case needs no ceremony. Parsed by hand (no YAML
+// dependency): the block is a handful of `key: value` lines.
+func parseFragment(data []byte) (fields map[string]string, body []byte) {
+	fields = map[string]string{}
 	rest, ok := strings.CutPrefix(string(data), "---\n")
 	if !ok {
-		return "", data
+		return fields, data
 	}
 	end := strings.Index(rest, "\n---")
 	if end < 0 {
-		return "", data // no closing fence — treat the whole thing as body
+		return fields, data // no closing fence — treat the whole thing as body
 	}
 	for _, line := range strings.Split(rest[:end], "\n") {
-		if v, ok := strings.CutPrefix(strings.TrimSpace(line), "axis:"); ok {
-			axis = strings.Trim(strings.TrimSpace(v), `"'`)
+		k, v, ok := strings.Cut(line, ":")
+		if !ok {
+			continue
 		}
+		fields[strings.TrimSpace(k)] = strings.Trim(strings.TrimSpace(v), `"'`)
 	}
 	// Body is everything past the closing fence line.
-	return axis, []byte(strings.TrimPrefix(rest[end+len("\n---"):], "\n"))
+	return fields, []byte(strings.TrimPrefix(rest[end+len("\n---"):], "\n"))
 }
 
 // policyAxis returns the axis a policy selector declares (empty if none).
@@ -714,8 +730,46 @@ func policyAxis(policy string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	axis, _ := parseFragment(raw)
-	return axis, nil
+	fields, _ := parseFragment(raw)
+	return fields["axis"], nil
+}
+
+// policySummary returns the one-line `summary:` a policy selector declares (empty if
+// none). It backs the `--policy help` catalog.
+func policySummary(policy string) (string, error) {
+	raw, err := readPolicyRaw(policy)
+	if err != nil {
+		return "", err
+	}
+	fields, _ := parseFragment(raw)
+	return fields["summary"], nil
+}
+
+// printPolicyCatalog writes the built-in policy catalog — each name aligned with its
+// `summary:` gloss, in builtinPolicyOrder — followed by a note on custom fragments and
+// composition. It backs `--policy help`. The summaries come from the embed, so a read
+// error is unexpected but surfaced rather than swallowed.
+func printPolicyCatalog(w io.Writer) error {
+	width := 0
+	for _, p := range builtinPolicyOrder {
+		if len(p) > width {
+			width = len(p)
+		}
+	}
+	fmt.Fprintln(w, "built-in policies (persona fragments; the default is `normal`):")
+	fmt.Fprintln(w)
+	for _, p := range builtinPolicyOrder {
+		summary, err := policySummary(p)
+		if err != nil {
+			return err
+		}
+		fmt.Fprintf(w, "  %-*s  %s\n", width, p, summary)
+	}
+	fmt.Fprintln(w)
+	fmt.Fprintln(w, "A --policy value may also be a path to your own .md fragment. --policy is")
+	fmt.Fprintln(w, "repeatable and additive: entries merge in order into one persona (the refusal")
+	fmt.Fprintln(w, "trio normal/norefuse/strict are mutually exclusive; the rest are additive).")
+	return nil
 }
 
 // loadPolicies merges the persona-fragment BODIES for a list of selectors into a

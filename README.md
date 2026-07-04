@@ -462,8 +462,17 @@ the stance can vary **per user**. Set the default with `policies` (config) /
   *which* rule stopped it, explains how it reached an answer, and shares meta about
   its own context (which skills/agents are preloaded, what it read). (Distinct from
   `--debug`, which toggles claude's own transport diagnostics.)
+- **`outbox-rw`** — a **do-the-read-write-work** stance: when a task needs read-write
+  on the project (e.g. does it still build after a `go get -u`, check out a commit and
+  run its tests), don't beg off as read-only — clone into the writable outbox with
+  `git clone --shared` and do it, sending a short progress note first. Axis-less, so it
+  layers on top of any refusal stance (`strict + outbox-rw`, etc.). The machine
+  boundaries still hold (writes land in the outbox, never the project).
 - **a path to a `.md` file** — your own fragment, composed like a built-in (e.g.
   `--policy ~/lib/my-persona.md`).
+
+`--policy help` prints the built-in catalog (each name with its one-line `summary:`)
+and exits — handy under any subcommand (`ak-tgclaude dispatch --policy help`).
 
 `policies` is a **list** — several selectors **merge in order** (blank-line
 separated) into one persona, so stances layer (a built-in base plus a custom `.md`
@@ -476,9 +485,10 @@ policies = ["norefuse", "~/lib/house-style.md"]   # or a bare string: policies =
 
 **Axes.** A fragment may declare an `axis:` in its YAML frontmatter — an **opt-in**
 mutual-exclusion guard. The refusal trio (`normal`/`norefuse`/`strict`) all carry
-`axis: refusal`, so two of them in one persona is a **load-time error**; `introspect`
-and axis-less custom fragments are purely additive. (The axis line is stripped from
-the composed text.)
+`axis: refusal`, so two of them in one persona is a **load-time error**; `introspect`,
+`outbox-rw`, and axis-less custom fragments are purely additive. (The frontmatter is
+stripped from the composed text; a fragment's `summary:` line, if any, feeds
+`--policy help`.)
 
 **Per-user overrides.** `[policy_overrides]` maps a Telegram user id to a persona
 layered on top of `policies` **along axes**: an override fragment that declares an

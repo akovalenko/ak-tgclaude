@@ -690,25 +690,95 @@ func TestMaterializeAgentMergesPolicies(t *testing.T) {
 }
 
 func TestParseFragment(t *testing.T) {
-	// Frontmatter is stripped; axis is read.
-	axis, body := parseFragment([]byte("---\naxis: refusal\n---\nYou are strict.\n"))
-	if axis != "refusal" {
-		t.Errorf("axis = %q, want refusal", axis)
+	// Frontmatter is stripped; axis and summary are read into the fields map.
+	fields, body := parseFragment([]byte("---\naxis: refusal\nsummary: a scoped FAQ\n---\nYou are strict.\n"))
+	if fields["axis"] != "refusal" {
+		t.Errorf("axis = %q, want refusal", fields["axis"])
+	}
+	if fields["summary"] != "a scoped FAQ" {
+		t.Errorf("summary = %q, want %q", fields["summary"], "a scoped FAQ")
 	}
 	if strings.TrimSpace(string(body)) != "You are strict." {
 		t.Errorf("body = %q, want the persona text without frontmatter", body)
 	}
-	// No frontmatter => no axis, the whole thing is body.
-	if a, b := parseFragment([]byte("Just a persona.\n")); a != "" || strings.TrimSpace(string(b)) != "Just a persona." {
-		t.Errorf("plain fragment: axis=%q body=%q", a, b)
+	// No frontmatter => empty fields, the whole thing is body.
+	if f, b := parseFragment([]byte("Just a persona.\n")); f["axis"] != "" || strings.TrimSpace(string(b)) != "Just a persona." {
+		t.Errorf("plain fragment: axis=%q body=%q", f["axis"], b)
 	}
-	// A leading fence with no closing fence is all body (no panic, no axis).
-	if a, _ := parseFragment([]byte("---\nnot really frontmatter\n")); a != "" {
-		t.Errorf("unterminated frontmatter should yield no axis, got %q", a)
+	// A leading fence with no closing fence is all body (no panic, no fields).
+	if f, _ := parseFragment([]byte("---\nnot really frontmatter\n")); f["axis"] != "" {
+		t.Errorf("unterminated frontmatter should yield no axis, got %q", f["axis"])
 	}
 	// A quoted axis value is unquoted.
-	if a, _ := parseFragment([]byte("---\naxis: \"refusal\"\n---\nx")); a != "refusal" {
-		t.Errorf("quoted axis = %q, want refusal", a)
+	if f, _ := parseFragment([]byte("---\naxis: \"refusal\"\n---\nx")); f["axis"] != "refusal" {
+		t.Errorf("quoted axis = %q, want refusal", f["axis"])
+	}
+}
+
+func TestPolicySummary(t *testing.T) {
+	// Every built-in ships a non-empty summary (backs `--policy help`).
+	for _, p := range builtinPolicyOrder {
+		s, err := policySummary(p)
+		if err != nil {
+			t.Fatalf("policySummary(%q): %v", p, err)
+		}
+		if strings.TrimSpace(s) == "" {
+			t.Errorf("built-in %q has no summary:", p)
+		}
+	}
+	// A fragment without a summary field yields "".
+	f := filepath.Join(t.TempDir(), "no-summary.md")
+	if err := os.WriteFile(f, []byte("You are a custom persona.\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if s, _ := policySummary(f); s != "" {
+		t.Errorf("summary of a fragment without one = %q, want empty", s)
+	}
+}
+
+func TestPrintPolicyCatalog(t *testing.T) {
+	var sb strings.Builder
+	if err := printPolicyCatalog(&sb); err != nil {
+		t.Fatal(err)
+	}
+	out := sb.String()
+	// Every built-in name and its summary appear, in order, plus the custom-fragment note.
+	last := -1
+	for _, p := range builtinPolicyOrder {
+		i := strings.Index(out, p)
+		if i < 0 {
+			t.Errorf("catalog missing policy %q:\n%s", p, out)
+		}
+		if i < last {
+			t.Errorf("catalog lists %q out of builtinPolicyOrder:\n%s", p, out)
+		}
+		last = i
+		s, _ := policySummary(p)
+		if !strings.Contains(out, s) {
+			t.Errorf("catalog missing summary for %q:\n%s", p, out)
+		}
+	}
+	if !strings.Contains(out, "path to your own .md fragment") {
+		t.Errorf("catalog should mention custom fragments:\n%s", out)
+	}
+}
+
+func TestOutboxRWPolicy(t *testing.T) {
+	// outbox-rw is a recognized built-in, axis-less (additive), and composes its
+	// distinctive outbox/clone guidance.
+	if !builtinPolicies["outbox-rw"] {
+		t.Fatal("outbox-rw should be a built-in policy")
+	}
+	if axis, err := policyAxis("outbox-rw"); err != nil || axis != "" {
+		t.Errorf("outbox-rw axis = %q err=%v, want axis-less", axis, err)
+	}
+	// Axis-less => it stacks on any refusal stance without a conflict.
+	if err := checkAxisConflicts([]string{"strict", "outbox-rw"}); err != nil {
+		t.Errorf("strict + outbox-rw should not conflict: %v", err)
+	}
+	body := composedPersona(t, "strict", "outbox-rw")
+	if !strings.Contains(body, "outbox") || !strings.Contains(body, "git clone --shared") {
+		t.Errorf("outbox-rw persona missing its outbox/clone guidance:\n%s", body)
 	}
 }
 

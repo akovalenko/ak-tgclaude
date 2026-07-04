@@ -422,7 +422,7 @@ func parseConfig(args []string) (*Config, error) {
 	maxConcurrent := fs.Int("max-concurrent", 0, "max responders running at once (per-chat is always serialized; default 4)")
 	outboxTTL := fs.String("outbox-ttl", "", `how long an idle chat's persistent outbox is kept before eviction (Go duration, e.g. "2h"; "0" disables; default 2h)`)
 	var policyFlags stringList
-	fs.Var(&policyFlags, "policy", "DEFAULT responder persona composed into the agent: normal (declines off-topic, default) | norefuse (do-what-you're-asked) | strict (refuses anything but direct project questions) | introspect (candid/debug) | a path to a custom .md fragment; repeatable and additive with the config policies list, entries merged in order into one persona")
+	fs.Var(&policyFlags, "policy", "DEFAULT responder persona composed into the agent: normal (declines off-topic, default) | norefuse (do-what-you're-asked) | strict (refuses anything but direct project questions) | introspect (candid/debug) | outbox-rw (do read-write tasks via the outbox) | a path to a custom .md fragment; repeatable and additive with the config policies list, entries merged in order into one persona. `--policy help` prints the catalog and exits")
 	owner := fs.Int64("owner", 0, "Telegram user id treated as the bot owner: auto-whitelisted and granted the relaxed owner persona (norefuse + introspect) unless it has an explicit policy_overrides entry")
 	ephemeralSessions := fs.Bool("ephemeral-sessions", false, "keep chat→session bindings in memory only (never persisted; offset still persists; each restart starts fresh)")
 	bill := fs.Bool("bill", false, "after each answer, send the run's dollar cost as a bare \"$n.nnn\" message (only when present and non-zero)")
@@ -455,6 +455,19 @@ func parseConfig(args []string) (*Config, error) {
 	ownerReadsAll := fs.Bool("owner-reads-all", true, "when transcripts are on, let the owner's responder read the whole transcripts root for cross-chat analytics; --owner-reads-all=false scopes the owner to its own chat like any user")
 	if err := fs.Parse(args); err != nil {
 		return nil, err
+	}
+
+	// `--policy help` is a reserved selector: print the built-in catalog and exit,
+	// like `--help`. Checked before any config decoding so it works standalone
+	// (`ak-tgclaude scaffold --policy help`) without a token/project/config file.
+	for _, p := range policyFlags {
+		if p == "help" {
+			if err := printPolicyCatalog(os.Stdout); err != nil {
+				fmt.Fprintln(os.Stderr, err)
+				os.Exit(1)
+			}
+			os.Exit(0)
+		}
 	}
 
 	var c Config
@@ -685,7 +698,7 @@ func parseConfig(args []string) (*Config, error) {
 				return fmt.Errorf("policy fragment %s: %w", p, err)
 			}
 		} else if !builtinPolicies[p] {
-			return fmt.Errorf("unknown policy %q (built-in: normal, norefuse, strict, introspect; or a path to a .md fragment)", p)
+			return fmt.Errorf("unknown policy %q (built-in: %s; or a path to a .md fragment)", p, strings.Join(builtinPolicyOrder, ", "))
 		}
 		return nil
 	}
