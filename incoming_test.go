@@ -82,7 +82,7 @@ func TestFetchIncomingDocument(t *testing.T) {
 		MessageID: 42,
 		Document:  &Document{FileID: "ABC", FileName: "notes.txt", MimeType: "text/plain", FileSize: int64(len(content))},
 	}
-	att, err := d.fetchIncomingDocument(context.Background(), m, docDir)
+	att, err := d.fetchIncoming(context.Background(), incomingFile(m), m.MessageID, docDir)
 	if err != nil {
 		t.Fatalf("fetchIncomingDocument: %v", err)
 	}
@@ -109,7 +109,7 @@ func TestFetchIncomingDocumentTraversalName(t *testing.T) {
 
 	docDir := t.TempDir()
 	m := &Message{MessageID: 7, Document: &Document{FileID: "ABC", FileName: "../../escape.sh"}}
-	att, err := d.fetchIncomingDocument(context.Background(), m, docDir)
+	att, err := d.fetchIncoming(context.Background(), incomingFile(m), m.MessageID, docDir)
 	if err != nil {
 		t.Fatalf("fetch: %v", err)
 	}
@@ -123,6 +123,75 @@ func TestFetchIncomingDocumentTraversalName(t *testing.T) {
 	}
 }
 
+func TestLargestPhoto(t *testing.T) {
+	if largestPhoto(nil) != nil {
+		t.Error("empty set should give nil")
+	}
+	sizes := []PhotoSize{
+		{FileID: "s", Width: 90, Height: 60, FileSize: 1200},
+		{FileID: "l", Width: 1280, Height: 853, FileSize: 95000},
+		{FileID: "m", Width: 320, Height: 213, FileSize: 8000},
+	}
+	if p := largestPhoto(sizes); p == nil || p.FileID != "l" {
+		t.Errorf("largest by size = %+v, want file_id=l", p)
+	}
+	// With no declared sizes, fall back to pixel area.
+	noSizes := []PhotoSize{{FileID: "a", Width: 100, Height: 100}, {FileID: "b", Width: 400, Height: 300}}
+	if p := largestPhoto(noSizes); p == nil || p.FileID != "b" {
+		t.Errorf("largest by area = %+v, want file_id=b", p)
+	}
+}
+
+func TestIncomingFile(t *testing.T) {
+	// A document reduces to its own fields.
+	doc := &Message{Document: &Document{FileID: "D", FileName: "r.pdf", MimeType: "application/pdf", FileSize: 10}}
+	if s := incomingFile(doc); s == nil || s.FileID != "D" || s.FileName != "r.pdf" || s.MimeType != "application/pdf" {
+		t.Errorf("document spec wrong: %+v", s)
+	}
+	// A photo reduces to the largest rendition with a synthesized name/MIME.
+	pho := &Message{Photo: []PhotoSize{{FileID: "s", FileSize: 1}, {FileID: "big", FileSize: 999}}}
+	s := incomingFile(pho)
+	if s == nil || s.FileID != "big" || s.FileName != "photo.jpg" || s.MimeType != "image/jpeg" {
+		t.Errorf("photo spec wrong: %+v", s)
+	}
+	// A document wins over a photo if somehow both are present.
+	both := &Message{Document: &Document{FileID: "D"}, Photo: []PhotoSize{{FileID: "P"}}}
+	if s := incomingFile(both); s == nil || s.FileID != "D" {
+		t.Errorf("document should take precedence: %+v", s)
+	}
+	// Neither => nil.
+	if s := incomingFile(&Message{Text: "hi"}); s != nil {
+		t.Errorf("text message should have no incoming file, got %+v", s)
+	}
+}
+
+func TestFetchIncomingPhoto(t *testing.T) {
+	const content = "\xff\xd8\xff\xe0 jpeg-ish bytes"
+	d, closeSrv := docServer(t, content, 20<<20)
+	defer closeSrv()
+
+	docDir := t.TempDir()
+	m := &Message{MessageID: 15, Photo: []PhotoSize{
+		{FileID: "small", Width: 90, Height: 60, FileSize: 4},
+		{FileID: "big", Width: 1280, Height: 853, FileSize: int64(len(content))},
+	}}
+	att, err := d.fetchIncoming(context.Background(), incomingFile(m), m.MessageID, docDir)
+	if err != nil {
+		t.Fatalf("fetchIncoming photo: %v", err)
+	}
+	// Synthesized name, msgid-prefixed, under incoming/.
+	if att.Path != filepath.Join(docDir, "incoming", "15-photo.jpg") {
+		t.Errorf("path = %q, want .../15-photo.jpg", att.Path)
+	}
+	if att.Filename != "photo.jpg" || att.MimeType != "image/jpeg" {
+		t.Errorf("photo attachment metadata wrong: %+v", att)
+	}
+	got, _ := os.ReadFile(att.Path)
+	if string(got) != content {
+		t.Errorf("saved bytes = %q, want %q", got, content)
+	}
+}
+
 func TestFetchIncomingDocumentOverLimit(t *testing.T) {
 	// file_size lies (says small) but the body is 100 bytes; cap is 10.
 	d, closeSrv := docServer(t, strings.Repeat("A", 100), 10)
@@ -130,7 +199,7 @@ func TestFetchIncomingDocumentOverLimit(t *testing.T) {
 
 	docDir := t.TempDir()
 	m := &Message{MessageID: 1, Document: &Document{FileID: "ABC", FileName: "big.bin", FileSize: 5}}
-	if _, err := d.fetchIncomingDocument(context.Background(), m, docDir); err == nil {
+	if _, err := d.fetchIncoming(context.Background(), incomingFile(m), m.MessageID, docDir); err == nil {
 		t.Fatal("want an over-limit error for a lying file_size")
 	}
 	// The partial download must have been cleaned up.

@@ -227,6 +227,36 @@ func TestClientGetUpdatesParsesDocument(t *testing.T) {
 	}
 }
 
+func TestClientGetUpdatesParsesPhoto(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		io.WriteString(w, `{"ok":true,"result":[
+			{"update_id":1,"message":{"message_id":9,"caption":"whats this",
+				"photo":[
+					{"file_id":"small","width":90,"height":60,"file_size":1200},
+					{"file_id":"big","width":1280,"height":853,"file_size":95000}
+				],
+				"chat":{"id":99}}}
+		]}`)
+	}))
+	defer srv.Close()
+
+	c := &Client{Token: "T", BaseURL: srv.URL, HTTP: srv.Client()}
+	ups, err := c.GetUpdates(context.Background(), 0, 0)
+	if err != nil {
+		t.Fatalf("GetUpdates: %v", err)
+	}
+	m := ups[0].Message
+	if len(m.Photo) != 2 {
+		t.Fatalf("got %d photo sizes, want 2", len(m.Photo))
+	}
+	if p := largestPhoto(m.Photo); p == nil || p.FileID != "big" {
+		t.Errorf("largestPhoto = %+v, want file_id=big", p)
+	}
+	if m.Caption != "whats this" {
+		t.Errorf("caption = %q", m.Caption)
+	}
+}
+
 func TestClientGetFile(t *testing.T) {
 	var gotPath string
 	var body map[string]any

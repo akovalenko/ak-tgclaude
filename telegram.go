@@ -39,14 +39,15 @@ type Update struct {
 
 // Message is a Telegram message (the fields the dispatcher needs).
 type Message struct {
-	MessageID int64     `json:"message_id"`
-	Date      int64     `json:"date"`     // Unix send time (seconds); stamped into the prompt for temporal orientation
-	Text      string    `json:"text"`     // text messages
-	Caption   string    `json:"caption"`  // media messages carry the user's text here, not in Text
-	Document  *Document `json:"document"` // an attached file (nil for a plain text message)
-	Chat      Chat      `json:"chat"`
-	From      *User     `json:"from"`
-	ReplyTo   *Message  `json:"reply_to_message"`
+	MessageID int64       `json:"message_id"`
+	Date      int64       `json:"date"`     // Unix send time (seconds); stamped into the prompt for temporal orientation
+	Text      string      `json:"text"`     // text messages
+	Caption   string      `json:"caption"`  // media messages carry the user's text here, not in Text
+	Document  *Document   `json:"document"` // an attached file (nil for a plain text message)
+	Photo     []PhotoSize `json:"photo"`    // an attached photo, as several renditions (empty if none)
+	Chat      Chat        `json:"chat"`
+	From      *User       `json:"from"`
+	ReplyTo   *Message    `json:"reply_to_message"`
 }
 
 // Document is an incoming file attachment (a subset of Telegram's Document). The
@@ -57,6 +58,31 @@ type Document struct {
 	FileName string `json:"file_name"`
 	MimeType string `json:"mime_type"`
 	FileSize int64  `json:"file_size"`
+}
+
+// PhotoSize is one rendition of an incoming photo — Telegram sends the same
+// image at several resolutions. A photo carries no file name or MIME type (it is
+// always JPEG), so those are synthesized when it is fetched.
+type PhotoSize struct {
+	FileID   string `json:"file_id"`
+	Width    int    `json:"width"`
+	Height   int    `json:"height"`
+	FileSize int64  `json:"file_size"`
+}
+
+// largestPhoto returns the highest-resolution rendition (Telegram orders them
+// ascending, but pick by byte size, then by pixel area, rather than trust the
+// order), or nil for an empty set.
+func largestPhoto(sizes []PhotoSize) *PhotoSize {
+	var best *PhotoSize
+	for i := range sizes {
+		s := &sizes[i]
+		if best == nil || s.FileSize > best.FileSize ||
+			(s.FileSize == best.FileSize && s.Width*s.Height > best.Width*best.Height) {
+			best = s
+		}
+	}
+	return best
 }
 
 // Chat identifies the conversation an update belongs to.

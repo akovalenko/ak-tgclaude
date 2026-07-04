@@ -165,12 +165,13 @@ never race on the same `--resume` session). For each message:
    message_id}` and that dir, and spawns the responder (`claude -p --agent …
    [--resume <id>]`) with `$AK_TGCLAUDE_OUTBOX` pointing at the dir, the token +
    MCP endpoint in its `--mcp-config`, and the message text on stdin. If the
-   message carries a **document**, the dispatcher first fetches it (`getFile` +
-   download) into an **`incoming/`** subdir of the outbox and names it in the
-   prompt (with the caption as the instruction), so the responder can read or
-   `Edit` it and send it back with `send_document`; an attachment over
-   `max_incoming_mb` (default 20 — the Bot API `getFile` ceiling) is refused with
-   a note to the user instead. The
+   message carries a **document or a photo** (the largest rendition of a photo is
+   taken), the dispatcher first fetches it (`getFile` + download) into an
+   **`incoming/`** subdir of the outbox and names it in the prompt (with the
+   caption as the instruction), so the responder can read or `Edit` it — an image
+   included, since the Read tool renders it — and send it back with
+   `send_document`; an attachment over `max_incoming_mb` (default 20 — the Bot API
+   `getFile` ceiling) is refused with a note to the user instead. The
    responder delivers its replies by calling the dispatcher's MCP send tools,
    which resolve the route from the token and send **synchronously** (replying to
    the incoming one). For its lifetime the dispatcher shows a **`typing…`** chat

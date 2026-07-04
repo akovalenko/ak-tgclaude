@@ -35,14 +35,36 @@ func (a *Attachment) describe() string {
 // scratch) so the two never collide.
 const incomingSubdir = "incoming"
 
-// fetchIncomingDocument resolves the message's document, downloads it under
-// <docDir>/incoming/<msgid>-<name>, and returns the saved Attachment. The size
-// cap is enforced twice: the caller rejects a declared FileSize over the cap
-// before calling this, and the download itself is bounded (cap+1) so a document
-// whose declared size lied still cannot overrun the disk.
-func (d *Dispatcher) fetchIncomingDocument(ctx context.Context, m *Message, docDir string) (*Attachment, error) {
-	doc := m.Document
-	filePath, err := d.client.GetFile(ctx, doc.FileID)
+// incomingSpec is a message's incoming media reduced to a single downloadable
+// file — an attached document, or the largest rendition of an attached photo —
+// so the fetch/cap/sanitize path is written once for both.
+type incomingSpec struct {
+	FileID   string
+	FileName string // "" => derive a name from the downloaded path
+	MimeType string
+	FileSize int64 // declared size, gated against the cap before the download
+}
+
+// incomingFile reduces a message's media to one downloadable spec (a document,
+// or the largest size of a photo), or nil when it carries neither.
+func incomingFile(m *Message) *incomingSpec {
+	if d := m.Document; d != nil {
+		return &incomingSpec{FileID: d.FileID, FileName: d.FileName, MimeType: d.MimeType, FileSize: d.FileSize}
+	}
+	if p := largestPhoto(m.Photo); p != nil {
+		// Photos carry no name or MIME and are always JPEG — synthesize both.
+		return &incomingSpec{FileID: p.FileID, FileName: "photo.jpg", MimeType: "image/jpeg", FileSize: p.FileSize}
+	}
+	return nil
+}
+
+// fetchIncoming downloads the spec's file under <docDir>/incoming/<msgid>-<name>
+// and returns the saved Attachment. The size cap is enforced twice: the caller
+// rejects a declared FileSize over the cap before calling this, and the download
+// itself is bounded (cap+1) so a file whose declared size lied still cannot
+// overrun the disk.
+func (d *Dispatcher) fetchIncoming(ctx context.Context, spec *incomingSpec, msgID int64, docDir string) (*Attachment, error) {
+	filePath, err := d.client.GetFile(ctx, spec.FileID)
 	if err != nil {
 		return nil, fmt.Errorf("getFile: %w", err)
 	}
@@ -51,9 +73,9 @@ func (d *Dispatcher) fetchIncomingDocument(ctx context.Context, m *Message, docD
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return nil, fmt.Errorf("incoming dir: %w", err)
 	}
-	name := sanitizeFilename(doc.FileName)
+	name := sanitizeFilename(spec.FileName)
 	if name == "" {
-		// No usable name from the user; fall back to the server path's basename.
+		// No usable name from the sender; fall back to the server path's basename.
 		name = sanitizeFilename(filepath.Base(filePath))
 	}
 	if name == "" {
@@ -62,7 +84,7 @@ func (d *Dispatcher) fetchIncomingDocument(ctx context.Context, m *Message, docD
 	// The msgid prefix keeps re-sends of the same name from clobbering each other;
 	// sanitizeFilename already stripped any directory components, so the join
 	// cannot escape the incoming dir.
-	dest := filepath.Join(dir, fmt.Sprintf("%d-%s", m.MessageID, name))
+	dest := filepath.Join(dir, fmt.Sprintf("%d-%s", msgID, name))
 
 	f, err := os.Create(dest)
 	if err != nil {
@@ -87,7 +109,7 @@ func (d *Dispatcher) fetchIncomingDocument(ctx context.Context, m *Message, docD
 		os.Remove(dest)
 		return nil, fmt.Errorf("attachment exceeds the %d-byte cap", limit)
 	}
-	return &Attachment{Path: dest, Filename: name, MimeType: doc.MimeType, Size: written}, nil
+	return &Attachment{Path: dest, Filename: name, MimeType: spec.MimeType, Size: written}, nil
 }
 
 // sanitizeFilename reduces an untrusted Telegram file name to a bare, safe

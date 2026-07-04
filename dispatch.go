@@ -244,16 +244,18 @@ func (d *Dispatcher) handleUpdate(ctx context.Context, u Update) {
 		return
 	}
 
-	// Reject an oversized incoming document up front, before minting an outbox or
+	// Incoming media (a document or a photo) is downloaded into the outbox for the
+	// responder. Reject an oversized one up front, before minting an outbox or
 	// spawning the responder: the bot cannot fetch it (getFile's ~20 MB ceiling),
 	// so tell the user rather than fail silently. The declared FileSize is the
-	// gate; the download itself is bounded too (fetchIncomingDocument).
-	if m.Document != nil && d.maxIncomingBytes > 0 && m.Document.FileSize > d.maxIncomingBytes {
+	// gate; the download itself is bounded too (fetchIncoming).
+	incoming := incomingFile(m)
+	if incoming != nil && d.maxIncomingBytes > 0 && incoming.FileSize > d.maxIncomingBytes {
 		mb := d.maxIncomingBytes >> 20
 		if _, err := d.sender.SendMessage(ctx, route, fmt.Sprintf("Файл слишком большой — максимум %d МБ.", mb), "", false); err != nil {
 			log.Printf("ak-tgclaude: too-big reply chat=%d: %v", m.Chat.ID, err)
 		}
-		log.Printf("ak-tgclaude: incoming doc too big chat=%d size=%d cap=%d", m.Chat.ID, m.Document.FileSize, d.maxIncomingBytes)
+		log.Printf("ak-tgclaude: incoming file too big chat=%d size=%d cap=%d", m.Chat.ID, incoming.FileSize, d.maxIncomingBytes)
 		return
 	}
 
@@ -279,14 +281,14 @@ func (d *Dispatcher) handleUpdate(ctx context.Context, u Update) {
 	// main run and the delivery-guard re-prompt (both share docDir).
 	defer os.RemoveAll(filepath.Join(docDir, fmt.Sprintf("claude-%d", os.Getuid())))
 
-	// Incoming document: download it into the outbox so the responder can read or
-	// Edit it. On failure, tell the user and stop — a silent drop would leave them
-	// waiting on a file the model never saw.
+	// Incoming file: download it into the outbox so the responder can read or Edit
+	// it (an image, too — the Read tool renders it). On failure, tell the user and
+	// stop — a silent drop would leave them waiting on a file the model never saw.
 	var attach *Attachment
-	if m.Document != nil {
-		attach, err = d.fetchIncomingDocument(ctx, m, docDir)
+	if incoming != nil {
+		attach, err = d.fetchIncoming(ctx, incoming, m.MessageID, docDir)
 		if err != nil {
-			log.Printf("ak-tgclaude: fetch incoming doc chat=%d msg=%d: %v", m.Chat.ID, m.MessageID, err)
+			log.Printf("ak-tgclaude: fetch incoming file chat=%d msg=%d: %v", m.Chat.ID, m.MessageID, err)
 			if _, e := d.sender.SendMessage(ctx, route, "Не удалось скачать вложение.", "", false); e != nil {
 				log.Printf("ak-tgclaude: fetch-fail reply chat=%d: %v", m.Chat.ID, e)
 			}
