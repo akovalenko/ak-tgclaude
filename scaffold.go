@@ -371,7 +371,8 @@ func materializeScaffold(cwd string, p scaffoldParams) error {
 	if err := os.WriteFile(path, b, 0o600); err != nil {
 		return fmt.Errorf("writing %s: %w", path, err)
 	}
-	if err := materializeSkills(claudeDir, p.Project, p.UploadNote); err != nil {
+	transcriptsOn := p.TranscriptRoot != ""
+	if err := materializeSkills(claudeDir, p.Project, p.UploadNote, transcriptsOn); err != nil {
 		return err
 	}
 	// Wire operator skill templates into the scaffold (materialized + {{PROJECT}}
@@ -392,7 +393,14 @@ func materializeScaffold(cwd string, p scaffoldParams) error {
 	if err := addAgents(claudeDir, p.AddAgents); err != nil {
 		return err
 	}
-	return materializeAgent(claudeDir, p.Project, wired, p.Tools)
+	// Preload tg-recall into the agent alongside operator wire-skills, but only when
+	// the transcript feature is on (its body is materialized above under the same
+	// gate). Off => neither the skill nor the preload — "ни записи, ни скилла".
+	preload := append([]string(nil), wired...)
+	if transcriptsOn {
+		preload = append(preload, "tg-recall")
+	}
+	return materializeAgent(claudeDir, p.Project, preload, p.Tools)
 }
 
 // projectPlaceholder is replaced with the project path when an agent or skill
@@ -487,10 +495,17 @@ func scaffoldFileMode(src os.FileMode) os.FileMode {
 // materializeSkills copies the embedded skills tree into <cwd>/.claude/skills,
 // substituting the {{UPLOAD_NOTE}} marker (in tg-emit) with the large-file
 // capability paragraph — empty when the fallback is off, so the marker vanishes.
-func materializeSkills(claudeDir, project, uploadNote string) error {
+func materializeSkills(claudeDir, project, uploadNote string, transcriptsOn bool) error {
 	return fs.WalkDir(scaffoldAssets, "assets/skills", func(p string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
+		}
+		// tg-recall ships to the responder only when the transcript feature is on.
+		if !transcriptsOn && (p == "assets/skills/tg-recall" || strings.HasPrefix(p, "assets/skills/tg-recall/")) {
+			if d.IsDir() {
+				return fs.SkipDir
+			}
+			return nil
 		}
 		rel, err := filepath.Rel("assets", p)
 		if err != nil {

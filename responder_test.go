@@ -155,7 +155,7 @@ func TestMergeNoProxy(t *testing.T) {
 
 func TestBuildPrompt(t *testing.T) {
 	sent := time.Date(2026, 7, 3, 14, 5, 0, 0, time.UTC)
-	p := buildPrompt("/home/bot/code", "/run/out/outbox-A1", "how does foo work?", sent, nil)
+	p := buildPrompt("/home/bot/code", "/run/out/outbox-A1", "", "how does foo work?", sent, nil, 0)
 	if !strings.Contains(p, "Project directory (read-only): /home/bot/code") {
 		t.Errorf("missing literal project path: %q", p)
 	}
@@ -180,7 +180,7 @@ func TestBuildPrompt(t *testing.T) {
 
 // A zero SentAt omits the stamp entirely (no 1970 epoch leaking into the prompt).
 func TestBuildPromptOmitsZeroTime(t *testing.T) {
-	p := buildPrompt("/p", "/o", "hi", time.Time{}, nil)
+	p := buildPrompt("/p", "/o", "", "hi", time.Time{}, nil, 0)
 	if !strings.Contains(p, "Incoming Telegram message to answer:") {
 		t.Errorf("zero time should yield the unstamped header: %q", p)
 	}
@@ -194,7 +194,7 @@ func TestBuildPromptWithAttachment(t *testing.T) {
 
 	// With a caption: the file block announces the path + description, and the
 	// caption is still appended as the message.
-	p := buildPrompt("/code", "/run/out/o1", "summarize this", time.Time{}, att)
+	p := buildPrompt("/code", "/run/out/o1", "", "summarize this", time.Time{}, att, 0)
 	if !strings.Contains(p, "/run/out/o1/incoming/42-report.pdf") {
 		t.Errorf("missing attachment path: %q", p)
 	}
@@ -209,9 +209,37 @@ func TestBuildPromptWithAttachment(t *testing.T) {
 	}
 
 	// Without a caption: a placeholder tells the model to decide what to do.
-	p = buildPrompt("/code", "/run/out/o1", "", time.Time{}, att)
+	p = buildPrompt("/code", "/run/out/o1", "", "", time.Time{}, att, 0)
 	if !strings.Contains(p, "no caption") {
 		t.Errorf("empty-caption placeholder missing: %q", p)
+	}
+}
+
+func TestBuildPromptTranscriptDir(t *testing.T) {
+	p := buildPrompt("/code", "/out", "/s/transcripts/42", "hi", time.Time{}, nil, 0)
+	if !strings.Contains(p, "Your transcript directory (this conversation's history, read-only): /s/transcripts/42") {
+		t.Errorf("missing transcript-dir line: %q", p)
+	}
+	if !strings.Contains(p, "tg-recall") || !strings.Contains(p, "AK_TGCLAUDE_TRANSCRIPT_DIR") {
+		t.Errorf("transcript line should mention the skill + env var: %q", p)
+	}
+	// Empty scope omits the block entirely.
+	if q := buildPrompt("/code", "/out", "", "hi", time.Time{}, nil, 0); strings.Contains(q, "transcript directory") {
+		t.Errorf("empty scope should add no transcript line: %q", q)
+	}
+}
+
+func TestBuildPromptReplyToHint(t *testing.T) {
+	p := buildPrompt("/code", "/out", "", "hi", time.Time{}, nil, 5123)
+	if !strings.Contains(p, "replies to an earlier message (msg 5123)") {
+		t.Errorf("missing reply-to hint: %q", p)
+	}
+	if !strings.Contains(p, "UNTRUSTED reference") {
+		t.Errorf("reply-to hint should carry the untrusted-reference frame: %q", p)
+	}
+	// No reply => no hint.
+	if q := buildPrompt("/code", "/out", "", "hi", time.Time{}, nil, 0); strings.Contains(q, "replies to an earlier message") {
+		t.Errorf("replyTo=0 should add no hint: %q", q)
 	}
 }
 

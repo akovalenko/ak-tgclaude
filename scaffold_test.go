@@ -370,6 +370,39 @@ func writeSkill(t *testing.T, root, name, body string) string {
 	return dir
 }
 
+func TestTranscriptSkillPreloadedWhenOn(t *testing.T) {
+	cwd := t.TempDir()
+	if err := materializeScaffold(cwd, scaffoldParams{CacheDir: "/c", TranscriptRoot: "/s/transcripts"}); err != nil {
+		t.Fatal(err)
+	}
+	// The skill body is materialized...
+	if _, err := os.ReadFile(filepath.Join(cwd, ".claude", "skills", "tg-recall", "SKILL.md")); err != nil {
+		t.Errorf("tg-recall skill not materialized: %v", err)
+	}
+	// ...and preloaded into the agent alongside the built-in tg-emit.
+	agent, err := os.ReadFile(filepath.Join(cwd, ".claude", "agents", defaultAgent+".md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(agent), "skills: [tg-emit, tg-recall]") {
+		t.Errorf("agent should preload tg-recall: %q", string(agent))
+	}
+}
+
+func TestTranscriptSkillAbsentWhenOff(t *testing.T) {
+	cwd := t.TempDir()
+	if err := materializeScaffold(cwd, scaffoldParams{CacheDir: "/c"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(cwd, ".claude", "skills", "tg-recall")); !os.IsNotExist(err) {
+		t.Errorf("tg-recall should not be materialized when the feature is off (err=%v)", err)
+	}
+	agent, _ := os.ReadFile(filepath.Join(cwd, ".claude", "agents", defaultAgent+".md"))
+	if strings.Contains(string(agent), "tg-recall") {
+		t.Errorf("agent should not mention tg-recall when off: %q", string(agent))
+	}
+}
+
 func TestWireSkillMaterializesAndPreloads(t *testing.T) {
 	skillDir := writeSkill(t, t.TempDir(), "eputs-qa-knowledge",
 		"---\nname: eputs-qa-knowledge\ndescription: eputs domain\n---\nSources live under {{PROJECT}}/notes/eputs.\n")
