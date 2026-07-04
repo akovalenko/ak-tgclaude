@@ -288,6 +288,12 @@ type Config struct {
 	// Ignored when UploadCommand is empty. Also --upload-max-mb.
 	UploadMaxMB int `toml:"upload_max_mb"`
 
+	// MaxIncomingMB caps the size (MB) of an incoming document the bot downloads
+	// into the responder's outbox; a larger attachment is refused with a note to
+	// the user instead. Default 20 — the Telegram bot-API getFile ceiling, above
+	// which the bot cannot fetch a file at all. Also --max-incoming-mb.
+	MaxIncomingMB int `toml:"max_incoming_mb"`
+
 	// HelpText is the reply to /help and /start. Empty => a generic built-in
 	// blurb (defaultHelpText). Keeps the dispatcher domain-blind: any
 	// project-specific help comes from config, not baked into the binary.
@@ -397,6 +403,7 @@ func parseConfig(args []string) (*Config, error) {
 	uploadCommand := fs.String("upload-command", "", "path to an uploader script (argv [cmd, file, name]; prints the URL on stdout + exit 0, else non-zero with stderr) — enables the large-file fallback: a document over --upload-threshold-mb is uploaded and delivered as a link")
 	uploadThresholdMB := fs.Int("upload-threshold-mb", 0, "size in MB above which a document is uploaded via --upload-command instead of sent as a Telegram attachment (default 40; ignored without --upload-command)")
 	uploadMaxMB := fs.Int("upload-max-mb", 0, "advertised max upload size in MB surfaced to the responder; a file over this +10% is rejected as too large (0 = no advertised number / no hard cap)")
+	maxIncomingMB := fs.Int("max-incoming-mb", 0, "max size in MB of an incoming document to download into the responder's outbox (0 => default 20, the bot-API getFile ceiling)")
 	open := fs.Bool("open", false, "OPEN ACCESS: allow every Telegram user (demo only; overrides the whitelist)")
 	if err := fs.Parse(args); err != nil {
 		return nil, err
@@ -508,6 +515,9 @@ func parseConfig(args []string) (*Config, error) {
 	}
 	if *uploadMaxMB != 0 {
 		c.UploadMaxMB = *uploadMaxMB
+	}
+	if *maxIncomingMB != 0 {
+		c.MaxIncomingMB = *maxIncomingMB
 	}
 	if *open {
 		c.Open = true
@@ -671,6 +681,9 @@ func (c *Config) applyDefaults() {
 	if c.OutboxTTL == "" {
 		c.OutboxTTL = "2h"
 	}
+	if c.MaxIncomingMB == 0 {
+		c.MaxIncomingMB = 20
+	}
 	if c.StateDir == "" {
 		c.StateDir = defaultStateDir()
 	}
@@ -710,6 +723,9 @@ func (c *Config) validate() error {
 	}
 	if c.MaxConcurrent < 1 {
 		return fmt.Errorf("max_concurrent must be >= 1, got %d", c.MaxConcurrent)
+	}
+	if c.MaxIncomingMB < 1 {
+		return fmt.Errorf("max_incoming_mb must be >= 1, got %d", c.MaxIncomingMB)
 	}
 	if _, err := time.ParseDuration(c.OutboxTTL); err != nil {
 		return fmt.Errorf("outbox_ttl %q is not a valid duration (e.g. \"2h\", \"30m\", \"0\"): %w", c.OutboxTTL, err)

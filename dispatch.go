@@ -47,20 +47,21 @@ func keepTyping(ctx context.Context, s Sender, chatID int64) {
 // Dispatcher is the long-lived process: it long-polls Telegram, routes each
 // update to a responder, and delivers the responder's outbound messages.
 type Dispatcher struct {
-	client        *Client    // getUpdates
-	sender        Sender     // sendMessage/sendDocument (= client in production)
-	mcp           *mcpServer // outbound transport: the responder's send_* tools deliver through here
-	store         *SessionStore
-	resp          Responder
-	authz         Authorizer    // gates which Telegram users may use the bot
-	outboxRoot    string        // writable root under which per-chat persistent outbox (doc/scratch) dirs live
-	outboxTTL     time.Duration // idle-eviction TTL for a chat's persistent outbox (<=0 disables)
-	pollTimeout   int
-	maxConcurrent int    // cap on responders running at once
-	helpText      string // reply to /help and /start
-	helpParseMode string // "" (plain) or "HTML" for the help reply
-	bill          bool   // send the run's dollar cost as a "$n.nnn" message after each answer
-	debug         bool   // log the responder's full final text after each run (troubleshooting)
+	client           *Client    // getUpdates
+	sender           Sender     // sendMessage/sendDocument (= client in production)
+	mcp              *mcpServer // outbound transport: the responder's send_* tools deliver through here
+	store            *SessionStore
+	resp             Responder
+	authz            Authorizer    // gates which Telegram users may use the bot
+	outboxRoot       string        // writable root under which per-chat persistent outbox (doc/scratch) dirs live
+	outboxTTL        time.Duration // idle-eviction TTL for a chat's persistent outbox (<=0 disables)
+	pollTimeout      int
+	maxConcurrent    int    // cap on responders running at once
+	maxIncomingBytes int64  // cap on an incoming document download (bytes; = MaxIncomingMB<<20)
+	helpText         string // reply to /help and /start
+	helpParseMode    string // "" (plain) or "HTML" for the help reply
+	bill             bool   // send the run's dollar cost as a "$n.nnn" message after each answer
+	debug            bool   // log the responder's full final text after each run (troubleshooting)
 
 	requireDelivery bool   // guard: if the responder sent nothing, re-prompt once (then fall back)
 	undeliveredText string // fallback reply when the guard's re-prompt still delivered nothing ("" => none)
@@ -173,6 +174,16 @@ const redeliverPrompt = "Your previous turn ended without calling any send tool,
 	"by calling mcp__tg__send_message (or send_code / send_document). If you meant to decline, tell the user so " +
 	"via mcp__tg__send_message. Then end with the status word as usual."
 
+// incomingText is the user's text for the prompt: a plain message's Text, or a
+// media message's Caption (Telegram puts a document's caption there and leaves
+// Text empty).
+func incomingText(m *Message) string {
+	if m.Text != "" {
+		return m.Text
+	}
+	return m.Caption
+}
+
 // messageSentAt is the message's Telegram send time as a local Time, or the zero
 // Time when the field is absent (so the prompt omits the stamp rather than
 // printing the 1970 epoch).
@@ -233,6 +244,19 @@ func (d *Dispatcher) handleUpdate(ctx context.Context, u Update) {
 		return
 	}
 
+	// Reject an oversized incoming document up front, before minting an outbox or
+	// spawning the responder: the bot cannot fetch it (getFile's ~20 MB ceiling),
+	// so tell the user rather than fail silently. The declared FileSize is the
+	// gate; the download itself is bounded too (fetchIncomingDocument).
+	if m.Document != nil && d.maxIncomingBytes > 0 && m.Document.FileSize > d.maxIncomingBytes {
+		mb := d.maxIncomingBytes >> 20
+		if _, err := d.sender.SendMessage(ctx, route, fmt.Sprintf("Файл слишком большой — максимум %d МБ.", mb), "", false); err != nil {
+			log.Printf("ak-tgclaude: too-big reply chat=%d: %v", m.Chat.ID, err)
+		}
+		log.Printf("ak-tgclaude: incoming doc too big chat=%d size=%d cap=%d", m.Chat.ID, m.Document.FileSize, d.maxIncomingBytes)
+		return
+	}
+
 	// Reap idle chats' persistent outboxes (TTL); skip this chat, whose record is
 	// about to be refreshed. Runs on dispatch (no separate timer) — simplest policy.
 	d.evictExpiredOutboxes(m.Chat.ID)
@@ -254,6 +278,21 @@ func (d *Dispatcher) handleUpdate(ctx context.Context, u Update) {
 	// outbox (the model's builds/checkouts) persists. One defer at return covers the
 	// main run and the delivery-guard re-prompt (both share docDir).
 	defer os.RemoveAll(filepath.Join(docDir, fmt.Sprintf("claude-%d", os.Getuid())))
+
+	// Incoming document: download it into the outbox so the responder can read or
+	// Edit it. On failure, tell the user and stop — a silent drop would leave them
+	// waiting on a file the model never saw.
+	var attach *Attachment
+	if m.Document != nil {
+		attach, err = d.fetchIncomingDocument(ctx, m, docDir)
+		if err != nil {
+			log.Printf("ak-tgclaude: fetch incoming doc chat=%d msg=%d: %v", m.Chat.ID, m.MessageID, err)
+			if _, e := d.sender.SendMessage(ctx, route, "Не удалось скачать вложение.", "", false); e != nil {
+				log.Printf("ak-tgclaude: fetch-fail reply chat=%d: %v", m.Chat.ID, e)
+			}
+			return
+		}
+	}
 
 	// Mint this invocation's capability token: the MCP server resolves the route
 	// (chat/reply) from it, so the responder's send_* calls carry no chat_id and
@@ -277,12 +316,13 @@ func (d *Dispatcher) handleUpdate(ctx context.Context, u Update) {
 	start := time.Now()
 	sid, _ := d.store.SessionID(m.Chat.ID)
 	res, err := d.resp.Respond(ctx, RespondRequest{
-		Prompt:    m.Text,
-		SentAt:    messageSentAt(m),
-		SessionID: sid,
-		DocDir:    docDir,
-		MCPURL:    d.mcp.URL(),
-		MCPToken:  token,
+		Prompt:     incomingText(m),
+		SentAt:     messageSentAt(m),
+		Attachment: attach,
+		SessionID:  sid,
+		DocDir:     docDir,
+		MCPURL:     d.mcp.URL(),
+		MCPToken:   token,
 	})
 	stopTyping()
 	dur := time.Since(start).Round(time.Millisecond)
@@ -614,20 +654,21 @@ func runDispatch(args []string) {
 	}
 
 	d := &Dispatcher{
-		client:        client,
-		sender:        client,
-		mcp:           mcp,
-		store:         store,
-		resp:          resp,
-		authz:         authz,
-		outboxRoot:    outboxRoot,
-		outboxTTL:     cfg.OutboxTTLDur(),
-		pollTimeout:   defaultPollTimeout,
-		maxConcurrent: cfg.MaxConcurrent,
-		helpText:      helpText,
-		helpParseMode: helpParseMode,
-		bill:          cfg.Bill,
-		debug:         cfg.Debug,
+		client:           client,
+		sender:           client,
+		mcp:              mcp,
+		store:            store,
+		resp:             resp,
+		authz:            authz,
+		outboxRoot:       outboxRoot,
+		outboxTTL:        cfg.OutboxTTLDur(),
+		pollTimeout:      defaultPollTimeout,
+		maxConcurrent:    cfg.MaxConcurrent,
+		maxIncomingBytes: int64(cfg.MaxIncomingMB) << 20,
+		helpText:         helpText,
+		helpParseMode:    helpParseMode,
+		bill:             cfg.Bill,
+		debug:            cfg.Debug,
 
 		requireDelivery: !cfg.AllowSilent,
 		undeliveredText: cfg.UndeliveredText,

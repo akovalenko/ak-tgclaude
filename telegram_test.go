@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -192,6 +193,124 @@ func TestClientGetUpdates(t *testing.T) {
 	}
 	if ups[0].Message.From == nil || ups[0].Message.From.ID != 7 || ups[0].Message.From.Username != "bob" {
 		t.Errorf("from not parsed: %+v", ups[0].Message.From)
+	}
+}
+
+func TestClientGetUpdatesParsesDocument(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		io.WriteString(w, `{"ok":true,"result":[
+			{"update_id":1,"message":{"message_id":8,"date":1751648400,"caption":"look",
+				"document":{"file_id":"ABC","file_name":"report.pdf","mime_type":"application/pdf","file_size":1234},
+				"chat":{"id":99}}}
+		]}`)
+	}))
+	defer srv.Close()
+
+	c := &Client{Token: "T", BaseURL: srv.URL, HTTP: srv.Client()}
+	ups, err := c.GetUpdates(context.Background(), 0, 0)
+	if err != nil {
+		t.Fatalf("GetUpdates: %v", err)
+	}
+	m := ups[0].Message
+	if m.Caption != "look" || m.Text != "" {
+		t.Errorf("caption/text = %q/%q, want look/empty", m.Caption, m.Text)
+	}
+	if m.Document == nil {
+		t.Fatal("document not parsed")
+	}
+	if m.Document.FileID != "ABC" || m.Document.FileName != "report.pdf" ||
+		m.Document.MimeType != "application/pdf" || m.Document.FileSize != 1234 {
+		t.Errorf("document fields wrong: %+v", m.Document)
+	}
+	if m.Date != 1751648400 {
+		t.Errorf("date = %d, want 1751648400", m.Date)
+	}
+}
+
+func TestClientGetFile(t *testing.T) {
+	var gotPath string
+	var body map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		io.WriteString(w, `{"ok":true,"result":{"file_path":"documents/file_8.pdf"}}`)
+	}))
+	defer srv.Close()
+
+	c := &Client{Token: "TOK", BaseURL: srv.URL, HTTP: srv.Client()}
+	fp, err := c.GetFile(context.Background(), "ABC")
+	if err != nil {
+		t.Fatalf("GetFile: %v", err)
+	}
+	if fp != "documents/file_8.pdf" {
+		t.Errorf("file_path = %q", fp)
+	}
+	if gotPath != "/botTOK/getFile" || body["file_id"] != "ABC" {
+		t.Errorf("request wrong: path=%q body=%v", gotPath, body)
+	}
+}
+
+func TestClientGetFileAPIError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		io.WriteString(w, `{"ok":false,"error_code":400,"description":"file is too big"}`)
+	}))
+	defer srv.Close()
+
+	c := &Client{Token: "T", BaseURL: srv.URL, HTTP: srv.Client()}
+	_, err := c.GetFile(context.Background(), "ABC")
+	var ae *APIError
+	if !errors.As(err, &ae) || ae.Code != 400 {
+		t.Fatalf("want *APIError code 400, got %v", err)
+	}
+}
+
+func TestClientDownloadFile(t *testing.T) {
+	const content = "hello attachment bytes"
+	var gotPath string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		io.WriteString(w, content)
+	}))
+	defer srv.Close()
+
+	c := &Client{Token: "TOK", BaseURL: srv.URL, HTTP: srv.Client()}
+	var buf bytes.Buffer
+	n, err := c.DownloadFile(context.Background(), "documents/file_8.pdf", &buf, 0)
+	if err != nil {
+		t.Fatalf("DownloadFile: %v", err)
+	}
+	// The download URL carries the /file/bot<token>/ prefix, not the method URL.
+	if gotPath != "/file/botTOK/documents/file_8.pdf" {
+		t.Errorf("download path = %q", gotPath)
+	}
+	if buf.String() != content || n != int64(len(content)) {
+		t.Errorf("got %q (n=%d), want %q", buf.String(), n, content)
+	}
+
+	// A limit truncates the copy (belt-and-suspenders against a lying file_size).
+	buf.Reset()
+	n, err = c.DownloadFile(context.Background(), "x", &buf, 5)
+	if err != nil {
+		t.Fatalf("DownloadFile limited: %v", err)
+	}
+	if n != 5 || buf.String() != content[:5] {
+		t.Errorf("limited copy = %q (n=%d), want %q", buf.String(), n, content[:5])
+	}
+}
+
+func TestClientDownloadFileScrubsToken(t *testing.T) {
+	const token = "999:AAEsecretdownloadtoken"
+	boom := errors.New("dial tcp: connection refused")
+	c := &Client{Token: token, BaseURL: "https://api.telegram.org", HTTP: &http.Client{Transport: errTransport{err: boom}}}
+	_, err := c.DownloadFile(context.Background(), "documents/x.pdf", io.Discard, 0)
+	if err == nil {
+		t.Fatal("expected a transport error")
+	}
+	if strings.Contains(err.Error(), token) {
+		t.Fatalf("token leaked in download error: %v", err)
+	}
+	if !errors.Is(err, boom) {
+		t.Errorf("scrubbing broke the download error chain")
 	}
 }
 

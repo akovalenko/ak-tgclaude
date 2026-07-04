@@ -91,6 +91,12 @@ project = "~/code/example-project"
 # different chats run concurrently up to this bound.
 # max_concurrent = 4
 
+# Max size (MB) of an incoming document the bot downloads into the responder's
+# outbox (under incoming/) for it to read or Edit; a larger attachment is refused
+# with a note to the user. Default 20 — the Telegram bot-API getFile ceiling,
+# above which the bot cannot fetch a file at all.
+# max_incoming_mb = 20
+
 # After each answer, send the run's dollar cost as a bare "$n.nnn" message
 # (tenth-of-a-cent precision) to the chat — sent only when the cost is present
 # and non-zero, otherwise nothing. Under a Claude subscription the figure is

@@ -39,12 +39,24 @@ type Update struct {
 
 // Message is a Telegram message (the fields the dispatcher needs).
 type Message struct {
-	MessageID int64    `json:"message_id"`
-	Date      int64    `json:"date"` // Unix send time (seconds); stamped into the prompt for temporal orientation
-	Text      string   `json:"text"`
-	Chat      Chat     `json:"chat"`
-	From      *User    `json:"from"`
-	ReplyTo   *Message `json:"reply_to_message"`
+	MessageID int64     `json:"message_id"`
+	Date      int64     `json:"date"`     // Unix send time (seconds); stamped into the prompt for temporal orientation
+	Text      string    `json:"text"`     // text messages
+	Caption   string    `json:"caption"`  // media messages carry the user's text here, not in Text
+	Document  *Document `json:"document"` // an attached file (nil for a plain text message)
+	Chat      Chat      `json:"chat"`
+	From      *User     `json:"from"`
+	ReplyTo   *Message  `json:"reply_to_message"`
+}
+
+// Document is an incoming file attachment (a subset of Telegram's Document). The
+// dispatcher resolves FileID to a download via getFile and lands the bytes in
+// the responder's outbox; FileSize gates the download against the size cap.
+type Document struct {
+	FileID   string `json:"file_id"`
+	FileName string `json:"file_name"`
+	MimeType string `json:"mime_type"`
+	FileSize int64  `json:"file_size"`
 }
 
 // Chat identifies the conversation an update belongs to.
@@ -117,6 +129,66 @@ func (c *Client) GetUpdates(ctx context.Context, offset int64, timeoutSec int) (
 		return nil, fmt.Errorf("getUpdates error (HTTP %d): %s", status, r.Description)
 	}
 	return r.Result, nil
+}
+
+// fileURL builds the download URL for a getFile file_path. Note the /file/
+// segment: downloaded files live at <base>/file/bot<token>/<path>, NOT under the
+// method URL. Like methodURL it embeds the token — so DownloadFile scrubs its
+// transport errors.
+func (c *Client) fileURL(filePath string) string {
+	return fmt.Sprintf("%s/file/bot%s/%s", c.baseURL(), c.Token, filePath)
+}
+
+// GetFile resolves a file_id to a downloadable file_path (getFile). The bot API
+// only serves files up to ~20 MB this way; a larger file_id yields an APIError.
+func (c *Client) GetFile(ctx context.Context, fileID string) (string, error) {
+	status, body, err := c.postJSON(ctx, "getFile", map[string]any{"file_id": fileID})
+	if err != nil {
+		return "", err
+	}
+	var r struct {
+		OK          bool   `json:"ok"`
+		ErrorCode   int    `json:"error_code"`
+		Description string `json:"description"`
+		Result      struct {
+			FilePath string `json:"file_path"`
+		} `json:"result"`
+	}
+	if err := json.Unmarshal(body, &r); err != nil {
+		return "", fmt.Errorf("decoding getFile (HTTP %d): %w", status, err)
+	}
+	if !r.OK {
+		return "", newAPIError(status, r.ErrorCode, r.Description, nil)
+	}
+	if r.Result.FilePath == "" {
+		return "", fmt.Errorf("getFile (HTTP %d): empty file_path", status)
+	}
+	return r.Result.FilePath, nil
+}
+
+// DownloadFile streams the file at a getFile file_path into dst and returns the
+// number of bytes written. When limit > 0 it copies at most limit bytes (the
+// caller passes cap+1 and treats an over-limit result as oversized, so a file
+// whose declared size lied cannot fill the disk). Transport errors are scrubbed
+// of the token (which the file URL embeds).
+func (c *Client) DownloadFile(ctx context.Context, filePath string, dst io.Writer, limit int64) (int64, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.fileURL(filePath), nil)
+	if err != nil {
+		return 0, c.scrubToken(err)
+	}
+	resp, err := c.httpClient().Do(req)
+	if err != nil {
+		return 0, c.scrubToken(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return 0, fmt.Errorf("downloading file (HTTP %d)", resp.StatusCode)
+	}
+	src := io.Reader(resp.Body)
+	if limit > 0 {
+		src = io.LimitReader(resp.Body, limit)
+	}
+	return io.Copy(dst, src)
 }
 
 // SendMessage delivers a text message (sendMessage).

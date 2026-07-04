@@ -182,7 +182,7 @@ func TestParseConfigUploadDefaultThreshold(t *testing.T) {
 
 func TestValidateUploadCommandMissing(t *testing.T) {
 	c := &Config{BotToken: "x", Profile: ProfileQA, Responder: ResponderClaude, Project: "/p",
-		MaxConcurrent: 1, OutboxTTL: "2h", UploadCommand: "/no/such/uploader", UploadThresholdMB: 40}
+		MaxConcurrent: 1, MaxIncomingMB: 20, OutboxTTL: "2h", UploadCommand: "/no/such/uploader", UploadThresholdMB: 40}
 	if err := c.validate(); err == nil || !strings.Contains(err.Error(), "upload_command") {
 		t.Fatalf("want upload_command existence error, got %v", err)
 	}
@@ -191,7 +191,7 @@ func TestValidateUploadCommandMissing(t *testing.T) {
 func TestValidateUploadMaxBelowThreshold(t *testing.T) {
 	script := writeScript(t, `echo x`) // exists, so the stat check passes
 	c := &Config{BotToken: "x", Profile: ProfileQA, Responder: ResponderClaude, Project: "/p",
-		MaxConcurrent: 1, OutboxTTL: "2h", UploadCommand: script, UploadThresholdMB: 40, UploadMaxMB: 30}
+		MaxConcurrent: 1, MaxIncomingMB: 20, OutboxTTL: "2h", UploadCommand: script, UploadThresholdMB: 40, UploadMaxMB: 30}
 	if err := c.validate(); err == nil || !strings.Contains(err.Error(), "upload_max_mb") {
 		t.Fatalf("want upload_max_mb < threshold error, got %v", err)
 	}

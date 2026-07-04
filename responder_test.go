@@ -113,7 +113,7 @@ func TestMergeNoProxy(t *testing.T) {
 
 func TestBuildPrompt(t *testing.T) {
 	sent := time.Date(2026, 7, 3, 14, 5, 0, 0, time.UTC)
-	p := buildPrompt("/home/bot/code", "/run/out/outbox-A1", "how does foo work?", sent)
+	p := buildPrompt("/home/bot/code", "/run/out/outbox-A1", "how does foo work?", sent, nil)
 	if !strings.Contains(p, "Project directory (read-only): /home/bot/code") {
 		t.Errorf("missing literal project path: %q", p)
 	}
@@ -138,12 +138,38 @@ func TestBuildPrompt(t *testing.T) {
 
 // A zero SentAt omits the stamp entirely (no 1970 epoch leaking into the prompt).
 func TestBuildPromptOmitsZeroTime(t *testing.T) {
-	p := buildPrompt("/p", "/o", "hi", time.Time{})
+	p := buildPrompt("/p", "/o", "hi", time.Time{}, nil)
 	if !strings.Contains(p, "Incoming Telegram message to answer:") {
 		t.Errorf("zero time should yield the unstamped header: %q", p)
 	}
 	if strings.Contains(p, "sent ") || strings.Contains(p, "1970") {
 		t.Errorf("zero time leaked a stamp: %q", p)
+	}
+}
+
+func TestBuildPromptWithAttachment(t *testing.T) {
+	att := &Attachment{Path: "/run/out/o1/incoming/42-report.pdf", Filename: "report.pdf", MimeType: "application/pdf", Size: 2048}
+
+	// With a caption: the file block announces the path + description, and the
+	// caption is still appended as the message.
+	p := buildPrompt("/code", "/run/out/o1", "summarize this", time.Time{}, att)
+	if !strings.Contains(p, "/run/out/o1/incoming/42-report.pdf") {
+		t.Errorf("missing attachment path: %q", p)
+	}
+	if !strings.Contains(p, "report.pdf, 2.0 KB, application/pdf") {
+		t.Errorf("missing attachment description: %q", p)
+	}
+	if !strings.Contains(p, "untrusted") {
+		t.Errorf("missing untrusted-content caveat: %q", p)
+	}
+	if !strings.HasSuffix(p, "summarize this") {
+		t.Errorf("caption should be appended last: %q", p)
+	}
+
+	// Without a caption: a placeholder tells the model to decide what to do.
+	p = buildPrompt("/code", "/run/out/o1", "", time.Time{}, att)
+	if !strings.Contains(p, "no caption") {
+		t.Errorf("empty-caption placeholder missing: %q", p)
 	}
 }
 
