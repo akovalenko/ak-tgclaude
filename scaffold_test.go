@@ -782,6 +782,45 @@ func TestOutboxRWPolicy(t *testing.T) {
 	}
 }
 
+func TestWithDefaultStance(t *testing.T) {
+	// An axis-less-only list gets normal prepended as the base stance.
+	for _, name := range []string{"introspect", "outbox-rw"} {
+		got, err := withDefaultStance([]string{name})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(got) != 2 || got[0] != "normal" || got[1] != name {
+			t.Errorf("withDefaultStance([%s]) = %v, want [normal %s]", name, got, name)
+		}
+	}
+	// A list that already carries a refusal-axis fragment is left untouched.
+	for _, in := range [][]string{{"strict"}, {"norefuse"}, {"normal"}, {"strict", "outbox-rw"}} {
+		got, err := withDefaultStance(in)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(got) != len(in) || got[0] != in[0] {
+			t.Errorf("withDefaultStance(%v) = %v, want unchanged", in, got)
+		}
+	}
+	// An empty list is returned unchanged (loadPolicies maps it to defaultPolicy).
+	if got, _ := withDefaultStance(nil); len(got) != 0 {
+		t.Errorf("withDefaultStance(nil) = %v, want empty", got)
+	}
+	// A custom fragment declaring axis: refusal occupies the slot — no floor.
+	fr := filepath.Join(t.TempDir(), "myrefusal.md")
+	if err := os.WriteFile(fr, []byte("---\naxis: refusal\n---\nMy base.\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	got, err := withDefaultStance([]string{fr})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0] != fr {
+		t.Errorf("axis:refusal custom = %v, want [%q] (no normal floor)", got, fr)
+	}
+}
+
 func TestCheckAxisConflicts(t *testing.T) {
 	// Two refusal-axis built-ins conflict.
 	if err := checkAxisConflicts([]string{"normal", "norefuse"}); err == nil {

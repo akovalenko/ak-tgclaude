@@ -490,6 +490,13 @@ mutual-exclusion guard. The refusal trio (`normal`/`norefuse`/`strict`) all carr
 stripped from the composed text; a fragment's `summary:` line, if any, feeds
 `--policy help`.)
 
+**Refusal-axis floor.** Because axis-less fragments are only *modifiers*, a persona
+composed of nothing but them (e.g. a lone `--policy ./my-rw.md`, or `--policy
+outbox-rw`) would have no base stance at all. So when the resolved list carries **no**
+refusal-axis fragment, `normal` is prepended as the base — `--policy outbox-rw` becomes
+`[normal, outbox-rw]`. To opt out (a deliberately base-less persona), give your custom
+fragment its own `axis: refusal` and it takes the slot instead of `normal`.
+
 **Per-user overrides.** `[policy_overrides]` maps a Telegram user id to a persona
 layered on top of `policies` **along axes**: an override fragment that declares an
 axis **evicts** the default fragment on that same axis, an axis-less one appends. So

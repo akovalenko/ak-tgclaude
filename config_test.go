@@ -349,9 +349,11 @@ func TestParseConfigPolicy(t *testing.T) {
 	if got := []string(c.Policies); len(got) != 1 || got[0] != "normal" {
 		t.Errorf("default policies = %v, want [normal]", got)
 	}
-	// A built-in name is accepted.
-	if c, err := parseConfig([]string{"--policy", "introspect"}); err != nil || len(c.Policies) != 1 || c.Policies[0] != "introspect" {
-		t.Errorf("policy introspect: err=%v policies=%v", err, c.Policies)
+	// A built-in name is accepted. introspect is axis-less, so the refusal-axis floor
+	// prepends normal as the base stance: [normal introspect].
+	if c, err := parseConfig([]string{"--policy", "introspect"}); err != nil ||
+		len(c.Policies) != 2 || c.Policies[0] != "normal" || c.Policies[1] != "introspect" {
+		t.Errorf("policy introspect: err=%v policies=%v, want [normal introspect]", err, c.Policies)
 	}
 	// strict is a built-in (the new hard refusal stance).
 	if _, err := parseConfig([]string{"--policy", "strict"}); err != nil {
@@ -380,7 +382,8 @@ func TestParseConfigPolicy(t *testing.T) {
 	if _, err := parseConfig([]string{"--policy", "/no/such/policy.md"}); err == nil {
 		t.Errorf("missing policy file should be rejected")
 	}
-	// An existing .md path is accepted (and kept as the resolved absolute path).
+	// An existing .md path is accepted (and kept as the resolved absolute path). It is
+	// axis-less, so the floor prepends normal as the base: [normal <path>].
 	f := filepath.Join(t.TempDir(), "p.md")
 	if err := os.WriteFile(f, []byte("persona"), 0o600); err != nil {
 		t.Fatal(err)
@@ -389,8 +392,21 @@ func TestParseConfigPolicy(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(c2.Policies) != 1 || c2.Policies[0] != f {
-		t.Errorf("policy path = %v, want [%q]", c2.Policies, f)
+	if len(c2.Policies) != 2 || c2.Policies[0] != "normal" || c2.Policies[1] != f {
+		t.Errorf("policy path = %v, want [normal %q]", c2.Policies, f)
+	}
+	// Escape hatch: a custom fragment that itself declares `axis: refusal` occupies the
+	// slot, so the floor does NOT prepend normal — the persona is deliberately base-less.
+	fr := filepath.Join(t.TempDir(), "refusal.md")
+	if err := os.WriteFile(fr, []byte("---\naxis: refusal\n---\nYou are my own base stance.\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	c3, err := parseConfig([]string{"--policy", fr})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(c3.Policies) != 1 || c3.Policies[0] != fr {
+		t.Errorf("axis:refusal custom fragment = %v, want [%q] (no normal floor)", c3.Policies, fr)
 	}
 }
 
@@ -410,7 +426,8 @@ func TestParseConfigPolicyAxisConflict(t *testing.T) {
 }
 
 func TestParseConfigPolicyTOML(t *testing.T) {
-	// A bare string in TOML still decodes to a one-element list.
+	// A bare string in TOML still decodes to a one-element list. introspect is
+	// axis-less, so the refusal-axis floor prepends normal: [normal introspect].
 	strPath := filepath.Join(t.TempDir(), "str.toml")
 	if err := os.WriteFile(strPath, []byte("policies = \"introspect\"\n"), 0o600); err != nil {
 		t.Fatal(err)
@@ -419,8 +436,8 @@ func TestParseConfigPolicyTOML(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(c.Policies) != 1 || c.Policies[0] != "introspect" {
-		t.Errorf("string TOML policies = %v, want [introspect]", c.Policies)
+	if len(c.Policies) != 2 || c.Policies[0] != "normal" || c.Policies[1] != "introspect" {
+		t.Errorf("string TOML policies = %v, want [normal introspect]", c.Policies)
 	}
 	// An array in TOML decodes in order; --policy is additive on top of it.
 	arrPath := filepath.Join(t.TempDir(), "arr.toml")

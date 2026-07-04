@@ -815,6 +815,39 @@ func checkAxisConflicts(policies []string) error {
 	return nil
 }
 
+// withDefaultStance ensures the resolved persona has a fragment on defaultPolicy's
+// axis — the "refusal" axis (normal/norefuse/strict). Axis-less fragments (introspect,
+// outbox-rw, or a plain custom .md) are MODIFIERS meant to layer on top of a base
+// stance; a list of only those — e.g. a lone `--policy ./my-rw.md` — would otherwise
+// leave the agent with no base FAQ stance at all. When no fragment claims that axis,
+// defaultPolicy (normal) is prepended as the base, generalizing the empty-list
+// fallback. A custom fragment can occupy the slot itself by declaring `axis: refusal`,
+// which suppresses the injection (the escape hatch for a deliberately base-less
+// persona). An empty list is returned unchanged — loadPolicies maps it to
+// defaultPolicy on its own.
+func withDefaultStance(policies []string) ([]string, error) {
+	if len(policies) == 0 {
+		return policies, nil
+	}
+	base, err := policyAxis(defaultPolicy)
+	if err != nil {
+		return nil, err
+	}
+	if base == "" {
+		return policies, nil // defaultPolicy declares no axis — nothing to floor
+	}
+	for _, p := range policies {
+		axis, err := policyAxis(p)
+		if err != nil {
+			return nil, err
+		}
+		if axis == base {
+			return policies, nil // the axis is already occupied
+		}
+	}
+	return append([]string{defaultPolicy}, policies...), nil
+}
+
 // resolveEffectivePolicies layers a per-user override list on top of the default
 // list along axes: an override fragment that declares an axis EVICTS the default
 // fragment on that same axis (replacing it in place); an axis-less override (or one

@@ -713,6 +713,15 @@ func parseConfig(args []string) (*Config, error) {
 	if err := checkAxisConflicts(c.Policies); err != nil {
 		return nil, fmt.Errorf("default policies: %w", err)
 	}
+	// Floor the default persona on the refusal axis: an axis-less-only list (a lone
+	// custom fragment, or outbox-rw) would leave it with no base FAQ stance, so prepend
+	// normal unless a refusal-axis fragment is already present. Done here, before the
+	// override resolution below, so every per-user override layers on a based persona too.
+	floored, err := withDefaultStance(c.Policies)
+	if err != nil {
+		return nil, fmt.Errorf("default policies: %w", err)
+	}
+	c.Policies = floored
 	// Per-user overrides: validate the key is a user id and each fragment, guard the
 	// override's own axes, then precompute the effective (default-layered) selector
 	// list the dispatcher hands to --append-system-prompt.
