@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -213,7 +214,7 @@ func (c *Client) SendDocument(ctx context.Context, r Route, path, filename, capt
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.methodURL("sendDocument"), &buf)
 	if err != nil {
-		return 0, err
+		return 0, c.scrubToken(err)
 	}
 	req.Header.Set("Content-Type", mw.FormDataContentType())
 	status, body, err := c.do(req)
@@ -231,7 +232,7 @@ func (c *Client) postJSON(ctx context.Context, method string, payload any) (int,
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.methodURL(method), bytes.NewReader(body))
 	if err != nil {
-		return 0, nil, err
+		return 0, nil, c.scrubToken(err)
 	}
 	req.Header.Set("Content-Type", "application/json")
 	return c.do(req)
@@ -243,7 +244,7 @@ func (c *Client) postJSON(ctx context.Context, method string, payload any) (int,
 func (c *Client) do(req *http.Request) (int, []byte, error) {
 	resp, err := c.httpClient().Do(req)
 	if err != nil {
-		return 0, nil, err
+		return 0, nil, c.scrubToken(err)
 	}
 	defer resp.Body.Close()
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
@@ -251,6 +252,37 @@ func (c *Client) do(req *http.Request) (int, []byte, error) {
 		return resp.StatusCode, nil, err
 	}
 	return resp.StatusCode, body, nil
+}
+
+// scrubbedError hides the bot token in a transport error's message while
+// preserving the underlying error for errors.Is/As traversal (e.g. matching
+// context.Canceled). net/http returns a *url.Error for a failed request, and
+// its Error() embeds the full request URL — which contains /bot<token>/.
+type scrubbedError struct {
+	msg string
+	err error
+}
+
+func (e *scrubbedError) Error() string { return e.msg }
+func (e *scrubbedError) Unwrap() error { return e.err }
+
+// scrubToken redacts the bot token from an error whose text may embed it. The
+// token lives in every request URL (methodURL), so both a transport failure and
+// a URL-parse failure carry it; either would otherwise reach the logs verbatim
+// (loudest in the getUpdates long-poll loop, which retries on every failure).
+// This is the single choke point — every Bot API call routes its request
+// construction and transport errors through here. Errors that cannot contain
+// the token (JSON, file, decode, structured APIError) pass through untouched.
+func (c *Client) scrubToken(err error) error {
+	if err == nil || c.Token == "" {
+		return err
+	}
+	msg := err.Error()
+	scrubbed := strings.ReplaceAll(msg, c.Token, "<redacted>")
+	if scrubbed == msg {
+		return err
+	}
+	return &scrubbedError{msg: scrubbed, err: err}
 }
 
 // apiErrorParams carries the optional parameters object of a non-OK Bot API

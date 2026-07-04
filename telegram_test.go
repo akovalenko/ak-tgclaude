@@ -245,3 +245,37 @@ func TestDecodeAPIErrorFields(t *testing.T) {
 		t.Errorf("code=%d retryAfter=%d, want 400/0", ae.Code, ae.RetryAfter)
 	}
 }
+
+// errTransport fails every request the way a DNS/connection error does. net/http
+// wraps the returned error in a *url.Error whose message embeds the full request
+// URL — which contains /bot<token>/ — so it exercises the token-leak path.
+type errTransport struct{ err error }
+
+func (t errTransport) RoundTrip(*http.Request) (*http.Response, error) { return nil, t.err }
+
+func TestClientTransportErrorScrubsToken(t *testing.T) {
+	const token = "123456789:AAErealLookingSecretTokenValue"
+	boom := errors.New("dial tcp: connection refused")
+	c := &Client{
+		Token:   token,
+		BaseURL: "https://api.telegram.org",
+		HTTP:    &http.Client{Transport: errTransport{err: boom}},
+	}
+
+	// getUpdates is the loudest leak site (the long-poll loop logs every failure).
+	_, err := c.GetUpdates(context.Background(), 0, 0)
+	if err == nil {
+		t.Fatal("expected a transport error")
+	}
+	if strings.Contains(err.Error(), token) {
+		t.Fatalf("token leaked in transport error: %v", err)
+	}
+	// The method context is still useful for debugging — only the token is gone.
+	if !strings.Contains(err.Error(), "getUpdates") {
+		t.Errorf("scrubbed error dropped method context: %v", err)
+	}
+	// Scrubbing must not sever the chain: errors.Is/As still have to traverse.
+	if !errors.Is(err, boom) {
+		t.Errorf("scrubbing broke the error chain: errors.Is(err, boom) = false")
+	}
+}
