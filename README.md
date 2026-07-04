@@ -46,6 +46,9 @@ project   = "~/code/myproject"  # the codebase consulted on (read-only under qa)
 # tools = ["Agent", "WebFetch(domain:*.github.com)"]  # grant EXTRA tools: bare name→frontmatter, full spec→--allowedTools; sharp knob — see below
 # runtime_base = ""             # base for the ephemeral cwd (default: $XDG_RUNTIME_DIR)
 # state_dir    = ""             # durable state (default: $XDG_STATE_HOME/ak-tgclaude)
+# transcripts = false           # per-chat transcript store + tg-recall (default OFF; records users' text to disk — see below)
+# transcript_dir = ""           # override the store root (default <state>/transcripts; must be outside the responder outbox)
+# owner_reads_all = true        # with transcripts on, the owner reads the WHOLE store (cross-chat); false = owner scoped like any user
 ```
 
 The same fields are CLI flags, so you can skip the file entirely for a quick
@@ -238,6 +241,60 @@ ak-tgclaude dispatch --responder stub --bot-token 123:ABC
 
 Use it to verify connectivity, the bot token, long-polling, and reply routing
 end to end before wiring the real responder.
+
+## Transcripts & recall
+
+`transcripts` (default **off**) turns on a durable, per-chat record of the
+conversation that the responder can read back later — for context recovery ("I lost
+context"), to resolve a message that **replies to** an older one, or for an owner's
+"what did people ask this week" writeup. It is **off by default because it writes
+users' message text to disk** (a privacy choice); the flag gates both the recording
+and the `tg-recall` skill.
+
+**What is recorded.** The dispatcher — the only component holding the trusted
+`chat_id` and both sides of the conversation — writes every incoming user message
+and every reply the model sends. Dispatcher-direct messages (help/clear acks,
+errors) are not recorded. Text only: attachments are noted as metadata (kind, name,
+size), never their bytes.
+
+**On disk.** Under `transcript_dir` (default `<state>/transcripts`, which survives
+restarts and the session-TTL outbox wipe — put an override **outside** the responder
+outbox):
+
+```
+<root>/<chat_id>/
+  meta.json            # username, first_name, first/last-seen, per-role counts
+  2026-07-04.jsonl     # one compact JSON record per turn, per day
+```
+
+Each record: `{"msg_id":N,"ts":"<RFC3339 local>","role":"user|bot","reply_to":N,"text":"…","attach":[…]}`.
+Day-files make "this week" the last seven files, and pruning a plain `find`:
+
+```sh
+find <root> -name '*.jsonl' -mtime +30 -delete   # admin retention, by hand
+```
+
+**Who can read what.** The responder reads the store natively (`Read` + a scoped
+`grep`), but the dispatcher **scopes** each invocation from the trusted `from.id`,
+never from anything the model controls:
+
+- a normal user's responder is confined to that chat's own subdirectory;
+- the **owner** (`owner`), when `owner_reads_all` (default true), reads the whole
+  root — that is how cross-chat analytics works, in-band over Telegram. Set
+  `owner_reads_all = false` to scope the owner like any user (e.g. when opening the
+  bot to colleagues).
+
+The scope is enforced at both read gates: the scaffold deny-reads the whole root and
+the per-invocation settings `allowRead` only the scope (sandboxed `grep`), and the
+PreToolUse hook reads the same scope from `AK_TGCLAUDE_TRANSCRIPT_DIR` (the `Read`
+tool). It is read-only.
+
+**How the model uses it.** When the feature is on, a `tg-recall` skill is preloaded
+into the responder (mirroring `tg-emit`) that documents the layout, the JSONL
+schema, the anchored `grep '"msg_id":N[,}]'` lookup, and the writeup recipe, and
+frames recalled text as **untrusted reference**, not instruction. A replied-to
+message adds a one-line prompt hint (`replies to msg N`); the model recalls the
+content by id only if it needs it — nothing is auto-injected.
 
 ## Access control
 

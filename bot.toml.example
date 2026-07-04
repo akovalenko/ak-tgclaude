@@ -187,6 +187,28 @@ project = "~/code/example-project"
 # survive restarts. Default: $XDG_STATE_HOME/ak-tgclaude (~/.local/state/ak-tgclaude).
 # state_dir = ""
 
+# --- per-chat transcripts & recall (optional; default OFF) ---
+# transcripts records every turn (user message + bot reply) as compact JSONL
+# day-files under <root>/<chat_id>/, so the responder can read its own history back
+# (context recovery, replied-to messages, an owner "what did people ask this week"
+# writeup — via the tg-recall skill). It is OFF by default because it writes users'
+# message text to disk. The flag gates both the recording and the skill. Also
+# --transcripts. See the Transcripts & recall section in the README.
+# transcripts = false
+#
+# Override the store root. Default: <state>/transcripts (survives restarts and the
+# session-TTL outbox wipe). An override must live OUTSIDE the responder outbox, or
+# startup fails. Prune retention yourself: find <root> -name '*.jsonl' -mtime +N -delete.
+# Also --transcript-dir.
+# transcript_dir = ""
+#
+# With transcripts on, the owner (see `owner` above) reads the WHOLE store for
+# cross-chat analytics; everyone else is scoped to their own chat. The scope always
+# comes from the trusted sender id, never the model. Set false to scope the owner
+# like any user (e.g. when the bot is opened to colleagues). Default true. Also
+# --owner-reads-all.
+# owner_reads_all = true
+
 # --- large-file fallback for send_document (optional) ---
 # Telegram's bot API caps an attachment near 50 MB. Point upload_command at an
 # UPLOADER script and any document over upload_threshold_mb is uploaded instead
