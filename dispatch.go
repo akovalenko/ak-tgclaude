@@ -70,6 +70,10 @@ type Dispatcher struct {
 	// text/selector split.
 	defaultPersona persona
 	personas       map[int64]persona
+	// groupDefaultPersona is the persona injected on a GROUP chat's first spawn when
+	// the group has no per-group override (a negative key in personas). A group's
+	// persona is keyed by chat, not by whoever speaks first.
+	groupDefaultPersona persona
 
 	requireDelivery bool   // guard: if the responder sent nothing, re-prompt once (then fall back)
 	undeliveredText string // fallback reply when the guard's re-prompt still delivered nothing ("" => none)
@@ -385,11 +389,18 @@ func (d *Dispatcher) handleUpdate(ctx context.Context, u Update) {
 	// session); on resume it is already there, so omit it.
 	var appendPrompt string
 	if sid == "" {
-		var uid int64
-		if m.From != nil {
-			uid = m.From.ID
+		var p persona
+		if m.Chat.isGroup() {
+			// A group's persona is keyed by the group (chat id), not the sender — so it
+			// is deterministic regardless of who speaks first.
+			p = d.personaForChat(m.Chat.ID)
+		} else {
+			var uid int64
+			if m.From != nil {
+				uid = m.From.ID
+			}
+			p = d.personaFor(uid)
 		}
-		p := d.personaFor(uid)
 		appendPrompt = p.text
 		// With --debug, dump the persona this user resolved to as it is injected: the
 		// crisp selector label (e.g. [normal] vs [norefuse introspect]) answers "which
@@ -610,6 +621,17 @@ func (d *Dispatcher) personaFor(userID int64) persona {
 		return p
 	}
 	return d.defaultPersona
+}
+
+// personaForChat returns the persona for a GROUP chat: the resolved per-group
+// override (keyed by the group's negative chat id) when configured, else the
+// composed group default. A group's persona is a property of the group, not of
+// whoever speaks first.
+func (d *Dispatcher) personaForChat(chatID int64) persona {
+	if p, ok := d.personas[chatID]; ok {
+		return p
+	}
+	return d.groupDefaultPersona
 }
 
 // userLabel renders a message sender for logs: the numeric id, plus @username
@@ -850,14 +872,22 @@ func runDispatch(args []string) error {
 	if err != nil {
 		return fmt.Errorf("composing default persona: %w", err)
 	}
+	// personaByUser holds a persona per override key. A positive key is a user; a
+	// negative key is a specific group (its selectors were resolved against the group
+	// base at config load). PersonaSelectors returns the resolved list for either.
 	personaByUser := make(map[int64]persona, len(cfg.overrides))
 	for uid := range cfg.overrides {
 		sel := cfg.PersonaSelectors(uid)
 		p, perr := loadPolicies(sel)
 		if perr != nil {
-			return fmt.Errorf("composing persona for user %d: %w", uid, perr)
+			return fmt.Errorf("composing persona for id %d: %w", uid, perr)
 		}
 		personaByUser[uid] = persona{text: string(p), selectors: sel}
+	}
+	// The default persona injected in a group with no per-group override.
+	groupDefaultText, err := loadPolicies(cfg.groupDefault)
+	if err != nil {
+		return fmt.Errorf("composing group persona: %w", err)
 	}
 
 	d := &Dispatcher{
@@ -867,8 +897,9 @@ func runDispatch(args []string) error {
 		store:            store,
 		resp:             resp,
 		authz:            authz,
-		defaultPersona:   persona{text: string(defaultPersona), selectors: cfg.Policies},
-		personas:         personaByUser,
+		defaultPersona:      persona{text: string(defaultPersona), selectors: cfg.Policies},
+		personas:            personaByUser,
+		groupDefaultPersona: persona{text: string(groupDefaultText), selectors: cfg.groupDefault},
 		outboxRoot:       outboxRoot,
 		outboxTTL:        cfg.OutboxTTLDur(),
 		pollTimeout:      defaultPollTimeout,

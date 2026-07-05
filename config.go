@@ -188,14 +188,23 @@ type Config struct {
 	// contract.
 	Policies policyList `toml:"policies"`
 
-	// PolicyOverrides maps a Telegram user id (the TOML table key, e.g.
-	// [policy_overrides] then 12345 = ["norefuse"]) to a per-user persona override.
-	// The override is layered on top of Policies ALONG AXES: an override fragment
-	// that declares an axis EVICTS the default fragment on that same axis, while an
-	// axis-less fragment is appended. So a default of ["strict"] with an override of
-	// ["norefuse"] yields ["norefuse"] for that user; a default of ["strict", "rw"]
-	// with ["norefuse"] yields ["norefuse", "rw"]. Same fragment vocabulary as
-	// Policies (built-in names and/or custom .md paths).
+	// GroupPolicies is the DEFAULT persona for GROUP chats — the parallel of Policies
+	// for private chats. It is layered on Policies along axes, exactly like a per-user
+	// override, so a group's persona is a property of the GROUP (not of whoever speaks
+	// first). Empty => groups use the plain Policies default. A specific group's
+	// override goes in PolicyOverrides under that group's (negative) chat id. Same
+	// fragment vocabulary as Policies. Also --group-policy.
+	GroupPolicies policyList `toml:"group_policies"`
+
+	// PolicyOverrides maps a Telegram id (the TOML table key) to a persona override
+	// layered on a base ALONG AXES: an override fragment that declares an axis EVICTS
+	// the base fragment on that same axis, while an axis-less fragment is appended. So
+	// a base of ["strict"] with an override of ["norefuse"] yields ["norefuse"]; a base
+	// of ["strict", "rw"] with ["norefuse"] yields ["norefuse", "rw"]. The key's SIGN
+	// picks the base: a POSITIVE key is a user id (per-user persona in private chats,
+	// layered on Policies); a NEGATIVE key is a group chat id (per-group persona,
+	// layered on GroupPolicies — the group base). The two never collide. Same fragment
+	// vocabulary as Policies (built-in names and/or custom .md paths).
 	PolicyOverrides map[string]policyList `toml:"policy_overrides"`
 
 	// Owner is a Telegram user id treated as the bot's owner: it is auto-whitelisted
@@ -205,11 +214,18 @@ type Config struct {
 	// reveal the bot's owner). Also --owner.
 	Owner int64 `toml:"owner"`
 
-	// overrides holds the RESOLVED per-user persona selector lists (Policies layered
-	// with each user's override along axes), keyed by Telegram user id; built in Load
-	// after validation. An absent key means the default Policies apply. Not decoded
-	// from TOML — derived. Read it via PersonaSelectors.
+	// overrides holds the RESOLVED persona selector lists, keyed by Telegram id; built
+	// in Load after validation. A POSITIVE key is a user id (layered on Policies); a
+	// NEGATIVE key is a group chat id (layered on groupDefault). An absent positive key
+	// falls back to Policies; an absent negative key to groupDefault. Not decoded from
+	// TOML — derived. Read a user via PersonaSelectors, a group via GroupPersonaSelectors.
 	overrides map[int64][]string
+
+	// groupDefault is the RESOLVED default group persona selector list (Policies
+	// layered with GroupPolicies along axes), used for a group with no per-group
+	// override. Empty GroupPolicies => groupDefault == the floored Policies. Not
+	// decoded from TOML — derived.
+	groupDefault []string
 
 	// BangBug makes the PreToolUse hook deny sandboxed Bash whose command contains
 	// a `\!` — the signature of Claude Code bug #64301, where the sandbox
@@ -466,6 +482,8 @@ func decodeConfig(args []string) (*Config, error) {
 	outboxTTL := fs.String("outbox-ttl", "", `how long an idle chat's persistent outbox is kept before eviction (Go duration, e.g. "2h"; "0" disables; default 2h)`)
 	var policyFlags stringList
 	fs.Var(&policyFlags, "policy", "DEFAULT responder persona composed into the agent: normal (declines off-topic, default) | norefuse (do-what-you're-asked) | strict (refuses anything but direct project questions) | introspect (candid/debug) | outbox-rw (do read-write tasks via the outbox) | a path to a custom .md fragment; repeatable and additive with the config policies list, entries merged in order into one persona. `--policy help` prints the catalog and exits")
+	var groupPolicyFlags stringList
+	fs.Var(&groupPolicyFlags, "group-policy", "DEFAULT persona for GROUP chats, layered on --policy along axes (same selectors as --policy); repeatable and additive with the config group_policies list")
 	owner := fs.Int64("owner", 0, "Telegram user id treated as the bot owner: auto-whitelisted and granted the relaxed owner persona (norefuse + introspect) unless it has an explicit policy_overrides entry")
 	ephemeralSessions := fs.Bool("ephemeral-sessions", false, "keep chat→session bindings in memory only (never persisted; offset still persists; each restart starts fresh)")
 	bill := fs.Bool("bill", false, "after each answer, send the run's dollar cost as a bare \"$n.nnn\" message (only when present and non-zero)")
@@ -570,6 +588,9 @@ func decodeConfig(args []string) (*Config, error) {
 	// entries are merged in order into one persona (like the other repeatable lists).
 	if len(policyFlags) > 0 {
 		c.Policies = append(c.Policies, policyFlags...)
+	}
+	if len(groupPolicyFlags) > 0 {
+		c.GroupPolicies = append(c.GroupPolicies, groupPolicyFlags...)
 	}
 	// owner is single-valued: a set flag overrides the file (0 = unset).
 	if *owner != 0 {
@@ -686,7 +707,7 @@ func (c *Config) resolvePaths() {
 	}
 	// A policy entry given as a PATH (custom fragment) resolves like the other
 	// paths; a built-in NAME is left untouched. Same for per-user override fragments.
-	pls := []policyList{c.Policies}
+	pls := []policyList{c.Policies, c.GroupPolicies}
 	for _, ov := range c.PolicyOverrides {
 		pls = append(pls, ov)
 	}
@@ -772,9 +793,28 @@ func (c *Config) resolvePolicies() error {
 		return fmt.Errorf("default policies: %w", err)
 	}
 	c.Policies = floored
-	// Per-user overrides: validate the key is a user id and each fragment, guard the
-	// override's own axes, then precompute the effective (default-layered) selector
-	// list the dispatcher hands to --append-system-prompt.
+	// Group base: GroupPolicies layered on the (floored) default Policies along axes —
+	// the persona a group gets with no per-group override. Empty GroupPolicies =>
+	// groupDefault == Policies. Because Policies is already floored on the refusal axis,
+	// so is the group base: an axis-less group fragment keeps the default stance, a
+	// refusal-axis one replaces it — either way the axis stays filled.
+	for i, p := range c.GroupPolicies {
+		if err := validatePolicyEntry(fmt.Sprintf("group_policies[%d]", i), p); err != nil {
+			return err
+		}
+	}
+	if err := checkAxisConflicts(c.GroupPolicies); err != nil {
+		return fmt.Errorf("group policies: %w", err)
+	}
+	groupBase, err := resolveEffectivePolicies(c.Policies, c.GroupPolicies)
+	if err != nil {
+		return fmt.Errorf("group policies: %w", err)
+	}
+	c.groupDefault = groupBase
+	// Overrides: validate the key is an id and each fragment, guard the override's own
+	// axes, then precompute the effective selector list. The key's SIGN picks the base
+	// it layers on — a positive user id on Policies (private), a negative group chat id
+	// on groupDefault (the group base). Keys of the two signs never collide.
 	if len(c.PolicyOverrides) == 0 {
 		return nil
 	}
@@ -782,7 +822,7 @@ func (c *Config) resolvePolicies() error {
 	for key, ov := range c.PolicyOverrides {
 		uid, err := strconv.ParseInt(key, 10, 64)
 		if err != nil {
-			return fmt.Errorf("policy_overrides key %q is not a Telegram user id: %w", key, err)
+			return fmt.Errorf("policy_overrides key %q is not a Telegram id: %w", key, err)
 		}
 		for i, p := range ov {
 			if err := validatePolicyEntry(fmt.Sprintf("policy_overrides[%s][%d]", key, i), p); err != nil {
@@ -792,7 +832,11 @@ func (c *Config) resolvePolicies() error {
 		if err := checkAxisConflicts(ov); err != nil {
 			return fmt.Errorf("policy_overrides[%s]: %w", key, err)
 		}
-		eff, err := resolveEffectivePolicies(c.Policies, ov)
+		base := c.Policies
+		if uid < 0 {
+			base = c.groupDefault // negative key = a specific group, layered on the group base
+		}
+		eff, err := resolveEffectivePolicies(base, ov)
 		if err != nil {
 			return fmt.Errorf("policy_overrides[%s]: %w", key, err)
 		}
@@ -867,6 +911,16 @@ func (c *Config) PersonaSelectors(userID int64) []string {
 		return sel
 	}
 	return c.Policies
+}
+
+// GroupPersonaSelectors returns the resolved persona fragment selectors for a
+// group chat: the per-group override (keyed by the group's negative chat id) when
+// configured, else the composed group default (groupDefault).
+func (c *Config) GroupPersonaSelectors(chatID int64) []string {
+	if sel, ok := c.overrides[chatID]; ok {
+		return sel
+	}
+	return c.groupDefault
 }
 
 func (c *Config) applyDefaults() {

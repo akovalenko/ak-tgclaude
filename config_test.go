@@ -529,6 +529,60 @@ func TestParseConfigPolicyOverrides(t *testing.T) {
 	}
 }
 
+// Group personas: group_policies is the group base (layered on Policies along
+// axes), a NEGATIVE policy_overrides key is a specific group layered on that base,
+// and a POSITIVE key stays a per-user override on Policies. Signs never collide.
+func TestParseConfigGroupPolicies(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "grp.toml")
+	body := "policies = [\"strict\"]\ngroup_policies = [\"norefuse\"]\n\n[policy_overrides]\n123 = [\"introspect\"]\n-100 = [\"introspect\"]\n"
+	if err := os.WriteFile(p, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	c, err := parseConfig([]string{"--config", p})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Group base: norefuse evicts strict on the refusal axis.
+	if got := c.groupDefault; len(got) != 1 || got[0] != "norefuse" {
+		t.Errorf("groupDefault = %v, want [norefuse]", got)
+	}
+	// A group with no override falls back to the group base.
+	if got := c.GroupPersonaSelectors(-999); len(got) != 1 || got[0] != "norefuse" {
+		t.Errorf("group default selectors = %v, want [norefuse]", got)
+	}
+	// Specific group (-100): introspect appends to the GROUP base (norefuse), not Policies.
+	if got := c.GroupPersonaSelectors(-100); len(got) != 2 || got[0] != "norefuse" || got[1] != "introspect" {
+		t.Errorf("group -100 = %v, want [norefuse introspect]", got)
+	}
+	// Positive key (123) stays a per-user override layered on Policies (strict).
+	if got := c.PersonaSelectors(123); len(got) != 2 || got[0] != "strict" || got[1] != "introspect" {
+		t.Errorf("user 123 = %v, want [strict introspect]", got)
+	}
+}
+
+// Empty group_policies makes the group base equal the (floored) default Policies.
+func TestParseConfigGroupPoliciesEmpty(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "grpempty.toml")
+	if err := os.WriteFile(p, []byte("policies = [\"strict\"]\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	c, err := parseConfig([]string{"--config", p})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := c.groupDefault; len(got) != 1 || got[0] != "strict" {
+		t.Errorf("empty group_policies: groupDefault = %v, want [strict]", got)
+	}
+	// The --group-policy flag is additive on top of the config list.
+	c2, err := parseConfig([]string{"--config", p, "--group-policy", "norefuse"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := c2.groupDefault; len(got) != 1 || got[0] != "norefuse" {
+		t.Errorf("--group-policy: groupDefault = %v, want [norefuse]", got)
+	}
+}
+
 // A non-numeric override key, and an override list that itself conflicts on an
 // axis, both fail at load.
 func TestParseConfigPolicyOverridesInvalid(t *testing.T) {

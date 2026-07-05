@@ -782,6 +782,19 @@ func TestIsClearCommand(t *testing.T) {
 	}
 }
 
+func TestPersonaForChat(t *testing.T) {
+	d := &Dispatcher{
+		groupDefaultPersona: persona{text: "GROUP-DEFAULT", selectors: []string{"norefuse"}},
+		personas:            map[int64]persona{-100: {text: "GROUP-100", selectors: []string{"introspect"}}},
+	}
+	if got := d.personaForChat(-100); got.text != "GROUP-100" {
+		t.Errorf("specific group persona = %q, want GROUP-100", got.text)
+	}
+	if got := d.personaForChat(-999); got.text != "GROUP-DEFAULT" {
+		t.Errorf("unknown group persona = %q, want GROUP-DEFAULT", got.text)
+	}
+}
+
 func TestMentionsBot(t *testing.T) {
 	d := &Dispatcher{botUsername: "mybot"}
 	for _, tc := range []struct {
