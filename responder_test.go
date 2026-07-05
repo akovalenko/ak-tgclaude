@@ -279,6 +279,12 @@ func TestBuildPromptWithAttachment(t *testing.T) {
 	if !strings.Contains(p, "no caption") {
 		t.Errorf("empty-caption placeholder missing: %q", p)
 	}
+
+	// From a reply: the file block says so (still untrusted, still in the outbox).
+	r := buildPrompt("/code", RespondRequest{DocDir: "/run/out/o1", Prompt: "what is this", Attachment: att, AttachmentFromReply: true})
+	if !strings.Contains(r, "message you are replying to") || !strings.Contains(r, "untrusted") {
+		t.Errorf("reply-attachment phrasing missing: %q", r)
+	}
 }
 
 func TestBuildPromptDelegated(t *testing.T) {

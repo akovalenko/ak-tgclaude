@@ -426,18 +426,27 @@ func (d *Dispatcher) handleUpdate(ctx context.Context, u Update) {
 	}
 
 	// Incoming media (a document or a photo) is downloaded into the outbox for the
-	// responder. Reject an oversized one up front, before minting an outbox or
-	// spawning the responder: the bot cannot fetch it (getFile's ~20 MB ceiling),
-	// so tell the user rather than fail silently. The declared FileSize is the
-	// gate; the download itself is bounded too (fetchIncoming).
-	incoming := incomingFile(m)
+	// responder. The effective source is the message's OWN attachment; if it has none
+	// but replies to a message that carried one, that replied-to file is used instead
+	// (transcripts store only metadata, so re-fetching the replied-to file_id is the
+	// only path back to its bytes — the same rule for a plain reply-with-a-question and
+	// for /do on a file). The message's own file always wins over the replied-to one.
+	incoming, fromReply, srcMsgID := effectiveIncoming(m)
+	// Reject an oversized OWN attachment up front (the file IS the request; the bot
+	// can't fetch it past getFile's ~20 MB ceiling). An oversized REPLIED-TO file is
+	// auxiliary context — drop it and answer from the text rather than abort.
 	if incoming != nil && d.maxIncomingBytes > 0 && incoming.FileSize > d.maxIncomingBytes {
-		mb := d.maxIncomingBytes >> 20
-		if _, err := d.sender.SendMessage(ctx, route, fmt.Sprintf("Файл слишком большой — максимум %d МБ.", mb), "", false); err != nil {
-			log.Printf("ak-tgclaude: too-big reply chat=%d: %v", m.Chat.ID, err)
+		if fromReply {
+			log.Printf("ak-tgclaude: replied-to file too big chat=%d size=%d cap=%d — dropping", m.Chat.ID, incoming.FileSize, d.maxIncomingBytes)
+			incoming = nil
+		} else {
+			mb := d.maxIncomingBytes >> 20
+			if _, err := d.sender.SendMessage(ctx, route, fmt.Sprintf("Файл слишком большой — максимум %d МБ.", mb), "", false); err != nil {
+				log.Printf("ak-tgclaude: too-big reply chat=%d: %v", m.Chat.ID, err)
+			}
+			log.Printf("ak-tgclaude: incoming file too big chat=%d size=%d cap=%d", m.Chat.ID, incoming.FileSize, d.maxIncomingBytes)
+			return
 		}
-		log.Printf("ak-tgclaude: incoming file too big chat=%d size=%d cap=%d", m.Chat.ID, incoming.FileSize, d.maxIncomingBytes)
-		return
 	}
 
 	// Reap idle chats' persistent outboxes (TTL); skip this chat, whose record is
@@ -467,21 +476,36 @@ func (d *Dispatcher) handleUpdate(ctx context.Context, u Update) {
 	// stop — a silent drop would leave them waiting on a file the model never saw.
 	var attach *Attachment
 	if incoming != nil {
-		attach, err = d.fetchIncoming(ctx, incoming, m.MessageID, docDir)
+		attach, err = d.fetchIncoming(ctx, incoming, srcMsgID, docDir)
 		if err != nil {
-			log.Printf("ak-tgclaude: fetch incoming file chat=%d msg=%d: %v", m.Chat.ID, m.MessageID, err)
-			if _, e := d.sender.SendMessage(ctx, route, "Не удалось скачать вложение.", "", false); e != nil {
-				log.Printf("ak-tgclaude: fetch-fail reply chat=%d: %v", m.Chat.ID, e)
+			log.Printf("ak-tgclaude: fetch incoming file chat=%d msg=%d fromReply=%v: %v", m.Chat.ID, srcMsgID, fromReply, err)
+			if fromReply {
+				// The replied-to file is auxiliary — warn and continue with the text.
+				if _, e := d.sender.SendMessage(ctx, route, "Не удалось поднять файл из того сообщения — отвечаю по тексту.", "", false); e != nil {
+					log.Printf("ak-tgclaude: reply-fetch-warn chat=%d: %v", m.Chat.ID, e)
+				}
+				attach = nil
+			} else {
+				// The own attachment is the request itself — a silent drop would leave the
+				// user waiting on a file the model never saw.
+				if _, e := d.sender.SendMessage(ctx, route, "Не удалось скачать вложение.", "", false); e != nil {
+					log.Printf("ak-tgclaude: fetch-fail reply chat=%d: %v", m.Chat.ID, e)
+				}
+				return
 			}
-			return
 		}
 	}
 
 	// Record the user's turn BEFORE spawning the responder: so this turn is itself
-	// recallable, and so the chat's transcript subdir exists for the read scope. Uses
-	// the fetched attachment's metadata (exact name/size). Covers a private turn and an
+	// recallable, and so the chat's transcript subdir exists for the read scope. Record
+	// the OWN attachment's metadata only — a replied-to file was already recorded under
+	// its original message, so it is not re-attached here. Covers a private turn and an
 	// addressed group turn alike; unaddressed group chatter was recorded at the gate.
-	d.recordUserTurnAs(m, promptText, attachMeta(m, attach))
+	var recMeta []TranscriptAttach
+	if !fromReply {
+		recMeta = attachMeta(m, attach)
+	}
+	d.recordUserTurnAs(m, promptText, recMeta)
 
 	// Mint this invocation's capability token: the MCP server resolves the route
 	// (chat/reply) from it, so the responder's send_* calls carry no chat_id and
@@ -543,20 +567,21 @@ func (d *Dispatcher) handleUpdate(ctx context.Context, u Update) {
 	// whole access story, so a non-owner cannot grep it even though read is default-open.
 	usageLogOwner := m.From != nil && d.owner != 0 && m.From.ID == d.owner
 	res, err := d.respondWithTyping(ctx, m.Chat.ID, RespondRequest{
-		Prompt:             promptText,
-		SentAt:             messageSentAt(m),
-		Attachment:         attach,
-		SessionID:          sid,
-		DocDir:             docDir,
-		MCPURL:             d.mcp.URL(),
-		MCPToken:           token,
-		AppendSystemPrompt: appendPrompt,
-		TranscriptScope:    transcriptScope,
-		UsageLogPath:       d.usageLogPath,
-		UsageLogOwner:      usageLogOwner,
-		ReplyToMsgID:       replyHint,
-		Delegated:          delegated,
-		DelegatedAuthor:    delegatedAuthor,
+		Prompt:              promptText,
+		SentAt:              messageSentAt(m),
+		Attachment:          attach,
+		SessionID:           sid,
+		DocDir:              docDir,
+		MCPURL:              d.mcp.URL(),
+		MCPToken:            token,
+		AppendSystemPrompt:  appendPrompt,
+		TranscriptScope:     transcriptScope,
+		UsageLogPath:        d.usageLogPath,
+		UsageLogOwner:       usageLogOwner,
+		ReplyToMsgID:        replyHint,
+		Delegated:           delegated,
+		DelegatedAuthor:     delegatedAuthor,
+		AttachmentFromReply: fromReply,
 	})
 	dur := time.Since(start).Round(time.Millisecond)
 
@@ -1019,24 +1044,24 @@ func runDispatch(args []string) error {
 	}
 
 	d := &Dispatcher{
-		client:           client,
-		sender:           client,
-		mcp:              mcp,
-		store:            store,
-		resp:             resp,
-		authz:            authz,
+		client:              client,
+		sender:              client,
+		mcp:                 mcp,
+		store:               store,
+		resp:                resp,
+		authz:               authz,
 		defaultPersona:      persona{text: string(defaultPersona), selectors: cfg.Policies},
 		personas:            personaByUser,
 		groupDefaultPersona: persona{text: string(groupDefaultText), selectors: cfg.groupDefault},
-		outboxRoot:       outboxRoot,
-		outboxTTL:        cfg.OutboxTTLDur(),
-		pollTimeout:      defaultPollTimeout,
-		maxConcurrent:    cfg.MaxConcurrent,
-		maxIncomingBytes: int64(cfg.MaxIncomingMB) << 20,
-		helpText:         helpText,
-		helpParseMode:    helpParseMode,
-		bill:             cfg.Bill,
-		debug:            cfg.Debug,
+		outboxRoot:          outboxRoot,
+		outboxTTL:           cfg.OutboxTTLDur(),
+		pollTimeout:         defaultPollTimeout,
+		maxConcurrent:       cfg.MaxConcurrent,
+		maxIncomingBytes:    int64(cfg.MaxIncomingMB) << 20,
+		helpText:            helpText,
+		helpParseMode:       helpParseMode,
+		bill:                cfg.Bill,
+		debug:               cfg.Debug,
 
 		requireDelivery: !cfg.AllowSilent,
 		undeliveredText: cfg.UndeliveredText,

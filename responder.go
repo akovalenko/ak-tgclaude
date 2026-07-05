@@ -20,10 +20,14 @@ type RespondRequest struct {
 	Prompt     string
 	SentAt     time.Time   // Telegram send time of the incoming message; zero => omit from the prompt
 	Attachment *Attachment // an incoming file saved in the outbox (nil => none)
-	SessionID  string      // resume this session; empty => start a fresh one
-	DocDir     string      // AK_TGCLAUDE_OUTBOX: writable dir for attachments/scratch
-	MCPURL     string      // dispatcher's MCP endpoint (inline --mcp-config for claude; direct call for the stub)
-	MCPToken   string      // this invocation's capability token (the server pins the route to it)
+	// AttachmentFromReply is true when Attachment came from the message being REPLIED
+	// TO rather than the incoming message itself (the message had none of its own).
+	// buildPrompt phrases the file block accordingly.
+	AttachmentFromReply bool
+	SessionID           string // resume this session; empty => start a fresh one
+	DocDir              string // AK_TGCLAUDE_OUTBOX: writable dir for attachments/scratch
+	MCPURL              string // dispatcher's MCP endpoint (inline --mcp-config for claude; direct call for the stub)
+	MCPToken            string // this invocation's capability token (the server pins the route to it)
 	// AppendSystemPrompt is the composed persona injected via --append-system-prompt.
 	// Set only on a FRESH spawn (SessionID==""); it freezes into the session, so a
 	// resume neither needs nor re-sends it.
@@ -248,7 +252,11 @@ func buildPrompt(project string, req RespondRequest) string {
 			"tg-usage skill. The same path is $AK_TGCLAUDE_USAGE_LOG for shell (grep/awk).\n\n")
 	}
 	if req.Attachment != nil {
-		b.WriteString("The user attached a file, already saved in your outbox at ")
+		if req.AttachmentFromReply {
+			b.WriteString("The file attached to the message you are replying to, already saved in your outbox at ")
+		} else {
+			b.WriteString("The user attached a file, already saved in your outbox at ")
+		}
 		b.WriteString(req.Attachment.Path)
 		b.WriteString(" (")
 		b.WriteString(req.Attachment.describe())

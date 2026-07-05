@@ -187,6 +187,28 @@ func TestIncomingFile(t *testing.T) {
 	}
 }
 
+func TestEffectiveIncoming(t *testing.T) {
+	// Own attachment: used directly, not from a reply.
+	own := &Message{MessageID: 10, Document: &Document{FileID: "D"}}
+	if s, fromReply, id := effectiveIncoming(own); s == nil || s.FileID != "D" || fromReply || id != 10 {
+		t.Errorf("own attachment: spec=%+v fromReply=%v id=%d", s, fromReply, id)
+	}
+	// No own file, replies to a message that has one: pull the replied-to file.
+	reply := &Message{MessageID: 11, Text: "/do", ReplyTo: &Message{MessageID: 7, Document: &Document{FileID: "R"}}}
+	if s, fromReply, id := effectiveIncoming(reply); s == nil || s.FileID != "R" || !fromReply || id != 7 {
+		t.Errorf("replied-to attachment: spec=%+v fromReply=%v id=%d", s, fromReply, id)
+	}
+	// Own file present AND reply has one: own wins.
+	both := &Message{MessageID: 12, Document: &Document{FileID: "OWN"}, ReplyTo: &Message{MessageID: 7, Document: &Document{FileID: "R"}}}
+	if s, fromReply, _ := effectiveIncoming(both); s == nil || s.FileID != "OWN" || fromReply {
+		t.Errorf("own should win over reply: spec=%+v fromReply=%v", s, fromReply)
+	}
+	// No file anywhere.
+	if s, _, _ := effectiveIncoming(&Message{MessageID: 13, Text: "hi", ReplyTo: &Message{MessageID: 7, Text: "no file"}}); s != nil {
+		t.Errorf("no file anywhere should yield nil, got %+v", s)
+	}
+}
+
 func TestFetchIncomingPhoto(t *testing.T) {
 	const content = "\xff\xd8\xff\xe0 jpeg-ish bytes"
 	d, closeSrv := docServer(t, content, 20<<20)

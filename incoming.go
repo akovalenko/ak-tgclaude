@@ -59,6 +59,24 @@ func incomingFile(m *Message) *incomingSpec {
 	return nil
 }
 
+// effectiveIncoming picks the file to fetch for a message: its own attachment if
+// it has one, else — when the message replies to one that carried a file — the
+// replied-to file (transcripts keep only metadata, so re-fetching the replied-to
+// file_id is the only path back to its bytes). Returns the spec (nil if none),
+// whether it came from the reply, and the message id to name the download after.
+// The message's own file always wins over the replied-to one.
+func effectiveIncoming(m *Message) (spec *incomingSpec, fromReply bool, srcMsgID int64) {
+	if s := incomingFile(m); s != nil {
+		return s, false, m.MessageID
+	}
+	if m.ReplyTo != nil {
+		if s := incomingFile(m.ReplyTo); s != nil {
+			return s, true, m.ReplyTo.MessageID
+		}
+	}
+	return nil, false, m.MessageID
+}
+
 // fetchIncoming downloads the spec's file under <docDir>/incoming/<msgid>-<name>
 // and returns the saved Attachment. The size cap is enforced twice: the caller
 // rejects a declared FileSize over the cap before calling this, and the download
