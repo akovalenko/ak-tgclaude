@@ -213,6 +213,15 @@ func incomingText(m *Message) string {
 	return m.Caption
 }
 
+// isEmptyMessage reports whether m carries nothing to act on or usefully record:
+// no text, no caption, and no attachment. Telegram service messages (a member
+// joining, the bot being added to a group), stickers, polls, and locations land
+// here — the dispatcher ignores them entirely, so they neither spawn a responder
+// nor leave an empty line in the transcript (noise for recall).
+func isEmptyMessage(m *Message) bool {
+	return incomingText(m) == "" && incomingFile(m) == nil
+}
+
 // messageSentAt is the message's Telegram send time as a local Time, or the zero
 // Time when the field is absent (so the prompt omits the stamp rather than
 // printing the 1970 epoch).
@@ -342,6 +351,14 @@ func (d *Dispatcher) handleUpdate(ctx context.Context, u Update) {
 	m := u.Message
 	route := Route{ChatID: m.Chat.ID, ReplyTo: m.MessageID}
 	group := m.Chat.isGroup()
+
+	// Ignore a message with nothing to act on — a Telegram service message (a member
+	// joining, the bot being added), a sticker, a poll. It is neither answered nor
+	// recorded (an empty transcript line is only noise for recall). Runs before the
+	// access gate so a service message from anyone, authorized or not, is dropped.
+	if isEmptyMessage(m) {
+		return
+	}
 
 	// Access gate (runs before any command or the responder). A sender not on the
 	// whitelist is not answered. In a GROUP their message is still recorded (privacy-off

@@ -1008,3 +1008,42 @@ func TestHandleDoBareUsage(t *testing.T) {
 		t.Errorf("bare /do should send a usage hint, got %v", calls)
 	}
 }
+
+func TestIsEmptyMessage(t *testing.T) {
+	if isEmptyMessage(&Message{Text: "hi"}) {
+		t.Error("a text message is not empty")
+	}
+	if isEmptyMessage(&Message{Caption: "cap"}) {
+		t.Error("a captioned message is not empty")
+	}
+	if isEmptyMessage(&Message{Document: &Document{FileID: "D"}}) {
+		t.Error("a document message is not empty")
+	}
+	if isEmptyMessage(&Message{Photo: []PhotoSize{{FileID: "P"}}}) {
+		t.Error("a photo message is not empty")
+	}
+	if !isEmptyMessage(&Message{}) {
+		t.Error("a message with no text/caption/file is empty (service message, sticker)")
+	}
+}
+
+func TestHandleEmptyMessageIgnored(t *testing.T) {
+	resp := &fakeResponder{}
+	sender := &fakeSender{}
+	d := newTestDispatcher(t, resp, sender)
+	root := t.TempDir()
+	d.transcripts = NewTranscriptStore(root)
+	// A Telegram service message: no text, no caption, no attachment (e.g. the bot
+	// was added to the group). Must be dropped: no spawn, no reply, no transcript line.
+	up := Update{Message: &Message{MessageID: 300, Chat: Chat{ID: -100, Type: "supergroup"}, From: &User{ID: 5}}}
+	d.handleUpdate(context.Background(), up)
+	if resp.called {
+		t.Error("an empty/service message must not spawn a responder")
+	}
+	if len(sender.snapshot()) != 0 {
+		t.Error("an empty/service message must get no reply")
+	}
+	if _, err := os.Stat(filepath.Join(root, "-100")); !os.IsNotExist(err) {
+		t.Errorf("an empty message must not be recorded (chat dir stat err = %v)", err)
+	}
+}
