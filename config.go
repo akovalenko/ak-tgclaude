@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -421,8 +422,35 @@ func loadConfig(args []string) (*Config, error) {
 
 // parseConfig resolves configuration from an optional TOML file overlaid with
 // CLI flags (flags > file > defaults), without dispatcher-specific validation.
-// The scaffold subcommand reuses it (it needs a cwd, not a token).
+// The scaffold subcommand reuses it (it needs a cwd, not a token). The load
+// pipeline runs in stages: decode+overlay, defaults, path resolution and
+// validation, policy resolution, and the claude_args denylist guard.
 func parseConfig(args []string) (*Config, error) {
+	c, err := decodeConfig(args)
+	if err != nil {
+		return nil, err
+	}
+	c.applyDefaults()
+	c.resolvePaths()
+	if err := c.validatePaths(); err != nil {
+		return nil, err
+	}
+	if err := c.resolvePolicies(); err != nil {
+		return nil, err
+	}
+	// Reject any operator claude_arg that names a flag ak-tgclaude owns, so a stray
+	// passthrough cannot silently weaken the sandbox or break the transport.
+	if err := validateClaudeArgs(c.ClaudeArgs); err != nil {
+		return nil, err
+	}
+	return c, nil
+}
+
+// decodeConfig declares the CLI flags, decodes the optional TOML file, and
+// overlays the set flags on top: a single-valued flag overrides the file value,
+// a repeatable list flag appends to it. No defaults, path resolution, or
+// validation happen here — the later parseConfig stages do that.
+func decodeConfig(args []string) (*Config, error) {
 	fs := flag.NewFlagSet("ak-tgclaude", flag.ContinueOnError)
 	configPath := fs.String("config", "", "path to a TOML config file (optional; flags override it)")
 	botToken := fs.String("bot-token", "", "Telegram bot token (overrides config; visible in host ps — prefer the config file in production)")
@@ -628,11 +656,14 @@ func parseConfig(args []string) (*Config, error) {
 		c.Open = true
 	}
 
-	c.applyDefaults()
-	// Every path is expanded (~) and made absolute against the launch cwd, so it
-	// is unambiguous once the responder consumes it from the scaffold cwd. This is
-	// also the token file's deny-read path (ConfigPath), so a relative --config
-	// still matches in the hook.
+	return &c, nil
+}
+
+// resolvePaths expands (~) and makes every configured path absolute against the
+// launch cwd, so each is unambiguous once the responder consumes it from the
+// scaffold cwd. This is also the token file's deny-read path (ConfigPath), so a
+// relative --config still matches in the hook.
+func (c *Config) resolvePaths() {
 	c.Project = resolvePath(c.Project)
 	c.Workdir = resolvePath(c.Workdir)
 	c.StateDir = resolvePath(c.StateDir)
@@ -645,36 +676,30 @@ func parseConfig(args []string) (*Config, error) {
 	// UsageLog is written by the dispatcher (unsandboxed) and never reaches the
 	// responder/sandbox, so like UploadCommand it resolves but needs no validatePath.
 	c.UsageLog = resolvePath(c.UsageLog)
-	for i := range c.WireSkills {
-		c.WireSkills[i] = resolvePath(c.WireSkills[i])
-	}
-	for i := range c.AddSkills {
-		c.AddSkills[i] = resolvePath(c.AddSkills[i])
-	}
-	for i := range c.AddAgents {
-		c.AddAgents[i] = resolvePath(c.AddAgents[i])
-	}
-	for i := range c.DenyRead {
-		c.DenyRead[i] = resolvePath(c.DenyRead[i])
+	for _, l := range [][]string{c.WireSkills, c.AddSkills, c.AddAgents, c.DenyRead} {
+		for i := range l {
+			l[i] = resolvePath(l[i])
+		}
 	}
 	// A policy entry given as a PATH (custom fragment) resolves like the other
 	// paths; a built-in NAME is left untouched. Same for per-user override fragments.
-	for i := range c.Policies {
-		if policyIsPath(c.Policies[i]) {
-			c.Policies[i] = resolvePath(c.Policies[i])
-		}
-	}
+	pls := []policyList{c.Policies}
 	for _, ov := range c.PolicyOverrides {
-		for i := range ov {
-			if policyIsPath(ov[i]) {
-				ov[i] = resolvePath(ov[i])
+		pls = append(pls, ov)
+	}
+	for _, pl := range pls {
+		for i := range pl {
+			if policyIsPath(pl[i]) {
+				pl[i] = resolvePath(pl[i])
 			}
 		}
 	}
+}
 
-	// Fail fast on a path we cannot represent literally in the sandbox glob rules
-	// or the hook shell command, rather than silently mis-match (dangerous for a
-	// deny-read).
+// validatePaths fails fast on a resolved config path we cannot represent
+// literally in the sandbox glob rules or the hook shell command, rather than
+// silently mis-match (dangerous for a deny-read).
+func (c *Config) validatePaths() error {
 	for _, pv := range []struct{ field, path string }{
 		{"project", c.Project},
 		{"workdir", c.Workdir},
@@ -684,53 +709,55 @@ func parseConfig(args []string) (*Config, error) {
 		{"config", c.ConfigPath},
 	} {
 		if err := validatePath(pv.field, pv.path); err != nil {
-			return nil, err
+			return err
 		}
 	}
-	for i, s := range c.WireSkills {
-		if err := validatePath(fmt.Sprintf("wire_skills[%d]", i), s); err != nil {
-			return nil, err
-		}
-	}
-	for i, s := range c.AddSkills {
-		if err := validatePath(fmt.Sprintf("add_skills[%d]", i), s); err != nil {
-			return nil, err
-		}
-	}
-	for i, s := range c.AddAgents {
-		if err := validatePath(fmt.Sprintf("add_agents[%d]", i), s); err != nil {
-			return nil, err
-		}
-	}
-	for i, s := range c.DenyRead {
-		if err := validatePath(fmt.Sprintf("deny_reads[%d]", i), s); err != nil {
-			return nil, err
-		}
-	}
-
-	// Each policy entry (default or per-user override) is either a built-in name or a
-	// readable custom fragment file — fail at startup on an unknown name or a missing
-	// file, not mid-run.
-	validatePolicyEntry := func(field, p string) error {
-		if policyIsPath(p) {
-			if err := validatePath(field, p); err != nil {
+	for _, pl := range []struct {
+		field string
+		paths []string
+	}{
+		{"wire_skills", c.WireSkills},
+		{"add_skills", c.AddSkills},
+		{"add_agents", c.AddAgents},
+		{"deny_reads", c.DenyRead},
+	} {
+		for i, s := range pl.paths {
+			if err := validatePath(fmt.Sprintf("%s[%d]", pl.field, i), s); err != nil {
 				return err
 			}
-			if _, err := os.Stat(p); err != nil {
-				return fmt.Errorf("policy fragment %s: %w", p, err)
-			}
-		} else if !builtinPolicies[p] {
-			return fmt.Errorf("unknown policy %q (built-in: %s; or a path to a .md fragment)", p, strings.Join(builtinPolicyOrder, ", "))
 		}
-		return nil
 	}
+	return nil
+}
+
+// validatePolicyEntry checks one policy selector (default or per-user override):
+// it is either a built-in name or a readable custom fragment file — fail at
+// startup on an unknown name or a missing file, not mid-run.
+func validatePolicyEntry(field, p string) error {
+	if policyIsPath(p) {
+		if err := validatePath(field, p); err != nil {
+			return err
+		}
+		if _, err := os.Stat(p); err != nil {
+			return fmt.Errorf("policy fragment %s: %w", p, err)
+		}
+	} else if !builtinPolicies[p] {
+		return fmt.Errorf("unknown policy %q (built-in: %s; or a path to a .md fragment)", p, strings.Join(builtinPolicyOrder, ", "))
+	}
+	return nil
+}
+
+// resolvePolicies validates every policy selector, guards axis conflicts, floors
+// the default persona on the refusal axis, and precomputes the effective per-user
+// selector lists (c.overrides) the dispatcher hands to --append-system-prompt.
+func (c *Config) resolvePolicies() error {
 	for i, p := range c.Policies {
 		if err := validatePolicyEntry(fmt.Sprintf("policies[%d]", i), p); err != nil {
-			return nil, err
+			return err
 		}
 	}
 	if err := checkAxisConflicts(c.Policies); err != nil {
-		return nil, fmt.Errorf("default policies: %w", err)
+		return fmt.Errorf("default policies: %w", err)
 	}
 	// Floor the default persona on the refusal axis: an axis-less-only list (a lone
 	// custom fragment, or outbox-rw) would leave it with no base FAQ stance, so prepend
@@ -738,42 +765,36 @@ func parseConfig(args []string) (*Config, error) {
 	// override resolution below, so every per-user override layers on a based persona too.
 	floored, err := withDefaultStance(c.Policies)
 	if err != nil {
-		return nil, fmt.Errorf("default policies: %w", err)
+		return fmt.Errorf("default policies: %w", err)
 	}
 	c.Policies = floored
 	// Per-user overrides: validate the key is a user id and each fragment, guard the
 	// override's own axes, then precompute the effective (default-layered) selector
 	// list the dispatcher hands to --append-system-prompt.
-	if len(c.PolicyOverrides) > 0 {
-		c.overrides = make(map[int64][]string, len(c.PolicyOverrides))
-		for key, ov := range c.PolicyOverrides {
-			uid, err := strconv.ParseInt(key, 10, 64)
-			if err != nil {
-				return nil, fmt.Errorf("policy_overrides key %q is not a Telegram user id: %w", key, err)
-			}
-			for i, p := range ov {
-				if err := validatePolicyEntry(fmt.Sprintf("policy_overrides[%s][%d]", key, i), p); err != nil {
-					return nil, err
-				}
-			}
-			if err := checkAxisConflicts(ov); err != nil {
-				return nil, fmt.Errorf("policy_overrides[%s]: %w", key, err)
-			}
-			eff, err := resolveEffectivePolicies(c.Policies, ov)
-			if err != nil {
-				return nil, fmt.Errorf("policy_overrides[%s]: %w", key, err)
-			}
-			c.overrides[uid] = eff
+	if len(c.PolicyOverrides) == 0 {
+		return nil
+	}
+	c.overrides = make(map[int64][]string, len(c.PolicyOverrides))
+	for key, ov := range c.PolicyOverrides {
+		uid, err := strconv.ParseInt(key, 10, 64)
+		if err != nil {
+			return fmt.Errorf("policy_overrides key %q is not a Telegram user id: %w", key, err)
 		}
+		for i, p := range ov {
+			if err := validatePolicyEntry(fmt.Sprintf("policy_overrides[%s][%d]", key, i), p); err != nil {
+				return err
+			}
+		}
+		if err := checkAxisConflicts(ov); err != nil {
+			return fmt.Errorf("policy_overrides[%s]: %w", key, err)
+		}
+		eff, err := resolveEffectivePolicies(c.Policies, ov)
+		if err != nil {
+			return fmt.Errorf("policy_overrides[%s]: %w", key, err)
+		}
+		c.overrides[uid] = eff
 	}
-
-	// Reject any operator claude_arg that names a flag ak-tgclaude owns, so a stray
-	// passthrough cannot silently weaken the sandbox or break the transport.
-	if err := validateClaudeArgs(c.ClaudeArgs); err != nil {
-		return nil, err
-	}
-
-	return &c, nil
+	return nil
 }
 
 // claudeArgDenylist are the `claude -p` flags ak-tgclaude sets itself: the
@@ -833,16 +854,6 @@ func validateClaudeArgs(args []string) error {
 // entry for the owner's id says otherwise.
 var ownerPolicies = []string{"norefuse", "introspect"}
 
-// containsInt64 reports whether xs contains v.
-func containsInt64(xs []int64, v int64) bool {
-	for _, x := range xs {
-		if x == v {
-			return true
-		}
-	}
-	return false
-}
-
 // PersonaSelectors returns the resolved persona fragment selectors for a user: the
 // per-user override (Policies layered with the user's fragments along axes) when one
 // is configured, else the default Policies. The dispatcher loads+merges these into
@@ -872,7 +883,7 @@ func (c *Config) applyDefaults() {
 	// override validation) so the owner flows through the same machinery as any
 	// other whitelisted user / override entry.
 	if c.Owner != 0 {
-		if !containsInt64(c.AllowedUsers, c.Owner) {
+		if !slices.Contains(c.AllowedUsers, c.Owner) {
 			c.AllowedUsers = append(c.AllowedUsers, c.Owner)
 		}
 		key := strconv.FormatInt(c.Owner, 10)

@@ -3,6 +3,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -549,7 +550,7 @@ func TestParseConfigOwner(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !containsInt64(c.AllowedUsers, 555) {
+	if !slices.Contains(c.AllowedUsers, 555) {
 		t.Errorf("owner should be auto-whitelisted: allowed=%v", c.AllowedUsers)
 	}
 	// Default policies are [normal]; the owner bundle (norefuse+introspect) evicts
