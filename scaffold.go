@@ -114,6 +114,33 @@ type scaffoldParams struct {
 	HookLogFile    string   // pass --log-file to the hook (append every PreToolUse call here; "" => off; set under --debug)
 }
 
+// scaffoldParams derives the materializeScaffold inputs this config implies.
+// It is the SINGLE builder behind both call sites — the dispatcher's startup
+// and the scaffold subcommand — so the two can never drift field-by-field (a
+// knob added to one but not the other). cacheDir and outboxRoot are the
+// caller's runtime dirs, the only inputs that differ between the two.
+func (c *Config) scaffoldParams(cacheDir, outboxRoot string) scaffoldParams {
+	return scaffoldParams{
+		CacheDir:       cacheDir,
+		OutboxRoot:     outboxRoot,
+		TranscriptRoot: c.TranscriptRoot(),
+		UsageLogOn:     c.UsageLog != "",
+		TokenFile:      c.ConfigPath,
+		Project:        c.Project,
+		WireSkills:     c.WireSkills,
+		AddSkills:      c.AddSkills,
+		AddAgents:      c.AddAgents,
+		DenyRead:       c.DenyRead,
+		Tools:          c.Tools,
+		DenyEnvVars:    c.DenyEnvs,
+		NetworkDomains: c.AllowDomains,
+		UploadNote:     uploadNote(c.UploadCommand, c.UploadThresholdMB, c.UploadMaxMB),
+		HookBinary:     selfExePath(),
+		BangBug:        c.BangBug,
+		HookLogFile:    c.hookLogFile(),
+	}
+}
+
 // defaultDenyEnvVars are the ambient secrets scrubbed from the responder's
 // sandboxed shell (its own model calls resolve the key before this bites).
 var defaultDenyEnvVars = []string{"ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"}
@@ -1066,24 +1093,7 @@ func runScaffold(args []string) error {
 	if err := os.MkdirAll(outboxRoot, 0o700); err != nil {
 		return err
 	}
-	if err := materializeScaffold(project, scaffoldParams{
-		CacheDir:       filepath.Join(cfg.StateDir, "cache"),
-		OutboxRoot:     outboxRoot,
-		TranscriptRoot: cfg.TranscriptRoot(),
-		TokenFile:      cfg.ConfigPath,
-		Project:        cfg.Project,
-		WireSkills:     cfg.WireSkills,
-		AddSkills:      cfg.AddSkills,
-		AddAgents:      cfg.AddAgents,
-		DenyRead:       cfg.DenyRead,
-		Tools:          cfg.Tools,
-		DenyEnvVars:    cfg.DenyEnvs,
-		NetworkDomains: cfg.AllowDomains,
-		UploadNote:     uploadNote(cfg.UploadCommand, cfg.UploadThresholdMB, cfg.UploadMaxMB),
-		HookBinary:     selfExePath(),
-		BangBug:        cfg.BangBug,
-		HookLogFile:    cfg.hookLogFile(),
-	}); err != nil {
+	if err := materializeScaffold(project, cfg.scaffoldParams(filepath.Join(cfg.StateDir, "cache"), outboxRoot)); err != nil {
 		return err
 	}
 

@@ -93,18 +93,18 @@ func textUpdate(updateID, chatID, msgID int64, text string) Update {
 	}
 }
 
-func TestPersonaSelectorsFor(t *testing.T) {
+func TestPersonaFor(t *testing.T) {
 	d := &Dispatcher{
-		defaultSelectors: []string{"normal"},
-		personaSelectors: map[int64][]string{42: {"norefuse", "introspect"}},
+		defaultPersona: persona{selectors: []string{"normal"}},
+		personas:       map[int64]persona{42: {selectors: []string{"norefuse", "introspect"}}},
 	}
 	// A configured user resolves to its override selectors (the --debug dump label).
-	if got := d.personaSelectorsFor(42); len(got) != 2 || got[0] != "norefuse" || got[1] != "introspect" {
+	if got := d.personaFor(42).selectors; len(got) != 2 || got[0] != "norefuse" || got[1] != "introspect" {
 		t.Errorf("configured user selectors = %v, want [norefuse introspect]", got)
 	}
-	// An unknown user falls back to the default selectors — mirroring personaFor, so a
-	// non-admin account shows the default stance, not any per-user override.
-	if got := d.personaSelectorsFor(999); len(got) != 1 || got[0] != "normal" {
+	// An unknown user falls back to the default — so a non-admin account shows the
+	// default stance, not any per-user override.
+	if got := d.personaFor(999).selectors; len(got) != 1 || got[0] != "normal" {
 		t.Errorf("unknown user selectors = %v, want [normal]", got)
 	}
 }
@@ -116,8 +116,7 @@ func TestHandleDebugDumpsPersona(t *testing.T) {
 	resp := &fakeResponder{sid: "sess-1"}
 	d := newTestDispatcher(t, resp, &fakeSender{})
 	d.debug = true
-	d.defaultPersona = "You are a do-what-you're-asked assistant."
-	d.defaultSelectors = []string{"norefuse"}
+	d.defaultPersona = persona{text: "You are a do-what-you're-asked assistant.", selectors: []string{"norefuse"}}
 
 	var buf bytes.Buffer
 	log.SetOutput(&buf)
@@ -140,8 +139,7 @@ func TestHandleDebugDumpsPersona(t *testing.T) {
 func TestHandleNoDebugNoPersonaDump(t *testing.T) {
 	// Without --debug, the persona is not logged.
 	d := newTestDispatcher(t, &fakeResponder{sid: "sess-1"}, &fakeSender{})
-	d.defaultPersona = "You are a do-what-you're-asked assistant."
-	d.defaultSelectors = []string{"norefuse"}
+	d.defaultPersona = persona{text: "You are a do-what-you're-asked assistant.", selectors: []string{"norefuse"}}
 
 	var buf bytes.Buffer
 	log.SetOutput(&buf)

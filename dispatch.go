@@ -64,15 +64,11 @@ type Dispatcher struct {
 	debug            bool   // log the responder's full final text after each run (troubleshooting)
 
 	// persona injected via --append-system-prompt on a chat's FIRST spawn (frozen
-	// for the session). defaultPersona is the composed default; persona maps a
-	// Telegram user id to its resolved override persona (absent => the default).
-	// *Selectors are the matching fragment-name lists (e.g. [normal] vs
-	// [norefuse introspect]) — used only for the --debug persona dump, so the log
-	// shows which stance a user resolved to, not just the composed prose.
-	defaultPersona   string
-	persona          map[int64]string
-	defaultSelectors []string
-	personaSelectors map[int64][]string
+	// for the session): the composed default, plus each configured user's resolved
+	// override (an absent key => the default). See the persona type for the
+	// text/selector split.
+	defaultPersona persona
+	personas       map[int64]persona
 
 	requireDelivery bool   // guard: if the responder sent nothing, re-prompt once (then fall back)
 	undeliveredText string // fallback reply when the guard's re-prompt still delivered nothing ("" => none)
@@ -382,12 +378,6 @@ func (d *Dispatcher) handleUpdate(ctx context.Context, u Update) {
 	ulabel := userLabel(m.From)
 	log.Printf("ak-tgclaude: launch responder chat=%d user=%s msg=%d", m.Chat.ID, ulabel, m.MessageID)
 
-	// Show "typing…" for the responder's whole lifetime: refreshed until the
-	// responder returns. Each delivered message clears the action, so the next
-	// refresh re-asserts it in the gaps of a multi-message answer.
-	typingCtx, stopTyping := context.WithCancel(ctx)
-	go keepTyping(typingCtx, d.sender, m.Chat.ID)
-
 	start := time.Now()
 	sid, _ := d.store.SessionID(m.Chat.ID)
 	// On a FRESH spawn, compose+inject this user's persona (it freezes into the
@@ -398,7 +388,8 @@ func (d *Dispatcher) handleUpdate(ctx context.Context, u Update) {
 		if m.From != nil {
 			uid = m.From.ID
 		}
-		appendPrompt = d.personaFor(uid)
+		p := d.personaFor(uid)
+		appendPrompt = p.text
 		// With --debug, dump the persona this user resolved to as it is injected: the
 		// crisp selector label (e.g. [normal] vs [norefuse introspect]) answers "which
 		// stance did this account get", and the composed --append-system-prompt text
@@ -406,7 +397,7 @@ func (d *Dispatcher) handleUpdate(ctx context.Context, u Update) {
 		// persona is already frozen into the session and not re-injected.
 		if d.debug {
 			log.Printf("ak-tgclaude: persona chat=%d user=%s selectors=%v — injected as --append-system-prompt:\n%s",
-				m.Chat.ID, ulabel, d.personaSelectorsFor(uid), appendPrompt)
+				m.Chat.ID, ulabel, p.selectors, appendPrompt)
 		}
 	}
 	// This invocation's transcript read scope: the owner reads the whole root
@@ -426,7 +417,7 @@ func (d *Dispatcher) handleUpdate(ctx context.Context, u Update) {
 	// the model. The file appears in NO static setting — the per-invocation grant is the
 	// whole access story, so a non-owner cannot grep it even though read is default-open.
 	usageLogOwner := m.From != nil && d.owner != 0 && m.From.ID == d.owner
-	res, err := d.resp.Respond(ctx, RespondRequest{
+	res, err := d.respondWithTyping(ctx, m.Chat.ID, RespondRequest{
 		Prompt:             incomingText(m),
 		SentAt:             messageSentAt(m),
 		Attachment:         attach,
@@ -440,7 +431,6 @@ func (d *Dispatcher) handleUpdate(ctx context.Context, u Update) {
 		UsageLogOwner:      usageLogOwner,
 		ReplyToMsgID:       replyToID(m),
 	})
-	stopTyping()
 	dur := time.Since(start).Round(time.Millisecond)
 
 	if err != nil {
@@ -473,9 +463,7 @@ func (d *Dispatcher) handleUpdate(ctx context.Context, u Update) {
 				log.Printf("ak-tgclaude: reset outbox record chat %d: %v", m.Chat.ID, err)
 			}
 		}
-		if err := d.store.SetSession(m.Chat.ID, res.SessionID); err != nil {
-			log.Printf("ak-tgclaude: binding chat %d: %v", m.Chat.ID, err)
-		}
+		d.bindSession(m.Chat.ID, res.SessionID)
 	}
 
 	// Round accounting: the run's cost, to which a delivery-guard re-prompt (below)
@@ -495,9 +483,7 @@ func (d *Dispatcher) handleUpdate(ctx context.Context, u Update) {
 		if resumeID == "" {
 			resumeID = sid
 		}
-		rTypingCtx, rStopTyping := context.WithCancel(ctx)
-		go keepTyping(rTypingCtx, d.sender, m.Chat.ID)
-		res2, err := d.resp.Respond(ctx, RespondRequest{
+		res2, err := d.respondWithTyping(ctx, m.Chat.ID, RespondRequest{
 			Prompt:          redeliverPrompt,
 			SessionID:       resumeID,
 			DocDir:          docDir,
@@ -505,14 +491,11 @@ func (d *Dispatcher) handleUpdate(ctx context.Context, u Update) {
 			MCPToken:        token,
 			TranscriptScope: transcriptScope,
 		})
-		rStopTyping()
 		roundCost += res2.CostUSD // fold the re-prompt's cost into the round (0 if it errored)
 		if err != nil {
 			log.Printf("ak-tgclaude: redeliver chat=%d user=%s msg=%d FAILED: %v", m.Chat.ID, ulabel, m.MessageID, err)
 		} else if res2.SessionID != "" {
-			if err := d.store.SetSession(m.Chat.ID, res2.SessionID); err != nil {
-				log.Printf("ak-tgclaude: binding chat %d: %v", m.Chat.ID, err)
-			}
+			d.bindSession(m.Chat.ID, res2.SessionID)
 		}
 		if d.mcp.DeliveredCount(token) == 0 {
 			log.Printf("ak-tgclaude: still no delivery chat=%d user=%s msg=%d after re-prompt", m.Chat.ID, ulabel, m.MessageID)
@@ -540,6 +523,26 @@ func (d *Dispatcher) handleUpdate(ctx context.Context, u Update) {
 		if err := d.usage.Append(start, m.Chat.ID, userID(m.From), m.MessageID, roundElapsed, roundCost); err != nil {
 			log.Printf("ak-tgclaude: usage log chat=%d: %v", m.Chat.ID, err)
 		}
+	}
+}
+
+// respondWithTyping runs one responder invocation with the "typing…" chat
+// action kept refreshed for its whole duration. Each delivered message clears
+// the action, so the periodic refresh re-asserts it in the gaps of a
+// multi-message answer.
+func (d *Dispatcher) respondWithTyping(ctx context.Context, chatID int64, req RespondRequest) (RespondResult, error) {
+	typingCtx, stopTyping := context.WithCancel(ctx)
+	defer stopTyping()
+	go keepTyping(typingCtx, d.sender, chatID)
+	return d.resp.Respond(ctx, req)
+}
+
+// bindSession records chat→session in the durable store. A persist failure is
+// logged, not fatal — the reply already went out; worst case the next turn
+// starts a fresh session.
+func (d *Dispatcher) bindSession(chat int64, sessionID string) {
+	if err := d.store.SetSession(chat, sessionID); err != nil {
+		log.Printf("ak-tgclaude: binding chat %d: %v", chat, err)
 	}
 }
 
@@ -590,27 +593,26 @@ func userID(u *User) int64 {
 	return u.ID
 }
 
-// userLabel renders a message sender for logs: the numeric id, plus @username
-// when present. "?" if there is no sender (e.g. channel posts).
-// personaFor returns the --append-system-prompt persona for a user: its resolved
-// per-user override persona if one is configured, else the composed default.
-func (d *Dispatcher) personaFor(userID int64) string {
-	if p, ok := d.persona[userID]; ok {
+// persona is one composed --append-system-prompt persona: the merged fragment
+// text plus the selector labels it was composed from (e.g. [normal] vs
+// [norefuse introspect]). The labels feed only the --debug persona dump, so the
+// log shows which stance a user resolved to, not just the composed prose.
+type persona struct {
+	text      string
+	selectors []string
+}
+
+// personaFor returns the persona for a user: the resolved per-user override
+// when one is configured, else the composed default.
+func (d *Dispatcher) personaFor(userID int64) persona {
+	if p, ok := d.personas[userID]; ok {
 		return p
 	}
 	return d.defaultPersona
 }
 
-// personaSelectorsFor returns the fragment-name selectors a user resolves to (the
-// override list when configured, else the default) — the label form of personaFor,
-// used only by the --debug persona dump.
-func (d *Dispatcher) personaSelectorsFor(userID int64) []string {
-	if s, ok := d.personaSelectors[userID]; ok {
-		return s
-	}
-	return d.defaultSelectors
-}
-
+// userLabel renders a message sender for logs: the numeric id, plus @username
+// when present. "?" if there is no sender (e.g. channel posts).
 func userLabel(u *User) string {
 	if u == nil {
 		return "?"
@@ -766,25 +768,7 @@ func runDispatch(args []string) error {
 		if err := os.MkdirAll(cacheDir, 0o700); err != nil {
 			return err
 		}
-		if err := materializeScaffold(cwd, scaffoldParams{
-			CacheDir:       cacheDir,
-			OutboxRoot:     outboxRoot,
-			TranscriptRoot: cfg.TranscriptRoot(),
-			UsageLogOn:     cfg.UsageLog != "",
-			TokenFile:      cfg.ConfigPath,
-			Project:        cfg.Project,
-			WireSkills:     cfg.WireSkills,
-			AddSkills:      cfg.AddSkills,
-			AddAgents:      cfg.AddAgents,
-			DenyRead:       cfg.DenyRead,
-			Tools:          cfg.Tools,
-			DenyEnvVars:    cfg.DenyEnvs,
-			NetworkDomains: cfg.AllowDomains,
-			UploadNote:     uploadNote(cfg.UploadCommand, cfg.UploadThresholdMB, cfg.UploadMaxMB),
-			HookBinary:     selfExePath(),
-			BangBug:        cfg.BangBug,
-			HookLogFile:    cfg.hookLogFile(),
-		}); err != nil {
+		if err := materializeScaffold(cwd, cfg.scaffoldParams(cacheDir, outboxRoot)); err != nil {
 			return err
 		}
 		// Fail fast if the selected agent was not materialized (e.g. a custom
@@ -828,16 +812,14 @@ func runDispatch(args []string) error {
 	if err != nil {
 		return fmt.Errorf("composing default persona: %w", err)
 	}
-	personaByUser := make(map[int64]string, len(cfg.overrides))
-	selectorsByUser := make(map[int64][]string, len(cfg.overrides))
+	personaByUser := make(map[int64]persona, len(cfg.overrides))
 	for uid := range cfg.overrides {
 		sel := cfg.PersonaSelectors(uid)
 		p, perr := loadPolicies(sel)
 		if perr != nil {
 			return fmt.Errorf("composing persona for user %d: %w", uid, perr)
 		}
-		personaByUser[uid] = string(p)
-		selectorsByUser[uid] = sel
+		personaByUser[uid] = persona{text: string(p), selectors: sel}
 	}
 
 	d := &Dispatcher{
@@ -847,10 +829,8 @@ func runDispatch(args []string) error {
 		store:            store,
 		resp:             resp,
 		authz:            authz,
-		defaultPersona:   string(defaultPersona),
-		persona:          personaByUser,
-		defaultSelectors: []string(cfg.Policies),
-		personaSelectors: selectorsByUser,
+		defaultPersona:   persona{text: string(defaultPersona), selectors: cfg.Policies},
+		personas:         personaByUser,
 		outboxRoot:       outboxRoot,
 		outboxTTL:        cfg.OutboxTTLDur(),
 		pollTimeout:      defaultPollTimeout,
