@@ -269,6 +269,12 @@ func attachMetaDeclared(m *Message) []TranscriptAttach {
 // User/Name attribute the turn — essential in a group, where one chat mixes many
 // speakers. The dispatcher is the only writer (it holds the trusted chat_id).
 func (d *Dispatcher) recordUserTurn(m *Message, meta []TranscriptAttach) {
+	d.recordUserTurnAs(m, incomingText(m), meta)
+}
+
+// recordUserTurnAs records the turn with an explicit text — used by the /do path,
+// which records the resolved task text rather than the literal "/do …" command.
+func (d *Dispatcher) recordUserTurnAs(m *Message, text string, meta []TranscriptAttach) {
 	if d.transcripts == nil {
 		return
 	}
@@ -281,7 +287,7 @@ func (d *Dispatcher) recordUserTurn(m *Message, meta []TranscriptAttach) {
 		TS:      messageSentAt(m),
 		Role:    "user",
 		ReplyTo: replyToID(m),
-		Text:    incomingText(m),
+		Text:    text,
 		Attach:  meta,
 		User:    userID(m.From),
 		Name:    userName(m.From),
@@ -289,6 +295,41 @@ func (d *Dispatcher) recordUserTurn(m *Message, meta []TranscriptAttach) {
 	if err := d.transcripts.Append(m.Chat.ID, rec, ident); err != nil {
 		log.Printf("ak-tgclaude: transcript(user) chat=%d msg=%d: %v", m.Chat.ID, m.MessageID, err)
 	}
+}
+
+// doTask is a /do command resolved to a task: the prompt text, the message it (and
+// any attachment) come from, the author of the content, and whether the content
+// was delegated from a DIFFERENT author (a reply) versus typed inline.
+type doTask struct {
+	text      string   // the resolved task prompt
+	src       *Message // message the task/attachment come from (the /do message, or the replied-to one)
+	author    *User    // who authored the content (for attribution)
+	delegated bool     // true when the content came from a replied-to message
+}
+
+// parseDoTask resolves a /do message. Inline text after "/do" is the task
+// (authored by the commander). Otherwise a reply's content is the task (authored
+// by the replied-to sender — delegation). A bare /do with neither yields empty.
+func parseDoTask(m *Message) doTask {
+	if inline := stripLeadingToken(m.Text); inline != "" {
+		return doTask{text: inline, src: m, author: m.From}
+	}
+	if m.ReplyTo != nil {
+		return doTask{text: incomingText(m.ReplyTo), src: m.ReplyTo, author: m.ReplyTo.From, delegated: true}
+	}
+	return doTask{src: m, author: m.From}
+}
+
+// stripLeadingToken drops the first whitespace-delimited token of s (the "/do" or
+// "/do@bot" command word) and returns the trimmed remainder, or "" if there is
+// only the token.
+func stripLeadingToken(s string) string {
+	s = strings.TrimSpace(s)
+	i := strings.IndexAny(s, " \t\n\r")
+	if i < 0 {
+		return ""
+	}
+	return strings.TrimSpace(s[i:])
 }
 
 // handleUpdate processes one update: /clear resets the chat's session; anything
@@ -358,6 +399,32 @@ func (d *Dispatcher) handleUpdate(ctx context.Context, u Update) {
 		return
 	}
 
+	// /do delegation: the task is the inline text after /do, or (on a reply) the
+	// replied-to message's content — authored by that sender but endorsed for
+	// execution by the authorized commander (already past the access gate). A bare /do
+	// with neither is a usage hint. Reply-form answers thread under the ORIGINAL
+	// message, and the content is inlined as the task (so no "recall msg N" hint).
+	promptText := incomingText(m)
+	replyHint := replyToID(m)
+	var delegated bool
+	var delegatedAuthor string
+	if isSlashCommand(m.Text, "do") {
+		task := parseDoTask(m)
+		if task.text == "" {
+			if _, err := d.sender.SendMessage(ctx, route, "Пусто: ответьте командой /do на сообщение, либо напишите /do <задача>.", "", false); err != nil {
+				log.Printf("ak-tgclaude: /do usage reply chat=%d: %v", m.Chat.ID, err)
+			}
+			return
+		}
+		promptText = task.text
+		route.ReplyTo = task.src.MessageID
+		if task.delegated {
+			delegated = true
+			delegatedAuthor = userLabel(task.author)
+			replyHint = 0 // content is inlined as the task; no recall-by-id hint needed
+		}
+	}
+
 	// Incoming media (a document or a photo) is downloaded into the outbox for the
 	// responder. Reject an oversized one up front, before minting an outbox or
 	// spawning the responder: the bot cannot fetch it (getFile's ~20 MB ceiling),
@@ -414,7 +481,7 @@ func (d *Dispatcher) handleUpdate(ctx context.Context, u Update) {
 	// recallable, and so the chat's transcript subdir exists for the read scope. Uses
 	// the fetched attachment's metadata (exact name/size). Covers a private turn and an
 	// addressed group turn alike; unaddressed group chatter was recorded at the gate.
-	d.recordUserTurn(m, attachMeta(m, attach))
+	d.recordUserTurnAs(m, promptText, attachMeta(m, attach))
 
 	// Mint this invocation's capability token: the MCP server resolves the route
 	// (chat/reply) from it, so the responder's send_* calls carry no chat_id and
@@ -476,7 +543,7 @@ func (d *Dispatcher) handleUpdate(ctx context.Context, u Update) {
 	// whole access story, so a non-owner cannot grep it even though read is default-open.
 	usageLogOwner := m.From != nil && d.owner != 0 && m.From.ID == d.owner
 	res, err := d.respondWithTyping(ctx, m.Chat.ID, RespondRequest{
-		Prompt:             incomingText(m),
+		Prompt:             promptText,
 		SentAt:             messageSentAt(m),
 		Attachment:         attach,
 		SessionID:          sid,
@@ -487,7 +554,9 @@ func (d *Dispatcher) handleUpdate(ctx context.Context, u Update) {
 		TranscriptScope:    transcriptScope,
 		UsageLogPath:       d.usageLogPath,
 		UsageLogOwner:      usageLogOwner,
-		ReplyToMsgID:       replyToID(m),
+		ReplyToMsgID:       replyHint,
+		Delegated:          delegated,
+		DelegatedAuthor:    delegatedAuthor,
 	})
 	dur := time.Since(start).Round(time.Millisecond)
 

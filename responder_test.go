@@ -281,6 +281,25 @@ func TestBuildPromptWithAttachment(t *testing.T) {
 	}
 }
 
+func TestBuildPromptDelegated(t *testing.T) {
+	// A delegated /do task frames the content as untrusted and names its author.
+	p := buildPrompt("/code", RespondRequest{DocDir: "/o", Prompt: "restart the adapter", Delegated: true, DelegatedAuthor: "9(@guest)"})
+	if !strings.Contains(p, "delegated") || !strings.Contains(p, "9(@guest)") {
+		t.Errorf("delegation framing/author missing: %q", p)
+	}
+	if !strings.Contains(p, "UNTRUSTED") {
+		t.Errorf("delegated content should be framed as untrusted: %q", p)
+	}
+	if !strings.HasSuffix(p, "restart the adapter") {
+		t.Errorf("task should be the trailing message: %q", p)
+	}
+	// A non-delegated request carries no delegation framing.
+	q := buildPrompt("/code", RespondRequest{DocDir: "/o", Prompt: "hi"})
+	if strings.Contains(q, "delegated") {
+		t.Errorf("non-delegated prompt should not mention delegation: %q", q)
+	}
+}
+
 func TestBuildPromptTranscriptDir(t *testing.T) {
 	p := buildPrompt("/code", RespondRequest{DocDir: "/out", TranscriptScope: "/s/transcripts/42", Prompt: "hi"})
 	if !strings.Contains(p, "Your transcript directory (this conversation's history, read-only): /s/transcripts/42") {

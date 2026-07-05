@@ -927,3 +927,84 @@ func TestHandleGroupDoAddresses(t *testing.T) {
 		t.Errorf("/do in a group must spawn a responder")
 	}
 }
+
+func TestParseDoTask(t *testing.T) {
+	// Inline: the text after /do is the task, authored by the commander.
+	inline := parseDoTask(&Message{Text: "/do summarize the log", From: &User{ID: 5}})
+	if inline.text != "summarize the log" || inline.delegated || inline.author.ID != 5 {
+		t.Errorf("inline = %+v", inline)
+	}
+	// /do@bot with a payload strips the command token.
+	at := parseDoTask(&Message{Text: "/do@mybot fix it", From: &User{ID: 5}})
+	if at.text != "fix it" || at.delegated {
+		t.Errorf("/do@bot = %+v", at)
+	}
+	// Reply-form: the replied-to content is the task, authored by that sender.
+	reply := parseDoTask(&Message{
+		Text:    "/do",
+		From:    &User{ID: 5},
+		ReplyTo: &Message{MessageID: 77, Text: "how do I restart X?", From: &User{ID: 9, Username: "guest"}},
+	})
+	if reply.text != "how do I restart X?" || !reply.delegated || reply.author.ID != 9 || reply.src.MessageID != 77 {
+		t.Errorf("reply = %+v", reply)
+	}
+	// Bare /do with no reply yields an empty task.
+	if bare := parseDoTask(&Message{Text: "/do", From: &User{ID: 5}}); bare.text != "" {
+		t.Errorf("bare = %+v", bare)
+	}
+}
+
+func TestHandleDoReplyDelegates(t *testing.T) {
+	resp := &fakeResponder{sid: "s1", replies: []string{"ok"}}
+	sender := &fakeSender{}
+	d := newTestDispatcher(t, resp, sender)
+	up := Update{Message: &Message{
+		MessageID: 200, Text: "/do", Chat: Chat{ID: -100, Type: "supergroup"},
+		From:    &User{ID: 5},
+		ReplyTo: &Message{MessageID: 77, Text: "how do I restart X?", From: &User{ID: 9, Username: "guest"}},
+	}}
+	d.handleUpdate(context.Background(), up)
+	if !resp.called {
+		t.Fatal("/do reply must spawn a responder")
+	}
+	if resp.gotReq.Prompt != "how do I restart X?" {
+		t.Errorf("prompt = %q, want the replied-to content", resp.gotReq.Prompt)
+	}
+	if !resp.gotReq.Delegated || resp.gotReq.DelegatedAuthor == "" {
+		t.Errorf("delegation not marked: %+v", resp.gotReq)
+	}
+	// The bot's reply threads under the ORIGINAL message (77), not the /do.
+	calls := sender.snapshot()
+	if len(calls) == 0 || calls[len(calls)-1].route.ReplyTo != 77 {
+		t.Errorf("reply should thread under the original (77): %+v", calls)
+	}
+}
+
+func TestHandleDoInline(t *testing.T) {
+	resp := &fakeResponder{sid: "s1"}
+	d := newTestDispatcher(t, resp, &fakeSender{})
+	up := Update{Message: &Message{
+		MessageID: 201, Text: "/do summarize", Chat: Chat{ID: 42}, From: &User{ID: 5},
+	}}
+	d.handleUpdate(context.Background(), up)
+	if !resp.called || resp.gotReq.Prompt != "summarize" || resp.gotReq.Delegated {
+		t.Errorf("inline /do wrong: called=%v req=%+v", resp.called, resp.gotReq)
+	}
+}
+
+func TestHandleDoBareUsage(t *testing.T) {
+	resp := &fakeResponder{sid: "s1"}
+	sender := &fakeSender{}
+	d := newTestDispatcher(t, resp, sender)
+	up := Update{Message: &Message{
+		MessageID: 202, Text: "/do", Chat: Chat{ID: 42}, From: &User{ID: 5},
+	}}
+	d.handleUpdate(context.Background(), up)
+	if resp.called {
+		t.Errorf("a bare /do with no reply must not spawn")
+	}
+	calls := sender.snapshot()
+	if len(calls) != 1 || !strings.Contains(calls[0].text, "/do") {
+		t.Errorf("bare /do should send a usage hint, got %v", calls)
+	}
+}
