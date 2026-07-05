@@ -1118,7 +1118,10 @@ func runScaffold(args []string) error {
 	}
 	agentFlag := ""
 	if cfg.Agent != "" {
-		agentFlag = " --agent " + cfg.Agent
+		// Quoted like the other interpolated values below: the agent name is
+		// operator-configured and lands in this copy-pasteable shell command, so a
+		// space or metacharacter in it would otherwise break the paste.
+		agentFlag = " --agent " + shellQuote(cfg.Agent)
 	}
 	// This is a copy-pasteable shell command, so shell-quote the values that carry a
 	// runtime path (the outbox, under workdir) or JSON with metacharacters (the
