@@ -369,25 +369,30 @@ func (w *mdWriter) renderInlineCode(n *htmlNode) {
 	w.put(delim)
 }
 
-// renderPre writes a fenced code block. The fence is ≥3 backticks and longer
-// than any backtick run inside. A <code class="language-X"> child supplies the
-// info string. The code body is verbatim — inside a fence, only the closing
-// fence is significant (why "code is always safe as md").
+// renderPre writes a <pre> as a fenced code block, its <code class="language-X">
+// child (if any) supplying the info string.
 func (w *mdWriter) renderPre(n *htmlNode) {
-	lang := preLanguage(n)
-	body := textContent(n)
-	fence := strings.Repeat("`", max(3, longestBacktickRun(body)+1))
+	w.ensureBlankLine()
+	w.put(fencedCodeBlock(preLanguage(n), textContent(n)))
+	w.ensureBlankLine()
+}
 
-	w.ensureBlankLine()
-	w.put(fence)
-	w.put(lang)
-	w.put("\n")
-	w.put(body)
+// fencedCodeBlock renders body as a Markdown fenced code block with the given
+// language info string. The fence is ≥3 backticks and LONGER than any backtick run
+// inside, so the verbatim body cannot close it early — the reason code is always
+// safe to spill as Markdown (inside a fence, only the closing fence is significant).
+func fencedCodeBlock(lang, body string) string {
+	fence := strings.Repeat("`", max(3, longestBacktickRun(body)+1))
+	var b strings.Builder
+	b.WriteString(fence)
+	b.WriteString(lang)
+	b.WriteByte('\n')
+	b.WriteString(body)
 	if !strings.HasSuffix(body, "\n") {
-		w.put("\n")
+		b.WriteByte('\n')
 	}
-	w.put(fence)
-	w.ensureBlankLine()
+	b.WriteString(fence)
+	return b.String()
 }
 
 // preLanguage extracts the language tag from a <code class="language-X"> child.

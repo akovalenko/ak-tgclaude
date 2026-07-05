@@ -15,7 +15,7 @@ import (
 // send error, which the handler surfaces to the model as a tool error). When up is
 // non-nil and a document exceeds its threshold, the file is uploaded and delivered
 // as a URL instead of a Telegram attachment (which caps near 50 MB).
-func sendDescriptor(ctx context.Context, d *Descriptor, r Route, s Sender, up *uploader) ([]int64, error) {
+func sendDescriptor(ctx context.Context, d *Descriptor, r Route, s Sender, up *uploader, overflow string) ([]int64, error) {
 	if d.Kind == KindDocument {
 		if up != nil {
 			if info, err := os.Stat(d.Path); err == nil && info.Size() > up.thresholdBytes {
@@ -40,13 +40,37 @@ func sendDescriptor(ctx context.Context, d *Descriptor, r Route, s Sender, up *u
 		return oneID(s.SendMessage(ctx, r, text, mode, d.Silent))
 	}
 	// Oversized. A text message that breaks cleanly at tag-depth-0 newlines goes out
-	// as ≤maxSplitParts messages (anchor first); otherwise — or for code, whose
-	// rendered <pre> has no depth-0 break — it spills to a document.
+	// as ≤maxSplitParts messages; if it will not split, the overflow policy decides:
+	// spill the whole answer as one .md document (default) or return a tool error so
+	// the model shortens it. Code never splits (its rendered <pre> has no depth-0
+	// break) and always spills — the knob does not apply to it.
 	if d.Kind == KindText {
 		if parts, ok := splitHTML(text, telegramTextLimit, maxSplitParts); ok {
 			return sendParts(ctx, r, parts, mode, d.Silent, s)
 		}
+		if overflow == overflowError {
+			return nil, &oversizeError{"the reply is too long for Telegram and does not split into a few messages — " +
+				"shorten it or restructure it into a more concise answer"}
+		}
 	}
+	return spillDocument(ctx, d, r, s)
+}
+
+// spillCaption is the generic intro attached to a spilled .md document so the
+// attachment is not bare, used when the descriptor carries no caption of its own.
+const spillCaption = "The full answer was too long to send as a message — it is attached as Markdown."
+
+// oversizeError is returned when the overflow policy is "error": an oversized text
+// reply that will not split is refused so the model can shorten it, instead of
+// spilling to a document. callTool surfaces its message to the model verbatim.
+type oversizeError struct{ msg string }
+
+func (e *oversizeError) Error() string { return e.msg }
+
+// spillDocument writes the descriptor's Markdown spill payload to a temp file and
+// delivers it as a document, captioned with the descriptor's own caption or the
+// generic fallback.
+func spillDocument(ctx context.Context, d *Descriptor, r Route, s Sender) ([]int64, error) {
 	tmp, err := os.CreateTemp("", "ak-tgclaude-spill-*")
 	if err != nil {
 		return nil, err
@@ -57,7 +81,11 @@ func sendDescriptor(ctx context.Context, d *Descriptor, r Route, s Sender, up *u
 		return nil, err
 	}
 	tmp.Close()
-	return oneID(s.SendDocument(ctx, r, tmp.Name(), spillName(d), d.Caption, "", d.Silent))
+	caption := d.Caption
+	if caption == "" {
+		caption = spillCaption
+	}
+	return oneID(s.SendDocument(ctx, r, tmp.Name(), spillName(d), caption, "", d.Silent))
 }
 
 // oneID lifts a single-message send result into the []int64 return shape.

@@ -61,16 +61,18 @@ func TestFitsAndSpill(t *testing.T) {
 		t.Errorf("text exactly at the limit should fit")
 	}
 
-	if n := spillName(&Descriptor{Kind: KindCode, Language: "py"}); n != "snippet.py" {
+	// Both kinds spill as Markdown: code as snippet.md, prose as message.md.
+	if n := spillName(&Descriptor{Kind: KindCode, Language: "py"}); n != "snippet.md" {
 		t.Errorf("spillName code = %q", n)
 	}
-	if n := spillName(&Descriptor{Kind: KindCode}); n != "snippet.txt" {
-		t.Errorf("spillName code no-lang = %q", n)
-	}
-	if n := spillName(&Descriptor{Kind: KindText, Format: FormatHTML}); n != "message.html" {
+	if n := spillName(&Descriptor{Kind: KindText, Format: FormatHTML}); n != "message.md" {
 		t.Errorf("spillName html = %q", n)
 	}
-	if p := spillPayload(&Descriptor{Kind: KindCode, Code: "raw"}); p != "raw" {
+	// Code spills as a fenced block (with language); HTML prose is converted to md.
+	if p := spillPayload(&Descriptor{Kind: KindCode, Code: "raw", Language: "go"}); p != "```go\nraw\n```" {
 		t.Errorf("spillPayload code = %q", p)
+	}
+	if p := spillPayload(&Descriptor{Kind: KindText, Format: FormatHTML, Text: "<b>x</b>"}); p != "**x**" {
+		t.Errorf("spillPayload html->md = %q", p)
 	}
 }

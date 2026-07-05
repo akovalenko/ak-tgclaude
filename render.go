@@ -65,27 +65,26 @@ func utf16Len(s string) int {
 	return n
 }
 
-// spillName is the document filename for an oversized text/code message.
+// spillName is the document filename for an oversized text/code message. Both
+// spill as Markdown — Telegram renders a .md attachment in-app — so prose becomes
+// message.md and code snippet.md.
 func spillName(d *Descriptor) string {
-	switch d.Kind {
-	case KindCode:
-		if d.Language != "" {
-			return "snippet." + d.Language
-		}
-		return "snippet.txt"
-	default:
-		if d.Format == FormatHTML {
-			return "message.html"
-		}
-		return "message.txt"
+	if d.Kind == KindCode {
+		return "snippet.md"
 	}
+	return "message.md"
 }
 
-// spillPayload is the raw body attached when a message spills to a document —
-// the unwrapped text/code, not the Telegram-HTML rendering.
+// spillPayload is the Markdown body attached when a message spills to a document.
+// Code becomes a fenced block (with its language); prose is converted from its
+// Telegram-HTML rendering to Markdown. Plain text has no markup to convert and is
+// attached as-is.
 func spillPayload(d *Descriptor) string {
 	if d.Kind == KindCode {
-		return d.Code
+		return fencedCodeBlock(d.Language, d.Code)
+	}
+	if d.Format == FormatHTML {
+		return htmlToMarkdown(d.Text)
 	}
 	return d.Text
 }

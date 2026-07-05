@@ -223,7 +223,7 @@ func TestParseConfigUploadDefaultThreshold(t *testing.T) {
 
 func TestValidateUploadCommandMissing(t *testing.T) {
 	c := &Config{BotToken: "x", Profile: ProfileQA, Responder: ResponderClaude, Project: "/p",
-		MaxConcurrent: 1, MaxIncomingMB: 20, OutboxTTL: "2h", UploadCommand: "/no/such/uploader", UploadThresholdMB: 40}
+		MaxConcurrent: 1, MaxIncomingMB: 20, OutboxTTL: "2h", Overflow: overflowSpill, UploadCommand: "/no/such/uploader", UploadThresholdMB: 40}
 	if err := c.validate(); err == nil || !strings.Contains(err.Error(), "upload_command") {
 		t.Fatalf("want upload_command existence error, got %v", err)
 	}
@@ -232,7 +232,7 @@ func TestValidateUploadCommandMissing(t *testing.T) {
 func TestValidateUploadMaxBelowThreshold(t *testing.T) {
 	script := writeScript(t, `echo x`) // exists, so the stat check passes
 	c := &Config{BotToken: "x", Profile: ProfileQA, Responder: ResponderClaude, Project: "/p",
-		MaxConcurrent: 1, MaxIncomingMB: 20, OutboxTTL: "2h", UploadCommand: script, UploadThresholdMB: 40, UploadMaxMB: 30}
+		MaxConcurrent: 1, MaxIncomingMB: 20, OutboxTTL: "2h", Overflow: overflowSpill, UploadCommand: script, UploadThresholdMB: 40, UploadMaxMB: 30}
 	if err := c.validate(); err == nil || !strings.Contains(err.Error(), "upload_max_mb") {
 		t.Fatalf("want upload_max_mb < threshold error, got %v", err)
 	}
@@ -317,13 +317,38 @@ func TestParseConfigOwnerReadsAll(t *testing.T) {
 
 func TestValidateTranscriptDirUnderProject(t *testing.T) {
 	c := &Config{BotToken: "x", Profile: ProfileQA, Responder: ResponderClaude, Project: "/proj",
-		MaxConcurrent: 1, MaxIncomingMB: 20, OutboxTTL: "2h", Transcripts: true, TranscriptDir: "/proj/tr"}
+		MaxConcurrent: 1, MaxIncomingMB: 20, OutboxTTL: "2h", Overflow: overflowSpill, Transcripts: true, TranscriptDir: "/proj/tr"}
 	if err := c.validate(); err == nil || !strings.Contains(err.Error(), "transcript_dir") {
 		t.Fatalf("want transcript_dir-under-project error, got %v", err)
 	}
 	c.TranscriptDir = "/data/tr" // elsewhere: fine
 	if err := c.validate(); err != nil {
 		t.Fatalf("safe transcript_dir should validate, got %v", err)
+	}
+}
+
+func TestParseConfigOverflowDefault(t *testing.T) {
+	c, err := parseConfig(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Overflow != overflowSpill {
+		t.Errorf("Overflow default = %q, want %q", c.Overflow, overflowSpill)
+	}
+	c2, err := parseConfig([]string{"--overflow", "error"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c2.Overflow != overflowError {
+		t.Errorf("--overflow error => %q, want %q", c2.Overflow, overflowError)
+	}
+}
+
+func TestValidateOverflowUnknown(t *testing.T) {
+	c := &Config{BotToken: "x", Profile: ProfileQA, Responder: ResponderClaude, Project: "/p",
+		MaxConcurrent: 1, MaxIncomingMB: 20, OutboxTTL: "2h", Overflow: "bogus"}
+	if err := c.validate(); err == nil || !strings.Contains(err.Error(), "overflow") {
+		t.Fatalf("want overflow validation error, got %v", err)
 	}
 }
 

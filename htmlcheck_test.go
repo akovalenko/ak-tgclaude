@@ -25,7 +25,7 @@ func TestSendDescriptorRejectsBadHTML(t *testing.T) {
 	// nothing goes out.
 	s := &fakeSender{}
 	d := &Descriptor{Kind: KindText, Format: FormatHTML, Text: "<p>hello</p>"}
-	_, err := sendDescriptor(context.Background(), d, Route{ChatID: 1}, s, nil)
+	_, err := sendDescriptor(context.Background(), d, Route{ChatID: 1}, s, nil, overflowSpill)
 	var he *htmlError
 	if !errors.As(err, &he) {
 		t.Fatalf("want *htmlError, got %v", err)
@@ -36,7 +36,7 @@ func TestSendDescriptorRejectsBadHTML(t *testing.T) {
 	// Clean HTML sends normally.
 	s2 := &fakeSender{}
 	d2 := &Descriptor{Kind: KindText, Format: FormatHTML, Text: "<b>hi</b>"}
-	if _, err := sendDescriptor(context.Background(), d2, Route{ChatID: 1}, s2, nil); err != nil {
+	if _, err := sendDescriptor(context.Background(), d2, Route{ChatID: 1}, s2, nil, overflowSpill); err != nil {
 		t.Fatalf("clean HTML should send: %v", err)
 	}
 	if len(s2.snapshot()) != 1 {
@@ -45,7 +45,7 @@ func TestSendDescriptorRejectsBadHTML(t *testing.T) {
 	// Plain text is never HTML-checked (a literal <p> is fine as text).
 	s3 := &fakeSender{}
 	d3 := &Descriptor{Kind: KindText, Format: FormatPlain, Text: "1 < 2 and <p> as text"}
-	if _, err := sendDescriptor(context.Background(), d3, Route{ChatID: 1}, s3, nil); err != nil {
+	if _, err := sendDescriptor(context.Background(), d3, Route{ChatID: 1}, s3, nil, overflowSpill); err != nil {
 		t.Fatalf("plain text should send: %v", err)
 	}
 	if len(s3.snapshot()) != 1 {

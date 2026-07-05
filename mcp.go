@@ -79,6 +79,8 @@ type mcpServer struct {
 
 	transcripts *TranscriptStore // bot-side transcript append (nil => feature off); set after construction
 
+	overflow string // oversized-text policy "spill"|"error" (Config.Overflow); set after construction, "" => spill
+
 	mu     sync.Mutex
 	routes map[string]mcpRoute
 }
@@ -401,7 +403,7 @@ func (m *mcpServer) callTool(ctx context.Context, tok string, rt mcpRoute, param
 		log.Printf("ak-tgclaude: mcp: tools/call %s chat=%d: rejected: %v", call.Name, rt.route.ChatID, err)
 		return toolError(err.Error())
 	}
-	ids, err := sendDescriptor(ctx, d, rt.route, m.sender, m.uploader)
+	ids, err := sendDescriptor(ctx, d, rt.route, m.sender, m.uploader, m.overflow)
 	if err != nil {
 		// An upload-path failure (too large, uploader crashed, no URL) is surfaced
 		// to the model verbatim; only a genuine Telegram API error gets the "Telegram
@@ -417,6 +419,13 @@ func (m *mcpServer) callTool(ctx context.Context, tok string, rt mcpRoute, param
 		if errors.As(err, &he) {
 			log.Printf("ak-tgclaude: mcp: tools/call %s chat=%d: html guard: %v", call.Name, rt.route.ChatID, err)
 			return toolError(he.Error())
+		}
+		// Overflow policy "error": the reply is too long and will not split. Surface it
+		// verbatim so the model shortens it, like the HTML guard above.
+		var oe *oversizeError
+		if errors.As(err, &oe) {
+			log.Printf("ak-tgclaude: mcp: tools/call %s chat=%d: oversize: %v", call.Name, rt.route.ChatID, err)
+			return toolError(oe.Error())
 		}
 		log.Printf("ak-tgclaude: mcp: tools/call %s chat=%d: telegram error: %v", call.Name, rt.route.ChatID, err)
 		return toolError("Telegram rejected the message: " + deliveryError(err))

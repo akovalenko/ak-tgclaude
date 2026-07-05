@@ -42,6 +42,7 @@ project   = "~/code/myproject"  # the codebase consulted on (read-only under qa)
 # claude_args = ["--model", "opus", "--effort", "high"]  # extra raw `claude -p` flags (ak-tgclaude-owned flags rejected)
 # allow_silent = false          # true DISABLES the delivery guard (below); default false = guard on
 # undelivered_text = "Sorry, I could not answer that."  # fallback reply if the guard's re-prompt still sent nothing
+# overflow = "spill"           # oversized reply: "spill" (default; whole answer as one .md doc) | "error" (make the model shorten). Code always spills to .md
 # upload_command = "~/uploaders/rsync-upload.sh"  # large-file fallback: docs over ~40 MB uploaded and sent as a link (below; see examples/)
 # tools = ["Agent", "WebFetch(domain:*.github.com)"]  # grant EXTRA tools: bare name→frontmatter, full spec→--allowedTools; sharp knob — see below
 # runtime_base = ""             # base for the ephemeral cwd (default: $XDG_RUNTIME_DIR)
@@ -109,6 +110,15 @@ ak-tgclaude dispatch --bot-token 123:ABC --profile qa --project ~/code/myproject
   notes don't count:** a send tagged `progress: true` (an "along the way" status line)
   is delivered but excluded from the tally, so a responder that narrates slow work
   before answering doesn't blind the guard — only a real (untagged) send clears it.
+- **Long answers (`overflow` / `--overflow`).** A reply too long for one Telegram
+  message (4096 UTF-16 units) is first **split** at paragraph breaks — newlines with
+  no HTML element open — into up to a few messages, each independently valid HTML.
+  When it will not split (one oversized block, or code), the policy decides: `spill`
+  (default) sends the **whole** answer as a single Markdown `.md` document, which
+  Telegram renders in-app, with a short caption; `error` returns a tool error so the
+  model shortens or restructures it. **Code always spills to `.md`** regardless (it
+  cannot be "made shorter"). A split reply is recorded once in the transcript at its
+  anchor message, with the follow-up pieces stubbed to it (`part_of`; see recall).
 - **Extra tools (`tools`, repeatable `--tool`).** Grant the responder additional
   tools. Each value is split across the two grants that must change together: its
   bare NAME goes into the agent's `tools:` frontmatter (availability) and the value

@@ -965,6 +965,7 @@ func runDispatch(args []string) error {
 	}
 	defer mcp.Close()
 	mcp.transcripts = transcripts // bot-side transcript append happens in the MCP send path
+	mcp.overflow = cfg.Overflow   // oversized-text policy (spill | error) for the send path
 	log.Printf("ak-tgclaude: mcp server listening at %s", mcp.URL())
 
 	cwd, ephemeral, err := resolveResponderCwd(cfg)

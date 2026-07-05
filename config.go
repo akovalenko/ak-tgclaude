@@ -90,6 +90,13 @@ const (
 // defaultAgent is the responder agent shipped in the scaffold (assets/agents).
 const defaultAgent = "faq-responder"
 
+// overflow policy values (Config.Overflow): how an oversized text reply that will
+// not split into ≤maxSplitParts messages is handled.
+const (
+	overflowSpill = "spill" // default: deliver the whole answer as one .md document
+	overflowError = "error" // return a tool error so the model shortens/restructures
+)
+
 // Config is the resolved dispatcher configuration, populated from a TOML file
 // and/or CLI flags. Precedence: flags > file > defaults.
 type Config struct {
@@ -269,6 +276,13 @@ type Config struct {
 	// fallback message (the guard then only re-prompts and logs). Ignored when
 	// AllowSilent is set. Plain text.
 	UndeliveredText string `toml:"undelivered_text"`
+
+	// Overflow decides what happens to an oversized text reply that will NOT split
+	// into ≤maxSplitParts messages: "spill" (default) delivers the whole answer as a
+	// single .md document with a short caption; "error" returns a tool error so the
+	// model shortens/restructures it. Code always spills to .md regardless (it cannot
+	// be "made shorter"). Also --overflow.
+	Overflow string `toml:"overflow"`
 
 	// Debug turns on troubleshooting output, all to the dispatcher log: it passes
 	// `--debug` to the responder's `claude -p` (its own diagnostics — MCP handshake/
@@ -489,6 +503,7 @@ func decodeConfig(args []string) (*Config, error) {
 	bill := fs.Bool("bill", false, "after each answer, send the run's dollar cost as a bare \"$n.nnn\" message (only when present and non-zero)")
 	usageLog := fs.String("usage-log", "", "path to an append-only JSONL usage log ({ts,chat_id,user_id,msg_id,elapsed,cost} per answered round; elapsed=whole-round seconds, cost=summed USD); the path is the switch — empty => off (default)")
 	allowSilent := fs.Bool("allow-silent", false, "DISABLE the delivery guard (on by default): allow a responder turn that sends nothing. Normally a no-send turn is re-prompted once, then answered with undelivered_text")
+	overflow := fs.String("overflow", "", "policy for an oversized reply that will not split into a few messages: spill (default; the whole answer as one .md document) | error (return a tool error so the model shortens/restructures). Code always spills to .md")
 	debug := fs.Bool("debug", false, "troubleshooting output to the dispatcher log: pass --debug to the responder's `claude -p` (MCP handshake/tool-call transport diagnostics), dump each run's final text, and on a chat's first spawn log the resolved persona (selector label + the composed --append-system-prompt); verbose")
 	bangBug := fs.Bool("bang-bug", false, `deny sandboxed Bash containing \! (workaround for bug #64301 corrupting the bang char); the responder writes such commands to a file instead`)
 	var allowUsers int64List
@@ -621,6 +636,9 @@ func decodeConfig(args []string) (*Config, error) {
 	}
 	if *allowSilent {
 		c.AllowSilent = true
+	}
+	if *overflow != "" {
+		c.Overflow = *overflow
 	}
 	if *debug {
 		c.Debug = true
@@ -958,6 +976,9 @@ func (c *Config) applyDefaults() {
 	if c.OutboxTTL == "" {
 		c.OutboxTTL = "2h"
 	}
+	if c.Overflow == "" {
+		c.Overflow = overflowSpill
+	}
 	if c.MaxIncomingMB == 0 {
 		c.MaxIncomingMB = 20
 	}
@@ -1010,6 +1031,11 @@ func (c *Config) validate() error {
 	}
 	if _, err := time.ParseDuration(c.OutboxTTL); err != nil {
 		return fmt.Errorf("outbox_ttl %q is not a valid duration (e.g. \"2h\", \"30m\", \"0\"): %w", c.OutboxTTL, err)
+	}
+	switch c.Overflow {
+	case overflowSpill, overflowError:
+	default:
+		return fmt.Errorf("unknown overflow %q (want spill|error)", c.Overflow)
 	}
 	switch c.Responder {
 	case ResponderClaude:

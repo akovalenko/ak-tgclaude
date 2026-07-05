@@ -16,7 +16,7 @@ func TestSendDescriptorRenders(t *testing.T) {
 		{Kind: KindCode, Code: "package main", Language: "go"},
 		{Kind: KindDocument, Path: "/abs/x.pdf", Filename: "x.pdf"},
 	} {
-		if _, err := sendDescriptor(context.Background(), d, route, f, nil); err != nil {
+		if _, err := sendDescriptor(context.Background(), d, route, f, nil, overflowSpill); err != nil {
 			t.Fatalf("sendDescriptor(%+v): %v", d, err)
 		}
 	}
@@ -44,21 +44,51 @@ func TestSendDescriptorRenders(t *testing.T) {
 func TestSendDescriptorSpillsOversized(t *testing.T) {
 	f := &fakeSender{}
 	big := strings.Repeat("x", telegramTextLimit+10)
-	if _, err := sendDescriptor(context.Background(), &Descriptor{Kind: KindCode, Code: big, Language: "go"}, Route{ChatID: 1}, f, nil); err != nil {
+	if _, err := sendDescriptor(context.Background(), &Descriptor{Kind: KindCode, Code: big, Language: "go"}, Route{ChatID: 1}, f, nil, overflowSpill); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := sendDescriptor(context.Background(), &Descriptor{Kind: KindText, Text: big}, Route{ChatID: 1}, f, nil); err != nil {
+	if _, err := sendDescriptor(context.Background(), &Descriptor{Kind: KindText, Text: big}, Route{ChatID: 1}, f, nil, overflowSpill); err != nil {
 		t.Fatal(err)
 	}
 	calls := f.snapshot()
 	if len(calls) != 2 {
 		t.Fatalf("want 2 calls, got %d", len(calls))
 	}
-	if calls[0].kind != "document" || calls[0].filename != "snippet.go" {
-		t.Errorf("oversized code should spill to snippet.go: %+v", calls[0])
+	// Both spill as Markdown now: code as snippet.md, prose as message.md.
+	if calls[0].kind != "document" || calls[0].filename != "snippet.md" {
+		t.Errorf("oversized code should spill to snippet.md: %+v", calls[0])
 	}
-	if calls[1].kind != "document" || calls[1].filename != "message.txt" {
-		t.Errorf("oversized text should spill to message.txt: %+v", calls[1])
+	if calls[1].kind != "document" || calls[1].filename != "message.md" {
+		t.Errorf("oversized text should spill to message.md: %+v", calls[1])
+	}
+}
+
+func TestSendDescriptorOverflowError(t *testing.T) {
+	f := &fakeSender{}
+	big := strings.Repeat("x", telegramTextLimit+10) // oversized, no depth-0 newline => unsplittable
+
+	// overflow=error: an unsplittable text is refused with a tool error, nothing sent.
+	ids, err := sendDescriptor(context.Background(),
+		&Descriptor{Kind: KindText, Text: big}, Route{ChatID: 1}, f, nil, overflowError)
+	if err == nil {
+		t.Fatalf("want an oversize error, got ids=%v", ids)
+	}
+	var oe *oversizeError
+	if !errors.As(err, &oe) {
+		t.Fatalf("want *oversizeError, got %T: %v", err, err)
+	}
+	if n := len(f.snapshot()); n != 0 {
+		t.Fatalf("overflow=error must not send anything, got %d sends", n)
+	}
+
+	// Code ignores the knob — it always spills, even under overflow=error.
+	if _, err := sendDescriptor(context.Background(),
+		&Descriptor{Kind: KindCode, Code: big, Language: "go"}, Route{ChatID: 1}, f, nil, overflowError); err != nil {
+		t.Fatalf("code should spill under overflow=error, got %v", err)
+	}
+	calls := f.snapshot()
+	if len(calls) != 1 || calls[0].kind != "document" || calls[0].filename != "snippet.md" {
+		t.Errorf("code should spill to snippet.md under overflow=error: %+v", calls)
 	}
 }
 
@@ -68,7 +98,7 @@ func TestSendDescriptorSplitsText(t *testing.T) {
 	// them is a clean break, so the message splits into two sends (not a spill).
 	line := strings.Repeat("y", telegramTextLimit-5)
 	ids, err := sendDescriptor(context.Background(),
-		&Descriptor{Kind: KindText, Text: line + "\n" + line}, Route{ChatID: 7, ReplyTo: 42}, f, nil)
+		&Descriptor{Kind: KindText, Text: line + "\n" + line}, Route{ChatID: 7, ReplyTo: 42}, f, nil, overflowSpill)
 	if err != nil {
 		t.Fatal(err)
 	}

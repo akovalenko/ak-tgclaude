@@ -165,7 +165,7 @@ func TestSendDescriptorRoutesBigDocument(t *testing.T) {
 
 	// Over threshold (0 => any non-empty file) → uploaded, delivered as a message.
 	f := &fakeSender{}
-	if _, err := sendDescriptor(context.Background(), d, Route{ChatID: 1}, f, &uploader{command: cmd, thresholdBytes: 0}); err != nil {
+	if _, err := sendDescriptor(context.Background(), d, Route{ChatID: 1}, f, &uploader{command: cmd, thresholdBytes: 0}, overflowSpill); err != nil {
 		t.Fatal(err)
 	}
 	if c := f.snapshot(); len(c) != 1 || c[0].kind != "message" {
@@ -174,7 +174,7 @@ func TestSendDescriptorRoutesBigDocument(t *testing.T) {
 
 	// At/below threshold → normal Telegram attachment.
 	f2 := &fakeSender{}
-	if _, err := sendDescriptor(context.Background(), d, Route{ChatID: 1}, f2, &uploader{command: cmd, thresholdBytes: 1 << 20}); err != nil {
+	if _, err := sendDescriptor(context.Background(), d, Route{ChatID: 1}, f2, &uploader{command: cmd, thresholdBytes: 1 << 20}, overflowSpill); err != nil {
 		t.Fatal(err)
 	}
 	if c := f2.snapshot(); len(c) != 1 || c[0].kind != "document" {
