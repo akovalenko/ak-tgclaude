@@ -89,6 +89,14 @@ func largestPhoto(sizes []PhotoSize) *PhotoSize {
 type Chat struct {
 	ID   int64  `json:"id"`
 	Type string `json:"type"` // "private", "group", "supergroup", "channel"
+	// Title is the group/supergroup/channel display name — present on every group
+	// update, absent in a private chat. It is what names a GROUP transcript's
+	// meta.json (a group chat has no single person to identify it).
+	Title string `json:"title"`
+	// Username is the public @handle (without @) of a public group/supergroup/channel
+	// — absent for a private group and for private chats. Recorded alongside Title so a
+	// public group is addressable by its handle.
+	Username string `json:"username"`
 }
 
 // isGroup reports whether the chat is a (super)group. An empty Type — the zero

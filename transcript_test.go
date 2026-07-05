@@ -72,6 +72,38 @@ func TestTranscriptAppendCreatesDayFileAndMeta(t *testing.T) {
 	}
 }
 
+func TestTranscriptGroupMetaNamesGroupNotSpeaker(t *testing.T) {
+	root := t.TempDir()
+	s := NewTranscriptStore(root)
+	// A group turn: the record carries the speaker (User/Name/Username), but the
+	// chat's meta.json must name the GROUP itself, not whoever spoke.
+	rec := TranscriptRecord{
+		MsgID: 1, TS: fixedTS(2026, 7, 4, 9), Role: "user", Text: "hi",
+		User: 7, Name: "Anton", Username: "ak",
+	}
+	if err := s.Append(-100, rec, &ChatIdentity{Type: "supergroup", Title: "ОСУТ чат", Username: "osut"}); err != nil {
+		t.Fatal(err)
+	}
+	m := readMeta(filepath.Join(root, "-100"))
+	if m == nil {
+		t.Fatal("group meta.json missing")
+	}
+	if m.Title != "ОСУТ чат" || m.Type != "supergroup" || m.Username != "osut" {
+		t.Errorf("group identity not recorded: %+v", m)
+	}
+	if m.FirstName != "" {
+		t.Errorf("group meta must not carry a speaker first_name, got %q", m.FirstName)
+	}
+	// A different speaker next: meta still names the group, unchanged.
+	if err := s.Append(-100, TranscriptRecord{MsgID: 2, TS: fixedTS(2026, 7, 4, 10), Role: "user", Text: "yo", User: 8, Name: "Nick"},
+		&ChatIdentity{Type: "supergroup", Title: "ОСУТ чат", Username: "osut"}); err != nil {
+		t.Fatal(err)
+	}
+	if m = readMeta(filepath.Join(root, "-100")); m.FirstName != "" || m.Title != "ОСУТ чат" {
+		t.Errorf("group meta drifted to a speaker: %+v", m)
+	}
+}
+
 func TestTranscriptDayFileNaming(t *testing.T) {
 	root := t.TempDir()
 	s := NewTranscriptStore(root)

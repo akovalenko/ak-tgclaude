@@ -253,6 +253,26 @@ func TestGroomAuthor(t *testing.T) {
 	}
 }
 
+func TestMetaWho(t *testing.T) {
+	cases := []struct {
+		m    *transcriptMeta
+		want string
+	}{
+		{&transcriptMeta{Title: "ОСУТ", Username: "osut"}, "ОСУТ (@osut)"}, // public group: title + handle
+		{&transcriptMeta{Title: "Team", Type: "group"}, "Team"},            // private group: title only
+		{&transcriptMeta{FirstName: "Anton", Username: "ak"}, "Anton (@ak)"},
+		{&transcriptMeta{FirstName: "Anton"}, "Anton"},
+		{&transcriptMeta{Username: "ak"}, "@ak"},
+		{nil, ""},
+		{&transcriptMeta{}, ""},
+	}
+	for _, c := range cases {
+		if got := metaWho(c.m); got != c.want {
+			t.Errorf("metaWho(%+v) = %q, want %q", c.m, got, c.want)
+		}
+	}
+}
+
 func TestParseRecallArgsValidation(t *testing.T) {
 	bad := [][]string{
 		{"--msg", "5"},  // no --dir

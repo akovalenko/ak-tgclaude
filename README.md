@@ -300,7 +300,9 @@ outbox):
 
 ```
 <root>/<chat_id>/
-  meta.json            # username, first_name, first/last-seen, per-role counts
+  meta.json            # who the chat is + first/last-seen + per-role counts;
+                       #   private: username, first_name (the partner)
+                       #   group:   type, title, username (the group itself)
   2026-07-04.jsonl     # one compact JSON record per turn, per day
 ```
 

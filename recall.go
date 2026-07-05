@@ -498,13 +498,18 @@ func renderChatHeader(w io.Writer, id string, m *transcriptMeta) {
 	fmt.Fprintf(w, "════════ chat %s ════════\n\n", id)
 }
 
-// metaWho renders who a chat is from its meta.json, "Name (@handle)" style. "" when
-// nothing is known.
+// metaWho renders who a chat is from its meta.json, "Name (@handle)" style. A group
+// is named by its title (the group has no single person); a private chat by its
+// partner. "" when nothing is known.
 func metaWho(m *transcriptMeta) string {
 	if m == nil {
 		return ""
 	}
 	switch {
+	case m.Title != "" && m.Username != "":
+		return m.Title + " (@" + m.Username + ")"
+	case m.Title != "":
+		return m.Title
 	case m.FirstName != "" && m.Username != "":
 		return m.FirstName + " (@" + m.Username + ")"
 	case m.FirstName != "":

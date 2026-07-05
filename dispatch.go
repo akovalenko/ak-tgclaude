@@ -287,9 +287,14 @@ func (d *Dispatcher) recordUserTurnAs(m *Message, text string, meta []Transcript
 	if d.transcripts == nil {
 		return
 	}
+	// meta.json identity describes the CHAT: a group is named by its own title/handle
+	// (per-speaker authorship already rides in the record's User/Name/Username fields),
+	// a private chat by its single partner.
 	var ident *ChatIdentity
-	if m.From != nil {
-		ident = &ChatIdentity{Username: m.From.Username, FirstName: m.From.FirstName}
+	if m.Chat.isGroup() {
+		ident = &ChatIdentity{Type: m.Chat.Type, Title: m.Chat.Title, Username: m.Chat.Username}
+	} else if m.From != nil {
+		ident = &ChatIdentity{Type: m.Chat.Type, Username: m.From.Username, FirstName: m.From.FirstName}
 	}
 	rec := TranscriptRecord{
 		MsgID:    m.MessageID,

@@ -74,17 +74,30 @@ type TranscriptAttach struct {
 	Mime string `json:"mime,omitempty"`
 }
 
-// ChatIdentity is who the chat is, captured from incoming user messages so the
-// owner can tell a numeric chat_id apart from a person. Set on user appends only
-// (the bot side carries no user identity).
+// ChatIdentity is who the chat is, captured from an incoming message so the owner
+// can tell a numeric chat_id apart from a person or a group. Set on user appends
+// only (the bot side carries no chat identity). It describes the CHAT, not the turn's
+// author: for a PRIVATE chat that is the single partner (FirstName + @Username from
+// the sender); for a GROUP it is the group itself (Title + @Username from the chat),
+// while per-turn authorship lives in each record's User/Name/Username instead. The
+// group and private field sets are mutually exclusive — a private ident leaves Title
+// empty, a group ident leaves FirstName empty — so writing all four to meta.json
+// cleanly overwrites either shape (self-healing a legacy group meta that still holds
+// the last speaker's name).
 type ChatIdentity struct {
-	Username  string
-	FirstName string
+	Type      string // telegram chat type: "private" / "group" / "supergroup"
+	Username  string // @handle without @: partner (private) or public group (may be empty)
+	FirstName string // partner's first name — private chats only
+	Title     string // group title — group chats only
 }
 
 // transcriptMeta is the per-chat meta.json: identity plus first/last-seen and
-// per-role counts, so a reader orients on a chat without scanning its day-files.
+// per-role counts, so a reader orients on a chat without scanning its day-files. For
+// a group Title/Type name the group and FirstName is empty; for a private chat
+// Username/FirstName name the partner and Title is empty (see ChatIdentity).
 type transcriptMeta struct {
+	Type      string    `json:"type,omitempty"`
+	Title     string    `json:"title,omitempty"`
 	Username  string    `json:"username,omitempty"`
 	FirstName string    `json:"first_name,omitempty"`
 	FirstSeen time.Time `json:"first_seen"`
@@ -161,6 +174,8 @@ func (s *TranscriptStore) updateMeta(dir string, rec TranscriptRecord, ident *Ch
 		m.BotCount++
 	}
 	if ident != nil {
+		m.Type = ident.Type
+		m.Title = ident.Title
 		m.Username = ident.Username
 		m.FirstName = ident.FirstName
 	}
