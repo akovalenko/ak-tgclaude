@@ -284,7 +284,12 @@ func (c *Client) SendDocument(ctx context.Context, r Route, path, filename, capt
 	if silent {
 		_ = mw.WriteField("disable_notification", "true")
 	}
-	part, err := mw.CreateFormFile("document", filename)
+	// The filename lands in the part's Content-Disposition header. mime/multipart
+	// only escapes " and \, so a CR/LF would pass through and could inject a second
+	// form field (e.g. a chat_id retargeting the route). The name is model- or
+	// user-supplied (a send_document display name, a spilled snippet name, an
+	// echoed incoming name), so strip control chars here, at the sink.
+	part, err := mw.CreateFormFile("document", stripControl(filename))
 	if err != nil {
 		return 0, err
 	}

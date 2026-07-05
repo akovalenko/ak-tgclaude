@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"unicode"
 )
 
 // Attachment is an incoming file the dispatcher saved into the responder's
@@ -109,13 +110,36 @@ func (d *Dispatcher) fetchIncoming(ctx context.Context, spec *incomingSpec, msgI
 		os.Remove(dest)
 		return nil, fmt.Errorf("attachment exceeds the %d-byte cap", limit)
 	}
-	return &Attachment{Path: dest, Filename: name, MimeType: spec.MimeType, Size: written}, nil
+	return &Attachment{Path: dest, Filename: name, MimeType: stripControl(spec.MimeType), Size: written}, nil
+}
+
+// stripControl removes control characters and the Unicode line/paragraph
+// separators from s. Names and MIME types arrive from outside (an incoming
+// Telegram file's name/mime, or a model-chosen send name) and land in sinks that
+// treat a newline as a delimiter: the prompt preamble (where a \n would break out
+// of the announced-file line into the instruction zone) and the sendDocument
+// multipart header (where a CRLF could inject a second form field — e.g. a
+// chat_id that retargets the pinned route). Dropping these — while keeping
+// spaces, punctuation, and non-ASCII — neutralizes both without rejecting a
+// legitimate name.
+func stripControl(s string) string {
+	return strings.Map(func(r rune) rune {
+		// unicode.IsControl covers C0/C1 (incl. \n, \r, \t, DEL); U+2028/U+2029 are the
+		// Unicode line/paragraph separators (Zl/Zp, not control) a model could read as a
+		// newline.
+		if unicode.IsControl(r) || r == '\u2028' || r == '\u2029' {
+			return -1
+		}
+		return r
+	}, s)
 }
 
 // sanitizeFilename reduces an untrusted Telegram file name to a bare, safe
-// basename: it strips any directory components (defeating path traversal), drops
-// the "."/".." specials, and neutralizes stray separators. The result is only
-// ever used as the tail of a <msgid>-<name> file inside the incoming dir.
+// basename: it strips any directory components (defeating path traversal), the
+// "."/".." specials, stray separators, and control characters (stripControl —
+// so a \n cannot smuggle a line into the prompt preamble that announces the
+// file). The result is only ever used as the tail of a <msgid>-<name> file
+// inside the incoming dir.
 func sanitizeFilename(name string) string {
 	name = filepath.Base(strings.TrimSpace(name))
 	name = strings.TrimSpace(name)
@@ -124,7 +148,7 @@ func sanitizeFilename(name string) string {
 	}
 	name = strings.ReplaceAll(name, "/", "_")
 	name = strings.ReplaceAll(name, `\`, "_")
-	return name
+	return stripControl(name)
 }
 
 // humanBytes renders a byte count as a compact human size (B/KB/MB/GB).

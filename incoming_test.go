@@ -35,6 +35,28 @@ func TestSanitizeFilename(t *testing.T) {
 			t.Errorf("sanitizeFilename(%q) = %q still has a separator", in, s)
 		}
 	}
+	// Control chars (and the Unicode line separators) are dropped, so a name cannot
+	// smuggle a newline into the prompt preamble that announces the incoming file.
+	if got := sanitizeFilename("report\n\r\tinjected.pdf"); got != "reportinjected.pdf" {
+		t.Errorf("control chars not stripped: %q", got)
+	}
+	if got := sanitizeFilename("a\u2028b\u2029c.txt"); got != "abc.txt" {
+		t.Errorf("unicode separators not stripped: %q", got)
+	}
+	// A name that is only control chars sanitizes to empty (caller falls back).
+	if got := sanitizeFilename("\n\t\r"); got != "" {
+		t.Errorf("all-control name should be empty, got %q", got)
+	}
+}
+
+func TestStripControl(t *testing.T) {
+	// Spaces, punctuation, and non-ASCII survive; only control chars go.
+	if got := stripControl("Отчёт за июль 2026 (v2).pdf"); got != "Отчёт за июль 2026 (v2).pdf" {
+		t.Errorf("stripControl mangled a legitimate name: %q", got)
+	}
+	if got := stripControl("x\ny\r\nz"); got != "xyz" {
+		t.Errorf("CR/LF not stripped: %q", got)
+	}
 }
 
 func TestHumanBytes(t *testing.T) {
