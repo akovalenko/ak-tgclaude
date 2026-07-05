@@ -126,6 +126,44 @@ func TestClientSetMyCommands(t *testing.T) {
 	}
 }
 
+func TestClientGetMe(t *testing.T) {
+	var gotPath string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		io.WriteString(w, `{"ok":true,"result":{"id":7,"username":"MyBot"}}`)
+	}))
+	defer srv.Close()
+
+	c := &Client{Token: "T", BaseURL: srv.URL, HTTP: srv.Client()}
+	me, err := c.GetMe(context.Background())
+	if err != nil {
+		t.Fatalf("GetMe: %v", err)
+	}
+	if gotPath != "/botT/getMe" {
+		t.Errorf("path = %q", gotPath)
+	}
+	if me.ID != 7 || me.Username != "MyBot" {
+		t.Errorf("me = %+v", me)
+	}
+}
+
+func TestChatIsGroup(t *testing.T) {
+	for _, tc := range []struct {
+		typ  string
+		want bool
+	}{
+		{"group", true},
+		{"supergroup", true},
+		{"private", false},
+		{"channel", false},
+		{"", false},
+	} {
+		if got := (Chat{Type: tc.typ}).isGroup(); got != tc.want {
+			t.Errorf("Chat{Type:%q}.isGroup() = %v, want %v", tc.typ, got, tc.want)
+		}
+	}
+}
+
 func TestClientSendDocument(t *testing.T) {
 	var fileContent, fileName, chatID string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

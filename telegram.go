@@ -87,8 +87,14 @@ func largestPhoto(sizes []PhotoSize) *PhotoSize {
 
 // Chat identifies the conversation an update belongs to.
 type Chat struct {
-	ID int64 `json:"id"`
+	ID   int64  `json:"id"`
+	Type string `json:"type"` // "private", "group", "supergroup", "channel"
 }
+
+// isGroup reports whether the chat is a (super)group. An empty Type — the zero
+// value Telegram never actually sends, but tests and channel posts leave unset —
+// is treated as NOT a group, so the private path is the safe default.
+func (c Chat) isGroup() bool { return c.Type == "group" || c.Type == "supergroup" }
 
 // User is the sender of a message. id/username are used for logging and access
 // control; first_name feeds the transcript store's per-chat meta.json (so the owner
@@ -240,6 +246,21 @@ func (c *Client) SetMyCommands(ctx context.Context, commands []BotCommand) error
 		return err
 	}
 	return checkOK(status, body)
+}
+
+// GetMe returns the bot's own account (getMe). Used at startup to learn the
+// bot's @username, which @mention addressing in groups matches against. An empty
+// payload object — getMe takes no arguments.
+func (c *Client) GetMe(ctx context.Context) (*User, error) {
+	status, body, err := c.postJSON(ctx, "getMe", map[string]any{})
+	if err != nil {
+		return nil, err
+	}
+	u, err := decodeEnvelope[User](status, body)
+	if err != nil {
+		return nil, err
+	}
+	return &u, nil
 }
 
 // SendChatAction shows a chat action (e.g. "typing") in chat. Telegram clears

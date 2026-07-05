@@ -62,6 +62,7 @@ type Dispatcher struct {
 	helpParseMode    string // "" (plain) or "HTML" for the help reply
 	bill             bool   // send the run's dollar cost as a "$n.nnn" message after each answer
 	debug            bool   // log the responder's full final text after each run (troubleshooting)
+	botUsername      string // own @username (lowercased, no @) from getMe; "" => @mention addressing disabled
 
 	// persona injected via --append-system-prompt on a chat's FIRST spawn (frozen
 	// for the session): the composed default, plus each configured user's resolved
@@ -855,6 +856,15 @@ func runDispatch(args []string) error {
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+
+	// Learn the bot's own @username for @mention addressing in groups (best-effort:
+	// on failure /do still addresses the bot, so @mention detection just stays off).
+	if me, merr := client.GetMe(ctx); merr != nil {
+		log.Printf("ak-tgclaude: getMe failed: %v — @mention addressing disabled (use /do)", merr)
+	} else if me.Username != "" {
+		d.botUsername = strings.ToLower(me.Username)
+		log.Printf("ak-tgclaude: bot @%s", me.Username)
+	}
 
 	// Publish the command menu (best-effort: the bot works without it).
 	if err := client.SetMyCommands(ctx, botCommands); err != nil {
