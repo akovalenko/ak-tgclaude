@@ -677,18 +677,16 @@ func resolveRuntimeBase(configured string) string {
 }
 
 // runDispatch loads configuration and runs the dispatcher loop until SIGINT/
-// SIGTERM.
-func runDispatch(args []string) {
+// SIGTERM. Failures are returned for main to report and exit-code.
+func runDispatch(args []string) error {
 	cfg, err := loadConfig(args)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "ak-tgclaude: dispatch: %v\n", err)
-		os.Exit(2)
+		return usageError{err}
 	}
 
 	store, err := LoadSessionStore(cfg.SessionDir(), cfg.EphemeralSessions)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "ak-tgclaude: dispatch: %v\n", err)
-		os.Exit(1)
+		return err
 	}
 
 	// The transcript store (nil unless the feature is on). Created here so it can be
@@ -697,8 +695,7 @@ func runDispatch(args []string) {
 	var transcripts *TranscriptStore
 	if root := cfg.TranscriptRoot(); root != "" {
 		if err := os.MkdirAll(root, 0o700); err != nil {
-			fmt.Fprintf(os.Stderr, "ak-tgclaude: dispatch: transcript dir %s: %v\n", root, err)
-			os.Exit(1)
+			return fmt.Errorf("transcript dir %s: %w", root, err)
 		}
 		transcripts = NewTranscriptStore(root)
 		log.Printf("ak-tgclaude: transcripts on, root %s (owner_reads_all=%v)", root, cfg.OwnerReadsAllTranscripts())
@@ -709,8 +706,7 @@ func runDispatch(args []string) {
 	if p := cfg.UsageLog; p != "" {
 		usage, err = NewUsageLog(p)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "ak-tgclaude: dispatch: %v\n", err)
-			os.Exit(1)
+			return err
 		}
 		log.Printf("ak-tgclaude: usage log on, path %s", p)
 	}
@@ -724,8 +720,7 @@ func runDispatch(args []string) {
 	uploader := newUploader(cfg.UploadCommand, cfg.UploadThresholdMB, cfg.UploadMaxMB)
 	mcp, err := newMCPServer(client, version, cfg.Debug, uploader)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "ak-tgclaude: dispatch: %v\n", err)
-		os.Exit(1)
+		return err
 	}
 	defer mcp.Close()
 	mcp.transcripts = transcripts // bot-side transcript append happens in the MCP send path
@@ -733,8 +728,7 @@ func runDispatch(args []string) {
 
 	cwd, ephemeral, err := resolveResponderCwd(cfg)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "ak-tgclaude: dispatch: %v\n", err)
-		os.Exit(1)
+		return err
 	}
 	// A static workdir/project is a pure function of canon: reset its contents on
 	// every start so a removed wire-skill or stale scaffold file never lingers.
@@ -743,8 +737,7 @@ func runDispatch(args []string) {
 	// there is nothing to reset.)
 	if cfg.Workdir != "" {
 		if err := resetDirContents(cwd); err != nil {
-			fmt.Fprintf(os.Stderr, "ak-tgclaude: dispatch: %v\n", err)
-			os.Exit(1)
+			return err
 		}
 		// Mark the static project trusted once so Claude Code honors its
 		// permissions.allow (and registers Grep/Glob on a vanilla build). Non-fatal:
@@ -756,8 +749,7 @@ func runDispatch(args []string) {
 	}
 	outboxRoot := filepath.Join(cwd, "outbox")
 	if err := os.MkdirAll(outboxRoot, 0o700); err != nil {
-		fmt.Fprintf(os.Stderr, "ak-tgclaude: dispatch: %v\n", err)
-		os.Exit(1)
+		return err
 	}
 
 	var resp Responder
@@ -772,8 +764,7 @@ func runDispatch(args []string) {
 		// parent is not writable) and injected into the responder's env.
 		cacheDir := filepath.Join(cfg.StateDir, "cache")
 		if err := os.MkdirAll(cacheDir, 0o700); err != nil {
-			fmt.Fprintf(os.Stderr, "ak-tgclaude: dispatch: %v\n", err)
-			os.Exit(1)
+			return err
 		}
 		if err := materializeScaffold(cwd, scaffoldParams{
 			CacheDir:       cacheDir,
@@ -794,16 +785,14 @@ func runDispatch(args []string) {
 			BangBug:        cfg.BangBug,
 			HookLogFile:    cfg.hookLogFile(),
 		}); err != nil {
-			fmt.Fprintf(os.Stderr, "ak-tgclaude: dispatch: %v\n", err)
-			os.Exit(1)
+			return err
 		}
 		// Fail fast if the selected agent was not materialized (e.g. a custom
 		// --agent name with nothing shipping it): otherwise `claude -p --agent`
 		// would silently find no agent. The built-in default always exists.
 		agentFile := filepath.Join(cwd, ".claude", "agents", cfg.Agent+".md")
 		if _, err := os.Stat(agentFile); err != nil {
-			fmt.Fprintf(os.Stderr, "ak-tgclaude: dispatch: agent %q not materialized (%s); use the default %q (custom agents are not wired yet)\n", cfg.Agent, agentFile, defaultAgent)
-			os.Exit(1)
+			return fmt.Errorf("agent %q not materialized (%s); use the default %q (custom agents are not wired yet)", cfg.Agent, agentFile, defaultAgent)
 		}
 		resp = &claudeResponder{agent: cfg.Agent, cwd: cwd, project: cfg.Project, cacheDir: cacheDir, debug: cfg.Debug, claudeArgs: cfg.ClaudeArgs, extraTools: cfg.Tools}
 	}
@@ -837,8 +826,7 @@ func runDispatch(args []string) {
 	// a failure here is unexpected — fail fast rather than mid-run.
 	defaultPersona, err := loadPolicies(cfg.Policies)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "ak-tgclaude: dispatch: composing default persona: %v\n", err)
-		os.Exit(1)
+		return fmt.Errorf("composing default persona: %w", err)
 	}
 	personaByUser := make(map[int64]string, len(cfg.overrides))
 	selectorsByUser := make(map[int64][]string, len(cfg.overrides))
@@ -846,8 +834,7 @@ func runDispatch(args []string) {
 		sel := cfg.PersonaSelectors(uid)
 		p, perr := loadPolicies(sel)
 		if perr != nil {
-			fmt.Fprintf(os.Stderr, "ak-tgclaude: dispatch: composing persona for user %d: %v\n", uid, perr)
-			os.Exit(1)
+			return fmt.Errorf("composing persona for user %d: %w", uid, perr)
 		}
 		personaByUser[uid] = string(p)
 		selectorsByUser[uid] = sel
@@ -923,9 +910,9 @@ func runDispatch(args []string) {
 		}
 	}
 	if runErr != nil && !errors.Is(runErr, context.Canceled) {
-		fmt.Fprintf(os.Stderr, "ak-tgclaude: dispatch: %v\n", runErr)
-		os.Exit(1)
+		return runErr
 	}
+	return nil
 }
 
 // resolveResponderCwd returns the responder launch dir and whether it is

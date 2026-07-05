@@ -3,6 +3,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"os"
 )
@@ -31,22 +32,31 @@ commands:
   version    print version and exit
 `
 
+// usageError marks a failure caused by bad flags/configuration rather than a
+// runtime fault: main exits 2 for it (the flag-package convention), 1 otherwise.
+type usageError struct{ err error }
+
+func (e usageError) Error() string { return e.err.Error() }
+func (e usageError) Unwrap() error { return e.err }
+
 func main() {
 	if len(os.Args) < 2 {
 		fmt.Fprint(os.Stderr, usage)
 		os.Exit(2)
 	}
-	switch cmd := os.Args[1]; cmd {
+	cmd := os.Args[1]
+	var err error
+	switch cmd {
 	case "dispatch":
-		runDispatch(os.Args[2:])
+		err = runDispatch(os.Args[2:])
 	case "hook":
-		runHook(os.Args[2:])
+		err = runHook(os.Args[2:])
 	case "scaffold":
-		runScaffold(os.Args[2:])
+		err = runScaffold(os.Args[2:])
 	case "clear":
-		runClear(os.Args[2:])
+		err = runClear(os.Args[2:])
 	case "deploy":
-		runDeploy(os.Args[2:])
+		err = runDeploy(os.Args[2:])
 	case "version":
 		fmt.Println("ak-tgclaude " + version)
 	case "-h", "--help", "help":
@@ -54,5 +64,15 @@ func main() {
 	default:
 		fmt.Fprintf(os.Stderr, "ak-tgclaude: unknown command %q\n\n%s", cmd, usage)
 		os.Exit(2)
+	}
+	// The single exit point for every subcommand: run* report failures as errors
+	// (a usageError for config/flag mistakes) instead of exiting in place.
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "ak-tgclaude: %s: %v\n", cmd, err)
+		var ue usageError
+		if errors.As(err, &ue) {
+			os.Exit(2)
+		}
+		os.Exit(1)
 	}
 }

@@ -10,16 +10,15 @@ import (
 // does not reprocess the backlog on its next start. The state dir is resolved
 // from the config file (--config) or the default; no bot token is needed. This
 // is the one-shot alternative to running the dispatcher with ephemeral_sessions.
-func runClear(args []string) {
+// Failures are returned for main to report and exit-code.
+func runClear(args []string) error {
 	cfg, err := parseConfig(args)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "ak-tgclaude: clear: %v\n", err)
-		os.Exit(2)
+		return usageError{err}
 	}
 	store, err := LoadSessionStore(cfg.SessionDir(), false)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "ak-tgclaude: clear: %v\n", err)
-		os.Exit(1)
+		return err
 	}
 	for _, p := range store.Outboxes() {
 		if err := os.RemoveAll(p); err != nil {
@@ -28,8 +27,8 @@ func runClear(args []string) {
 	}
 	n, err := store.ClearAll()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "ak-tgclaude: clear: %v\n", err)
-		os.Exit(1)
+		return err
 	}
 	fmt.Printf("cleared %d chat→session binding(s) in %s\n", n, cfg.SessionDir())
+	return nil
 }

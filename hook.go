@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -11,18 +12,19 @@ import (
 	"strings"
 )
 
-// runHook dispatches the hook sub-mode. Only "pretooluse" exists.
-func runHook(args []string) {
+// runHook dispatches the hook sub-mode. Only "pretooluse" exists; it exits on
+// its own (the decision JSON + exit status IS the hook protocol), so only the
+// sub-mode dispatch reports errors back to main.
+func runHook(args []string) error {
 	if len(args) == 0 {
-		fmt.Fprintln(os.Stderr, "ak-tgclaude: hook: missing sub-mode (want: pretooluse)")
-		os.Exit(2)
+		return usageError{errors.New("missing sub-mode (want: pretooluse)")}
 	}
 	switch args[0] {
 	case "pretooluse":
 		runHookPreToolUse(args[1:])
+		return nil
 	default:
-		fmt.Fprintf(os.Stderr, "ak-tgclaude: hook: unknown sub-mode %q (want: pretooluse)\n", args[0])
-		os.Exit(2)
+		return usageError{fmt.Errorf("unknown sub-mode %q (want: pretooluse)", args[0])}
 	}
 }
 

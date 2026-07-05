@@ -3,6 +3,7 @@ package main
 import (
 	"embed"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"io/fs"
@@ -1048,26 +1049,22 @@ func shellQuote(s string) string {
 // settings.local.json, and run `claude` there by hand to observe the sandbox. It
 // materializes what the dispatcher regenerates on startup (minus the contents
 // reset), so point --workdir at a throwaway dir to inspect without touching a live
-// bot's project.
-func runScaffold(args []string) {
+// bot's project. Failures are returned for main to report and exit-code.
+func runScaffold(args []string) error {
 	cfg, err := parseConfig(args)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "ak-tgclaude: scaffold: %v\n", err)
-		os.Exit(2)
+		return usageError{err}
 	}
 	if cfg.Workdir == "" {
-		fmt.Fprintln(os.Stderr, "ak-tgclaude: scaffold: --workdir is required (its project/ is materialized for inspection)")
-		os.Exit(2)
+		return usageError{errors.New("--workdir is required (its project/ is materialized for inspection)")}
 	}
 	project := filepath.Join(cfg.Workdir, "project")
 	if err := os.MkdirAll(project, 0o700); err != nil {
-		fmt.Fprintf(os.Stderr, "ak-tgclaude: scaffold: %v\n", err)
-		os.Exit(1)
+		return err
 	}
 	outboxRoot := filepath.Join(project, "outbox")
 	if err := os.MkdirAll(outboxRoot, 0o700); err != nil {
-		fmt.Fprintf(os.Stderr, "ak-tgclaude: scaffold: %v\n", err)
-		os.Exit(1)
+		return err
 	}
 	if err := materializeScaffold(project, scaffoldParams{
 		CacheDir:       filepath.Join(cfg.StateDir, "cache"),
@@ -1087,8 +1084,7 @@ func runScaffold(args []string) {
 		BangBug:        cfg.BangBug,
 		HookLogFile:    cfg.hookLogFile(),
 	}); err != nil {
-		fmt.Fprintf(os.Stderr, "ak-tgclaude: scaffold: %v\n", err)
-		os.Exit(1)
+		return err
 	}
 
 	fmt.Printf("ak-tgclaude: scaffold materialized\n")
@@ -1124,4 +1120,5 @@ func runScaffold(args []string) {
 	fmt.Printf("  cd %s\n", project)
 	fmt.Printf("  AK_TGCLAUDE_OUTBOX=%s claude -p --setting-sources project --permission-mode dontAsk \\\n", outboxRoot)
 	fmt.Printf("    --settings '%s'%s 'hello'\n", buildInvocationSettings(outboxRoot, "", "", false), agentFlag)
+	return nil
 }
