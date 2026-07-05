@@ -247,6 +247,50 @@ func attachMeta(m *Message, a *Attachment) []TranscriptAttach {
 	return []TranscriptAttach{{Kind: kind, Name: a.Filename, Size: a.Size, Mime: a.MimeType}}
 }
 
+// attachMetaDeclared renders a message's incoming attachment as transcript
+// metadata from its DECLARED fields (no download), or nil when it carries none.
+// Used for group chatter we record but do not fetch — the size/name are the
+// sender's declared values, not the fetched file's.
+func attachMetaDeclared(m *Message) []TranscriptAttach {
+	s := incomingFile(m)
+	if s == nil {
+		return nil
+	}
+	kind := "document"
+	if m.Document == nil && len(m.Photo) > 0 {
+		kind = "photo"
+	}
+	return []TranscriptAttach{{Kind: kind, Name: s.FileName, Size: s.FileSize, Mime: s.MimeType}}
+}
+
+// recordUserTurn appends one incoming user turn to the transcript (a no-op when
+// the feature is off). meta is the attachment metadata to record (from the
+// fetched Attachment on the spawn path, or declared for chatter we don't fetch).
+// User/Name attribute the turn — essential in a group, where one chat mixes many
+// speakers. The dispatcher is the only writer (it holds the trusted chat_id).
+func (d *Dispatcher) recordUserTurn(m *Message, meta []TranscriptAttach) {
+	if d.transcripts == nil {
+		return
+	}
+	var ident *ChatIdentity
+	if m.From != nil {
+		ident = &ChatIdentity{Username: m.From.Username, FirstName: m.From.FirstName}
+	}
+	rec := TranscriptRecord{
+		MsgID:   m.MessageID,
+		TS:      messageSentAt(m),
+		Role:    "user",
+		ReplyTo: replyToID(m),
+		Text:    incomingText(m),
+		Attach:  meta,
+		User:    userID(m.From),
+		Name:    userName(m.From),
+	}
+	if err := d.transcripts.Append(m.Chat.ID, rec, ident); err != nil {
+		log.Printf("ak-tgclaude: transcript(user) chat=%d msg=%d: %v", m.Chat.ID, m.MessageID, err)
+	}
+}
+
 // handleUpdate processes one update: /clear resets the chat's session; anything
 // else is answered by a responder whose outbound messages are delivered to the
 // chat (replying to the incoming message).
@@ -256,12 +300,20 @@ func (d *Dispatcher) handleUpdate(ctx context.Context, u Update) {
 	}
 	m := u.Message
 	route := Route{ChatID: m.Chat.ID, ReplyTo: m.MessageID}
+	group := m.Chat.isGroup()
 
-	// Access gate (runs before any command or the responder). A user not on the
-	// whitelist gets a "no access for id N" line on /start and /help — so they can
-	// report the id to be whitelisted — and is otherwise silently ignored (the bot
-	// does not talk to strangers). The id in the reply is that user's own.
+	// Access gate (runs before any command or the responder). A sender not on the
+	// whitelist is not answered. In a GROUP their message is still recorded (privacy-off
+	// chatter is context for recall) but the bot stays silent — no reply, so it leaks
+	// neither its presence nor the gate to strangers. In a PRIVATE chat, /start and
+	// /help get a "no access for id N" line so the person can report the id to be
+	// whitelisted.
 	if uid := userID(m.From); !d.authz.Allowed(uid) {
+		if group {
+			d.recordUserTurn(m, attachMetaDeclared(m))
+			log.Printf("ak-tgclaude: denied(group) chat=%d user=%s msg=%d", m.Chat.ID, userLabel(m.From), m.MessageID)
+			return
+		}
 		if isSlashCommand(m.Text, "help") || isSlashCommand(m.Text, "start") {
 			msg := fmt.Sprintf("no access for id %d", uid)
 			if _, err := d.sender.SendMessage(ctx, route, msg, "", false); err != nil {
@@ -294,6 +346,15 @@ func (d *Dispatcher) handleUpdate(ctx context.Context, u Update) {
 		if _, err := d.sender.SendMessage(ctx, route, d.helpText, d.helpParseMode, false); err != nil {
 			log.Printf("ak-tgclaude: help %d: %v", m.Chat.ID, err)
 		}
+		return
+	}
+
+	// In a GROUP, a message that is neither a command nor addressed to the bot (an
+	// @mention or /do) is recorded as context but does NOT spawn a responder — the bot
+	// listens to the room without answering every line. Addressed messages fall through
+	// to the spawn path below, which records them there (so no double-record here).
+	if group && !d.addressed(m) {
+		d.recordUserTurn(m, attachMetaDeclared(m))
 		return
 	}
 
@@ -350,25 +411,10 @@ func (d *Dispatcher) handleUpdate(ctx context.Context, u Update) {
 	}
 
 	// Record the user's turn BEFORE spawning the responder: so this turn is itself
-	// recallable, and so the chat's transcript subdir exists for the read scope. The
-	// dispatcher is the only writer (it holds the trusted chat_id and both sides).
-	if d.transcripts != nil {
-		var ident *ChatIdentity
-		if m.From != nil {
-			ident = &ChatIdentity{Username: m.From.Username, FirstName: m.From.FirstName}
-		}
-		rec := TranscriptRecord{
-			MsgID:   m.MessageID,
-			TS:      messageSentAt(m),
-			Role:    "user",
-			ReplyTo: replyToID(m),
-			Text:    incomingText(m),
-			Attach:  attachMeta(m, attach),
-		}
-		if err := d.transcripts.Append(m.Chat.ID, rec, ident); err != nil {
-			log.Printf("ak-tgclaude: transcript(user) chat=%d msg=%d: %v", m.Chat.ID, m.MessageID, err)
-		}
-	}
+	// recallable, and so the chat's transcript subdir exists for the read scope. Uses
+	// the fetched attachment's metadata (exact name/size). Covers a private turn and an
+	// addressed group turn alike; unaddressed group chatter was recorded at the gate.
+	d.recordUserTurn(m, attachMeta(m, attach))
 
 	// Mint this invocation's capability token: the MCP server resolves the route
 	// (chat/reply) from it, so the responder's send_* calls carry no chat_id and
@@ -632,6 +678,19 @@ func (d *Dispatcher) personaForChat(chatID int64) persona {
 		return p
 	}
 	return d.groupDefaultPersona
+}
+
+// userName renders a message sender for transcript attribution: the @username
+// when present, else the first name, else "". Distinct from userLabel (which is
+// for logs and includes the numeric id).
+func userName(u *User) string {
+	if u == nil {
+		return ""
+	}
+	if u.Username != "" {
+		return u.Username
+	}
+	return u.FirstName
 }
 
 // userLabel renders a message sender for logs: the numeric id, plus @username

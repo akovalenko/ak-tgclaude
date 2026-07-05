@@ -40,6 +40,13 @@ type TranscriptRecord struct {
 	ReplyTo int64              `json:"reply_to,omitempty"`
 	Text    string             `json:"text"`
 	Attach  []TranscriptAttach `json:"attach,omitempty"`
+	// User/Name identify the AUTHOR of a turn — needed in a GROUP transcript, where one
+	// chat carries many speakers and meta.json holds only the latest. Omitted (0/"") on
+	// the private side, where the single chat partner is implied, so private-chat lines
+	// keep their old shape. User is a Telegram user id. Declared after MsgID so the
+	// recall grep's `{"msg_id":N,` anchor is unaffected.
+	User int64  `json:"user,omitempty"`
+	Name string `json:"name,omitempty"`
 }
 
 // TranscriptAttach records that a turn carried a file — metadata only, never the

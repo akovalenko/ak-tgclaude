@@ -837,3 +837,93 @@ func TestAddressed(t *testing.T) {
 		}
 	}
 }
+
+func TestHandleGroupUnauthorizedRecordsButSilent(t *testing.T) {
+	resp := &fakeResponder{}
+	sender := &fakeSender{}
+	d := newTestDispatcher(t, resp, sender)
+	d.authz = newAllowList(nil) // deny everyone
+	root := t.TempDir()
+	d.transcripts = NewTranscriptStore(root)
+	sent := time.Date(2026, 7, 4, 12, 0, 0, 0, time.Local)
+	up := Update{Message: &Message{
+		MessageID: 100, Text: "hello room", Date: sent.Unix(),
+		Chat: Chat{ID: -100, Type: "supergroup"},
+		From: &User{ID: 5, Username: "stranger", FirstName: "S"},
+	}}
+	d.handleUpdate(context.Background(), up)
+	if resp.called {
+		t.Errorf("an unauthorized group message must not spawn a responder")
+	}
+	if len(sender.snapshot()) != 0 {
+		t.Errorf("an unauthorized group message must get no reply, got %v", sender.snapshot())
+	}
+	lines := readLines(t, filepath.Join(root, "-100", sent.Format("2006-01-02")+".jsonl"))
+	if len(lines) != 1 {
+		t.Fatalf("chatter should still be recorded, got %d lines", len(lines))
+	}
+	var rec TranscriptRecord
+	if err := json.Unmarshal([]byte(lines[0]), &rec); err != nil {
+		t.Fatal(err)
+	}
+	if rec.User != 5 || rec.Name != "stranger" || rec.Text != "hello room" {
+		t.Errorf("group record wrong (author must be attributed): %+v", rec)
+	}
+}
+
+func TestHandleGroupAuthorizedNotAddressedRecordsNoSpawn(t *testing.T) {
+	resp := &fakeResponder{}
+	sender := &fakeSender{}
+	d := newTestDispatcher(t, resp, sender) // openAccess authorizes everyone
+	d.botUsername = "mybot"
+	root := t.TempDir()
+	d.transcripts = NewTranscriptStore(root)
+	sent := time.Date(2026, 7, 4, 12, 0, 0, 0, time.Local)
+	up := Update{Message: &Message{
+		MessageID: 101, Text: "just chatting here", Date: sent.Unix(),
+		Chat: Chat{ID: -100, Type: "supergroup"}, From: &User{ID: 5},
+	}}
+	d.handleUpdate(context.Background(), up)
+	if resp.called {
+		t.Errorf("an unaddressed group message must not spawn a responder")
+	}
+	if len(sender.snapshot()) != 0 {
+		t.Errorf("an unaddressed group message must get no reply")
+	}
+	lines := readLines(t, filepath.Join(root, "-100", sent.Format("2006-01-02")+".jsonl"))
+	if len(lines) != 1 {
+		t.Fatalf("chatter should be recorded, got %d", len(lines))
+	}
+}
+
+func TestHandleGroupAddressedSpawns(t *testing.T) {
+	resp := &fakeResponder{sid: "s1"}
+	d := newTestDispatcher(t, resp, &fakeSender{})
+	d.botUsername = "mybot"
+	d.transcripts = NewTranscriptStore(t.TempDir())
+	up := Update{Message: &Message{
+		MessageID: 102, Text: "@mybot what is X",
+		Chat: Chat{ID: -100, Type: "supergroup"}, From: &User{ID: 5},
+	}}
+	d.handleUpdate(context.Background(), up)
+	if !resp.called {
+		t.Errorf("an @mention in a group must spawn a responder")
+	}
+	if resp.gotReq.Prompt != "@mybot what is X" {
+		t.Errorf("prompt = %q — the mention must not be stripped", resp.gotReq.Prompt)
+	}
+}
+
+func TestHandleGroupDoAddresses(t *testing.T) {
+	resp := &fakeResponder{sid: "s1"}
+	d := newTestDispatcher(t, resp, &fakeSender{})
+	// botUsername empty: /do still addresses the bot (no @mention needed).
+	up := Update{Message: &Message{
+		MessageID: 103, Text: "/do summarize",
+		Chat: Chat{ID: -100, Type: "supergroup"}, From: &User{ID: 5},
+	}}
+	d.handleUpdate(context.Background(), up)
+	if !resp.called {
+		t.Errorf("/do in a group must spawn a responder")
+	}
+}
