@@ -67,6 +67,9 @@ project = "~/code/example-project"
 # denies everyone — the bot answers /start and /help with "no access for id N"
 # (so a user can report the id) and silently ignores everything else. To find
 # your own id, start the bot and send it /start. Also --allow-user (repeatable).
+# In a GROUP this gate is still per-sender: being a member does not authorize you,
+# and the bot answers only an authorized member who @mentions it or uses /do (turn
+# BotFather group privacy OFF so it can see group messages). See the README "Groups".
 # allowed_users = [123456789]
 
 # OPEN ACCESS: allow every Telegram user, no whitelist. DEMO ONLY — exposes the
@@ -167,12 +170,20 @@ project = "~/code/example-project"
 # `ak-tgclaude <cmd> --policy help` prints the built-in catalog and exits.
 # policies = ["normal"]
 
-# Per-user persona overrides, keyed by Telegram user id. An override is layered on
-# top of `policies` ALONG AXES: a fragment that declares an axis EVICTS the default
-# fragment on that same axis, an axis-less one is appended. So with
-# policies = ["strict"], the entry below gives that user norefuse instead of strict.
+# Default persona for GROUP chats (the parallel of `policies` for one-on-one chats),
+# layered on `policies` along axes. In a group the persona is a property of the group,
+# not of whoever speaks first. Empty => groups use the plain `policies` default. Same
+# selectors as `policies`; also --group-policy (repeatable, additive).
+# group_policies = ["norefuse"]
+
+# Persona overrides, keyed by Telegram id. Layered on a base ALONG AXES: a fragment
+# that declares an axis EVICTS the base fragment on that same axis, an axis-less one
+# is appended. The key's SIGN picks the base: a POSITIVE key is a user id (applies in
+# that user's DM, layered on `policies`); a NEGATIVE key is a group chat id (applies
+# in that group, layered on `group_policies`). The two never collide.
 # [policy_overrides]
-# 12345678 = ["norefuse", "introspect"]
+# 12345678 = ["norefuse", "introspect"]        # a user, in their DM: policies + this
+# -1001234567890 = ["introspect"]              # a specific group: group_policies + this
 
 # Owner shortcut: a Telegram user id that is auto-whitelisted (added to
 # allowed_users) AND granted the relaxed owner persona (norefuse + introspect),

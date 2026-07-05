@@ -346,6 +346,54 @@ allowlist (an admin `/allow <id>` mutating persisted state, composing with the
 `no access for id N` id report) can replace the static list without touching the
 routing.
 
+## Groups
+
+The bot works in group chats, not just one-on-one. Add it to a group and, in
+**@BotFather → Bot Settings → Group Privacy, turn privacy OFF** — otherwise
+Telegram only forwards commands and replies-to-the-bot, and the bot cannot see
+(or record) the room's chatter. With privacy off it receives every message; how
+it treats them:
+
+- **Access is still per user id.** The whitelist gates the **sender**
+  (`m.from.id`), never the chat. Being a member of a group the bot is in does
+  **not** authorize you — admission ≠ authorization. An unauthorized member's
+  messages get no reply at all (not even the `no access` line, which would leak
+  the bot's presence and gate to the room); they are only recorded (below).
+- **The bot answers only when addressed.** A group message spawns the responder
+  only if the sender is authorized **and** the message is addressed to the bot —
+  an **@mention** of its username, or the **`/do`** command. Everything else is
+  chatter: recorded, not answered. So the bot listens to the room without
+  reacting to every line. (With a single bot in the group, a bare `/do` is
+  delivered and works; a second bot would need `/do@thisbot`.)
+- **Chatter feeds recall.** Every group message (addressed or not, authorized or
+  not) is appended to the [transcript](#transcripts--recall) when that feature is
+  on, attributed to its author (`user`/`name`). So when an authorized member
+  later addresses the bot, its responder can recall what the room has been
+  discussing. Group support is most useful with `transcripts` on; without it,
+  unaddressed chatter is simply dropped.
+- **`/do` delegates.** `/do <task>` runs the task as the commander's own request.
+  `/do` sent as a **reply** to another message takes that message's content as the
+  task — attributed to its (possibly unauthorized) author, but authorized by the
+  member who typed `/do`, a human-in-the-loop endorsement. The delegated content
+  is framed to the model as **untrusted input**, so a prompt-injection attempt
+  inside a stranger's message can't redirect the bot (the read-only sandbox and
+  the persona hold regardless). A reply whose target carried a file pulls that
+  **file** too (see [transcripts](#transcripts--recall) — the bytes are re-fetched
+  from Telegram, since the transcript keeps only metadata). The bot's answer
+  threads under the original message.
+- **Persona is a property of the group.** The injected persona is chosen by the
+  **chat**, not by whoever speaks first — see [Policy](#policy-persona)
+  (`group_policies` + a negative `policy_overrides` key). A configured owner
+  speaking in a group gets the **group's** persona, not their private owner
+  persona (they keep the latter in a one-on-one chat); they retain access
+  everywhere via the user-id whitelist.
+- **Session is shared per group.** One group is one conversation: all authorized
+  members talk to the same session/context, keyed by the group's chat id.
+
+The group `/do` (and `/clear`) menu is published to the `all_group_chats` scope
+via `setMyCommands`, so clients autocomplete it in groups — this is cosmetic
+only; the user-id gate, not the menu, decides what runs.
+
 ## Token isolation
 
 The Telegram **bot token** is the asset to protect: whoever holds it controls the
@@ -536,15 +584,37 @@ policies = ["strict"]
 12345678 = ["norefuse", "introspect"]   # this user: norefuse (evicts strict) + introspect
 ```
 
-The persona freezes into the chat's session at its first spawn, so in a **group**
-chat the first user to trigger a spawn sets it until the session resets; in a **DM**
-the user and chat coincide, so the override applies cleanly.
+A **positive** `policy_overrides` key is a Telegram user id; the override applies in
+that user's one-on-one chat, and the persona freezes into the session at its first
+spawn.
+
+**Group personas.** In a group the persona is a property of the **group**, not of
+whoever speaks first. `group_policies` (config) / `--group-policy` is the default
+group persona — layered on `policies` along axes exactly like a per-user override —
+and a **negative** `policy_overrides` key is a specific group's chat id, layered on
+that group base. User ids are positive and group chat ids negative, so both live in
+one `[policy_overrides]` table without colliding:
+
+```toml
+policies       = ["strict"]     # private default
+group_policies = ["norefuse"]   # default in any group (norefuse evicts strict on the refusal axis)
+
+[policy_overrides]
+12345678       = ["introspect"]   # a user (positive id): strict + introspect, in their DM
+-1001234567890 = ["introspect"]   # one group (negative id): norefuse + introspect, for that group
+```
+
+Because the group persona is keyed by chat, it is deterministic regardless of who
+speaks first (the session and persona freeze on the group's first spawn, but on the
+group's persona, not the first speaker's).
 
 **Owner shortcut.** `owner = <id>` (or `--owner`) names a Telegram user id that is
 **auto-whitelisted** and granted the relaxed **owner persona** (`norefuse` +
 `introspect`), unless it has an explicit `policy_overrides` entry. One knob for
 "owner = admin" — the id must be supplied, since the Bot API's `getMe` does not
-reveal the bot's owner.
+reveal the bot's owner. This is a positive (user) key, so it applies in the owner's
+one-on-one chat; an owner speaking in a **group** gets the group persona, not the
+owner persona (access is retained everywhere via the whitelist).
 
 **Checking who got what.** Run with `--debug` to see the persona each account
 resolves to: on a chat's **first spawn** the dispatcher logs the selector label (e.g.
