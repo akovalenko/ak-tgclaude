@@ -19,10 +19,11 @@ func TestHTMLToMarkdown(t *testing.T) {
 		{"strong", "<strong>x</strong>", "**x**"},
 		{"italic", "<i>x</i>", "*x*"},
 		{"em", "<em>x</em>", "*x*"},
-		{"strike", "<s>x</s>", "~~x~~"},                     // EMPIRICAL: GFM strikethrough
-		{"del", "<del>x</del>", "~~x~~"},                    // EMPIRICAL
-		{"underline drop", "<u>x</u>", "x"},                 // EMPIRICAL: no md underline
-		{"spoiler drop", "<tg-spoiler>x</tg-spoiler>", "x"}, // EMPIRICAL: no md spoiler
+		{"strike", "<s>x</s>", "~~x~~"},                     // GFM strikethrough — confirmed
+		{"del", "<del>x</del>", "~~x~~"},                    //
+		{"underline raw html", "<u>x</u>", "<u>x</u>"},      // raw <u> renders as underline — confirmed
+		{"ins to u", "<ins>y</ins>", "<u>y</u>"},            // <ins> normalised to the confirmed <u>
+		{"spoiler drop", "<tg-spoiler>x</tg-spoiler>", "x"}, // no spoiler in md preview — kept as plain text
 		{"span unwrap", "<span>x</span>", "x"},
 		{"tg-emoji fallback", `<tg-emoji emoji-id="5">👍</tg-emoji>`, "👍"},
 

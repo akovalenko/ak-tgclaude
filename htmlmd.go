@@ -9,10 +9,13 @@ import (
 // htmlToMarkdown converts a Telegram-HTML fragment (the whitelist subset that
 // htmlcheck.go enforces) into Markdown for a spilled .md document. The target is
 // NOT CommonMark in the abstract but Telegram's own rendering of an attached .md
-// file — a CommonMark/GFM-flavoured renderer with possible deviations. Anything
-// marked EMPIRICAL below is a mapping that standard Markdown cannot express and
-// must be checked against the real Telegram render (send a probe .md via
-// send.sh doc), then adjusted here and in the test table.
+// file — a CommonMark/GFM-flavoured renderer. Its behaviour was verified against
+// the real render with a probe document; the deviations that shaped the mapping:
+// GFM strikethrough (~~x~~) works; __x__ renders as BOLD (not underline), so an
+// <u> is passed through as raw HTML, which the preview honours as underline; no
+// spoiler syntax works (neither ||…|| nor a raw <tg-spoiler>), so a spoiler
+// degrades to plain text; backtick escaping and fenced ```lang highlighting both
+// render as intended.
 //
 // The hard part is not the tag mapping (b→**, code→backtick, …) but escaping
 // PARASITIC Markdown in literal text: a literal backtick, asterisk, or a line
@@ -255,15 +258,18 @@ func (w *mdWriter) render(n *htmlNode) {
 	case "i", "em":
 		w.wrapInline("*", n)
 	case "s", "strike", "del":
-		w.wrapInline("~~", n) // EMPIRICAL: GFM strikethrough; renders literally if the target is CommonMark-only.
+		w.wrapInline("~~", n) // GFM strikethrough — confirmed rendered by Telegram's .md preview.
 	case "u", "ins":
-		// EMPIRICAL: Markdown has no underline; keep the text unformatted rather
-		// than emit a construct the renderer would show literally. Revisit if
-		// Telegram honours raw <u> or treats __x__ as underline.
+		// Markdown has no underline, but Telegram's .md preview honours raw inline
+		// HTML: <u> renders as underline (confirmed), whereas __x__ would render as
+		// bold and *x* as italic. Pass a <u> through; the children stay Markdown.
+		w.put("<u>")
 		w.renderChildren(n)
+		w.put("</u>")
 	case "span", "tg-spoiler":
-		// EMPIRICAL: no Markdown spoiler; drop the spoiler, keep the text. A plain
-		// <span> is just an unwrap. Revisit if the renderer honours ||spoiler||.
+		// No spoiler in Telegram's .md preview — it renders neither ||spoiler|| nor a
+		// raw <tg-spoiler> as hidden text (confirmed) — so drop the spoiler and keep
+		// the text. A plain <span> is likewise just an unwrap.
 		w.renderChildren(n)
 	case "tg-emoji":
 		w.renderChildren(n) // fall back to the inner emoji character
