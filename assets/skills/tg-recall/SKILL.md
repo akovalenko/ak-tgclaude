@@ -40,6 +40,11 @@ Each day-file has one JSON object per line, oldest first:
 - `reply_to` is the `msg_id` this message answered (0 = none) — the thread edge.
 - `attach` lists any files by metadata only (`kind`/`name`/`size`); the bytes are
   not stored.
+- `user`/`name` (present in **group** chats) attribute a turn to its author — a
+  numeric Telegram `user` id and a display `name`. In a one-on-one (private) chat
+  they are omitted, since the single partner is implied by `meta.json`. In a
+  **group** the chat mixes many speakers, so read `name`/`user` off each record to
+  tell who said what — `meta.json` there only names the most recent speaker.
 - Records within a file are already in time order, so you rarely need to sort.
 
 Read a day-file with the **Read** tool and parse the JSON yourself.
@@ -65,7 +70,8 @@ grep -rE '"msg_id":5123[,}]' "$AK_TGCLAUDE_TRANSCRIPT_DIR"
 Day-files are named by date, so "this week" is the last seven `YYYY-MM-DD.jsonl`
 files. Read them, parse the lines, and summarize. For "what did people ask", filter
 to `role:"user"`. In the owner shape, walk each chat subdirectory and use its
-`meta.json` to attribute questions to a person. Deliver the summary with the
+`meta.json` to attribute questions to a person; in a **group** chat, attribute
+per-record via `name`/`user` (there `meta.json` names only the latest speaker). Deliver the summary with the
 **tg-emit** send tools; a long writeup is best sent as a document
 (`send_document`) written into your outbox first.
 
