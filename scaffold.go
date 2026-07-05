@@ -931,7 +931,7 @@ func resolveEffectivePolicies(base, override []string) ([]string, error) {
 // the invariant mechanics (project access, replying, machine boundaries) and is
 // persona-NEUTRAL — the persona is composed per-user and injected at spawn via
 // --append-system-prompt (see the dispatcher's persona resolution and
-// buildClaudeArgs), so one shared agent file serves every chat. Machine guards
+// claudeResponder.buildArgs), so one shared agent file serves every chat. Machine guards
 // (sandbox, token deny-read, per-invocation write, pinned route) hold regardless of
 // persona, so a relaxed policy cannot exceed them. wiredSkills are appended to the
 // agent's `skills:` frontmatter so their bodies are preloaded at startup, and the
@@ -952,7 +952,7 @@ func materializeAgent(claudeDir string, project string, wiredSkills, extraTools 
 	// Expand {{MCP_TOOLS}} in the tools: frontmatter from the tg send tools plus any
 	// operator extras (config `tools`/--tool), reduced to availability NAMES via
 	// frontmatterTools (a scoped spec like WebFetch(domain:X) becomes bare WebFetch).
-	// buildClaudeArgs feeds --allowedTools from the SAME combineTools list but
+	// claudeResponder.buildArgs feeds --allowedTools from the SAME combineTools list but
 	// verbatim (scope kept), so availability and permission never drift and the
 	// authored template stays MCP-agnostic.
 	data = injectMCPTools(data, frontmatterTools(combineTools(mcpTools, extraTools)))
