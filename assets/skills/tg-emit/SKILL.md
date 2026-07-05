@@ -7,9 +7,10 @@ description: How an ak-tgclaude responder sends Telegram replies — call the MC
 
 You are answering one Telegram message. You reply by calling the **MCP send
 tools**. The dispatcher routes each message to the right chat and replies to the
-incoming one — **you never choose the chat or the reply target.** The content
-goes **directly in the tool call** — no files, no shell, no escaping quotes or
-`!`.
+incoming one — **you never choose the chat or the reply target.** The body is
+passed to the send tool — inline for text you write yourself, or as a file in your
+outbox for content another tool produced (see *Tool-generated content* below) —
+with no shell and no quote/`!` escaping either way.
 
 ## Plain vs HTML — decide, and match the flag to your intent
 
@@ -45,6 +46,24 @@ HTML.
 
     mcp__tg__send_code(code: "func main() {}", language: "go")
 
+## Tool-generated content — send it from a file, verbatim
+
+When the body you send was **produced by another tool** — a script that emits
+Telegram HTML (`make-tg-html.py > reply.tg.html`), a generator that prints plain
+text, `gitlab-links` output carrying commit SHAs — do **not** retype or paraphrase
+it into your reply. Write it to a file in your outbox and send **that file**, so it
+reaches Telegram exactly as produced:
+
+    mcp__tg__send_message(text_file: "reply.tg.html", html: true)   # HTML from a tool
+    mcp__tg__send_message(text_file: "reply.txt")                   # plain text from a tool
+    mcp__tg__send_code(code_file: "snippet.go", language: "go")     # a file echoed verbatim
+
+Pass the **basename** of a file in your outbox, and supply exactly one of the inline
+arg (`text`/`code`) or the file arg (`text_file`/`code_file`). You may read the file
+first to sanity-check it, but then send the **file itself** — never a hand-copied
+version, where a stray edit could corrupt an SHA, an escape, or a tag. Retype only
+content you are authoring yourself.
+
 ## Document / attachment
 
 For a file you produced (e.g. a generated PDF): **write it into your outbox
@@ -55,6 +74,26 @@ task — the only directory you can write to), then pass its path to
     mcp__tg__send_document(path: "<outbox>/report.pdf", caption: "summary")
 
 Only files in your outbox can be attached; a path elsewhere is rejected.
+
+## Code block or file — match the form to what they'll do with it
+
+Between an inline code block (`send_code`) and an attachment (`send_document`), read
+what the user means to **do** with the content — the form follows the intent, not
+the size:
+
+- **To read / look at it** — "show me the diff", "покажи дифф", "what does that
+  function look like" — send an **inline code block** with `send_code`. It renders
+  in the chat, so they can just glance at it.
+- **To use it as a file** — "send me main.go", "пришли патч", "give me the file so I
+  can apply it" — send an **attachment** with `send_document`. They save it or run
+  `git am` on it; a patch pasted into a code block cannot be applied.
+
+The trap is a **patch or a whole file**: asked for something to apply, sent as a code
+block, it *looks* right but `git am` has nothing to act on. When you are unsure
+between "to look at" and "to keep", a file is the safer choice for anything they
+might feed to a tool. (`send_code` can take its body from a file too — see
+*Tool-generated content* above — but that only controls where the text comes from;
+this choice, block vs attachment, is about what the user does with it.)
 
 {{UPLOAD_NOTE}}## Authoring / scratch files
 
@@ -71,13 +110,16 @@ directory is **read-only**.
 You may call the send tools more than once for one question (e.g. a short answer,
 then a code block) — each call is one message. Keep it tight; this is a chat.
 
-Telegram caps one message at ~4096 characters. If a **text** answer would run
-longer, split it yourself into several `send_message` calls at natural boundaries
-(paragraphs or sections), each comfortably under ~4000 — a few readable messages
-beat one wall of text. (An over-long message is still delivered, but as a *file
-attachment* instead of inline text, which is worse to read — so split rather than
-rely on that.) Long **code** needs no splitting: `send_code` spills an oversized
-snippet to a document automatically, which is the right form for a big block.
+About **4000 characters** is the comfortable size for one Telegram message. A
+message can hold more (the hard ceiling is higher — around **16k and up, depending
+on the chat's settings**), but writing to that edge is a wall of text. So keep each
+reply **compact** and to the point — that is the whole of the length guidance. You
+do **not** manage the size limit yourself and you do **not** pre-chop a reply to
+fit it: an over-long answer is handled for you (delivered as a Markdown
+**document**), and long **code** the same way — `send_code` spills a big block to a
+document, the right form for it. If a question genuinely has separate parts, a
+couple of short messages is fine — but that is for readability, never a way to
+squeeze under a size cap.
 
 ## Progress notes for slow work (`progress: true`)
 
@@ -102,14 +144,18 @@ through, with the reason. Read it, then split on what it says:
   parse entities" error. **Fix and resend**: escape the offending character, drop
   the disallowed tag, or fall back to plain `send_message` without `html`, then
   call the tool again. Nothing went out yet, so there is no duplicate.
+- **Message too long — shorten or attach, never chunk.** A send can come back with
+  a too-long / size error (a deployment can be set to hand an oversized message back
+  to you rather than spill it for you). Do **one** of two things: tighten the reply —
+  cut or restructure it so it fits — or, when the content must stay whole (a long
+  listing, a full file), write it into a `.md` file in your outbox and send that with
+  `send_document`. Do **not** slice the reply into a series of messages to get under
+  the cap. Chunking defeats the limit — the point of a size limit is lost the moment
+  the model works around it. Shorten, or attach as a document; never chunk.
 - **Anything else** (blocked chat, chat-not-found, an attachment over Telegram's
   size limit, network trouble): you **cannot** fix the transport. Don't keep
   retrying — just note the reply did not get through and emit `problematic` as
   your final status word.
-
-A message past Telegram's 4096-char limit is **not** an error: the dispatcher
-automatically spills an over-long `send_message`/`send_code` to a document (you
-still prefer to split long prose yourself — see above).
 
 ## Final output — output ONLY a status word (it is a signal, not your answer)
 
