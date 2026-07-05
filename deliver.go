@@ -3,7 +3,9 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
+	"strings"
 )
 
 // sendDescriptor renders one descriptor and delivers it to Telegram on route r,
@@ -23,6 +25,17 @@ func sendDescriptor(ctx context.Context, d *Descriptor, r Route, s Sender, up *u
 		return s.SendDocument(ctx, r, d.Path, d.Filename, d.Caption, "", d.Silent)
 	}
 	text, mode := renderMessage(d)
+	// Guard: validate Telegram HTML before sending, so the model gets ALL unsupported
+	// tags at once (Telegram's own 400 names only the first). Only meaningful in HTML
+	// mode; a plain-text message has no tags to check.
+	if mode == "HTML" {
+		if bad := badTelegramTags(text); len(bad) > 0 {
+			return 0, &htmlError{fmt.Sprintf(
+				"invalid Telegram HTML — unsupported tag(s): %s. Telegram HTML allows only: %s. "+
+					"Use plain newlines and • bullets (not <br>/<p>/<ul>/<li>/<hN>), and <code>/<pre> for code.",
+				strings.Join(bad, ", "), strings.Join(telegramTagList, ", "))}
+		}
+	}
 	if fits(text) {
 		return s.SendMessage(ctx, r, text, mode, d.Silent)
 	}

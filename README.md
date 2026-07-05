@@ -944,6 +944,13 @@ responder acts on it: fix the HTML and call again (nothing was sent, so no
 duplicate), or report `problematic`. A message over the 4096-char limit is not an
 error — it spills to a document automatically.
 
+Before an HTML message is sent, a guard validates it against Telegram's tag
+whitelist and refuses it up front (nothing sent) if it carries an unsupported tag
+(`<div>`, `<p>`, `<br>`, `<ul>`, `<li>`, `<hN>`, a stray Markdown-ism) — listing
+**all** offenders at once, where Telegram's own 400 names only the first. So a
+responder that emitted several bad tags fixes them in one round instead of
+peeling them off one 400 at a time.
+
 The `message_id` is also what the dispatcher will later map back to the
 responder's session for **reply-resurrection** (replying to an old bot message
 revives its `--resume` session).

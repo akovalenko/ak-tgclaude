@@ -411,6 +411,13 @@ func (m *mcpServer) callTool(ctx context.Context, tok string, rt mcpRoute, param
 			log.Printf("ak-tgclaude: mcp: tools/call %s chat=%d: upload error: %v", call.Name, rt.route.ChatID, err)
 			return toolError(ue.Error())
 		}
+		// Our pre-send HTML guard: surface it verbatim (all bad tags) so the model can
+		// fix them, rather than under the "Telegram rejected" framing.
+		var he *htmlError
+		if errors.As(err, &he) {
+			log.Printf("ak-tgclaude: mcp: tools/call %s chat=%d: html guard: %v", call.Name, rt.route.ChatID, err)
+			return toolError(he.Error())
+		}
 		log.Printf("ak-tgclaude: mcp: tools/call %s chat=%d: telegram error: %v", call.Name, rt.route.ChatID, err)
 		return toolError("Telegram rejected the message: " + deliveryError(err))
 	}
