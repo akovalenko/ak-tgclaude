@@ -97,6 +97,12 @@ const outboxEnv = "AK_TGCLAUDE_OUTBOX"
 // to bash grep. Set only when the transcript feature is on. Empty => none.
 const transcriptEnv = "AK_TGCLAUDE_TRANSCRIPT_DIR"
 
+// binEnv names the ak-tgclaude binary itself, so the responder's tg-recall skill can
+// invoke `$AK_TGCLAUDE_BIN recall …` from a sandboxed Bash instead of hand-parsing
+// the escaped transcript JSONL. Set only alongside the transcript scope (the sole
+// consumer); resolved via os.Executable() so it is the exact binary now running.
+const binEnv = "AK_TGCLAUDE_BIN"
+
 // usageLogEnv names the usage-log file, set ONLY on the OWNER's invocation (the
 // hook folds it into readRoots so the owner's Read tool reaches it; the
 // per-invocation sandbox allowRead opens it to bash grep/awk). Everyone else gets
@@ -170,6 +176,10 @@ func (c *claudeResponder) env(req RespondRequest) []string {
 		// The transcript read scope, so the sandboxed grep/cat can reach it (the hook
 		// also folds this env into the Read tool's readRoots).
 		out = append(out, transcriptEnv+"="+req.TranscriptScope)
+		// The binary path, so the tg-recall skill can call `$AK_TGCLAUDE_BIN recall`.
+		if bin := selfExePath(); bin != "" {
+			out = append(out, binEnv+"="+bin)
+		}
 	}
 	if usageLog := req.usageLogEnvValue(); usageLog != "" {
 		// Owner only (usageLogEnvValue is "" for everyone else): the usage-log file, so

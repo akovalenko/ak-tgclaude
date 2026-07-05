@@ -26,6 +26,9 @@ commands:
              running the dispatcher, to inspect it and run claude by hand
   clear      drop every persisted chat->session binding (keeps the getUpdates
              offset). Reads the state dir from --config or the default
+  recall     read the transcript store as groomed blocks (--dir SCOPE, then
+             --msg N | --day/--since/--until). Used by the responder's tg-recall
+             skill; read-only
   deploy     provision the project tree, example config, and skills.
              Assumes the binary is already on PATH (e.g. via "go install");
              it does NOT copy itself.
@@ -55,6 +58,8 @@ func main() {
 		err = runScaffold(os.Args[2:])
 	case "clear":
 		err = runClear(os.Args[2:])
+	case "recall":
+		err = runRecall(os.Args[2:])
 	case "deploy":
 		err = runDeploy(os.Args[2:])
 	case "version":

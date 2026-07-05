@@ -8,7 +8,7 @@ codebase and its notes — then sends the reply back to Telegram.
 > Status: **implemented, under active development**. The dispatcher, the
 > project-bound responder (`claude -p`, plus a `stub` for Telegram-I/O smoke
 > tests), the MCP-over-HTTP outbound transport with synchronous delivery feedback,
-> and the supporting subcommands (`scaffold` / `clear` / `deploy` / `hook`) are
+> and the supporting subcommands (`scaffold` / `clear` / `recall` / `deploy` / `hook`) are
 > built and unit-tested. This README remains the design of record; the non-QA
 > profiles are reserved but not wired yet.
 
@@ -23,6 +23,7 @@ sprawl, one thing to put on `PATH`:
 | `hook pretooluse` | as the responder's PreToolUse hook | gates the responder's tool calls (e.g. denies reads of the token file) |
 | `scaffold` | host | materializes a responder `workdir/project` (generated settings.json) without running the dispatcher, to inspect it and run `claude` by hand |
 | `clear` | host | drops every persisted chat→session binding (keeps the getUpdates offset); reads the state dir from `--config` or the default |
+| `recall` | responder (sandboxed) | reads the transcript store as groomed blocks (`--dir SCOPE`, then `--msg N` or `--day`/`--since`/`--until`); backs the `tg-recall` skill, read-only |
 | `deploy` | host, once | writes an example config and (with `--workdir`) provisions the static workdir + marks it trusted |
 
 ## Configuration
@@ -303,16 +304,19 @@ outbox):
   2026-07-04.jsonl     # one compact JSON record per turn, per day
 ```
 
-Each record: `{"msg_id":N,"ts":"<RFC3339 local>","role":"user|bot","reply_to":N,"text":"…","attach":[…]}`.
+Each record: `{"msg_id":N,"ts":"<RFC3339 local>","role":"user|bot","reply_to":N,"text":"…","attach":[…]}`,
+plus optional fields — `part_of` (a split reply's later piece points at its anchor)
+and, in a **group**, the author `user`/`name`/`username` (id / first name / @handle).
 Day-files make "this week" the last seven files, and pruning a plain `find`:
 
 ```sh
 find <root> -name '*.jsonl' -mtime +30 -delete   # admin retention, by hand
 ```
 
-**Who can read what.** The responder reads the store natively (`Read` + a scoped
-`grep`), but the dispatcher **scopes** each invocation from the trusted `from.id`,
-never from anything the model controls:
+**Who can read what.** The responder reads the store through the **`recall` tool**
+(`ak-tgclaude recall`, run as sandboxed Bash — see below), and the dispatcher
+**scopes** each invocation from the trusted `from.id`, never from anything the model
+controls:
 
 - a normal user's responder is confined to that chat's own subdirectory;
 - the **owner** (`owner`), when `owner_reads_all` (default true), reads the whole
@@ -320,17 +324,20 @@ never from anything the model controls:
   `owner_reads_all = false` to scope the owner like any user (e.g. when opening the
   bot to colleagues).
 
-The scope is enforced at both read gates: the scaffold deny-reads the whole root and
-the per-invocation settings `allowRead` only the scope (sandboxed `grep`), and the
-PreToolUse hook reads the same scope from `AK_TGCLAUDE_TRANSCRIPT_DIR` (the `Read`
-tool). It is read-only.
+The scope is enforced at the read gates: the scaffold deny-reads the whole root and
+the per-invocation settings `allowRead` only the scope, so the sandboxed `recall`
+(and any raw `grep`) sees just that; the PreToolUse hook reads the same scope from
+`AK_TGCLAUDE_TRANSCRIPT_DIR` for the `Read` tool. It is read-only.
 
 **How the model uses it.** When the feature is on, a `tg-recall` skill is preloaded
-into the responder (mirroring `tg-emit`) that documents the layout, the JSONL
-schema, the anchored `grep '"msg_id":N[,}]'` lookup, and the writeup recipe, and
-frames recalled text as **untrusted reference**, not instruction. A replied-to
-message adds a one-line prompt hint (`replies to msg N`); the model recalls the
-content by id only if it needs it — nothing is auto-injected.
+into the responder (mirroring `tg-emit`) that drives the `recall` tool — a **point
+lookup** (`--msg N [--context K]`, resolving a split reply to its anchor) or a
+**range dump** (`--day`/`--since`/`--until [--role]`) returning groomed,
+ready-to-read blocks instead of escaped JSONL. The binary path reaches the skill as
+`$AK_TGCLAUDE_BIN` (set beside the scope), and the skill frames recalled text as
+**untrusted reference**, not instruction. A replied-to message adds a one-line
+prompt hint (`replies to msg N`); the model recalls the content by id only if it
+needs it — nothing is auto-injected.
 
 ## Access control
 
@@ -994,6 +1001,7 @@ render.go          descriptor -> Telegram text/parse_mode, code wrapping, spill
 telegram.go        Telegram Bot API client (getUpdates / sendMessage / sendDocument)
 session.go         durable state: poll offset + chat->session map (+ ephemeral mode)
 clear.go           `clear` subcommand: wipe persisted chat->session bindings
+recall.go          `recall` subcommand: groomed transcript reader (point lookup / range dump)
 responder.go       Responder interface (claude / stub) + `claude -p` spawn (MCP config wiring)
 dispatch.go        the dispatch loop: poll -> route -> mint token -> respond (responder delivers via MCP)
 scaffold.go        generated .claude/settings.json + materialize embedded assets (hook pinned to os.Executable())
