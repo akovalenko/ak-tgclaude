@@ -383,3 +383,74 @@ func TestBuildMCPConfig(t *testing.T) {
 		t.Errorf("auth header wrong: %v", s.Headers)
 	}
 }
+
+func callSendMessageArgs(t *testing.T, m *mcpServer, token string, args map[string]any) map[string]any {
+	return postRPC(t, m.URL(), token, map[string]any{
+		"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+		"params": map[string]any{"name": toolSendMessage, "arguments": args},
+	})
+}
+
+func TestMCPSendMessageFromFile(t *testing.T) {
+	f := &fakeSender{}
+	m := newTestMCP(t, f)
+	outbox := t.TempDir()
+	// A body a tool would produce (a permalink with a commit SHA) — the point of
+	// text_file is that it reaches Telegram verbatim, never retyped.
+	body := `<b>Ответ</b> — cmd/x/main.go#L10 <a href="https://g/-/blob/deadbeef/x">x#L10</a>`
+	if err := os.WriteFile(filepath.Join(outbox, "reply.html"), []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	tok, _ := m.Register(Route{ChatID: 7, ReplyTo: 3}, outbox)
+
+	// text_file delivers the file's bytes verbatim, as HTML.
+	if resp := callSendMessageArgs(t, m, tok, map[string]any{"text_file": "reply.html", "html": true}); isToolError(resp) {
+		t.Fatalf("text_file send should deliver: %v", resp)
+	}
+	calls := f.snapshot()
+	if len(calls) != 1 || calls[0].text != body || calls[0].mode != "HTML" {
+		t.Fatalf("text_file body not delivered verbatim: %+v", calls)
+	}
+
+	// Confinement: a traversal / absolute path collapses to a basename not in the
+	// outbox → rejected, exactly like send_document.
+	if resp := callSendMessageArgs(t, m, tok, map[string]any{"text_file": "../secret"}); !isToolError(resp) {
+		t.Errorf("out-of-outbox text_file must be rejected: %v", resp)
+	}
+	// A missing file is a tool error, not a silent no-op.
+	if resp := callSendMessageArgs(t, m, tok, map[string]any{"text_file": "nope.html"}); !isToolError(resp) {
+		t.Errorf("missing text_file must be a tool error: %v", resp)
+	}
+	// text AND text_file together is ambiguous → rejected before any read.
+	if resp := callSendMessageArgs(t, m, tok, map[string]any{"text": "inline", "text_file": "reply.html"}); !isToolError(resp) {
+		t.Errorf("both text and text_file must be rejected: %v", resp)
+	}
+	// Only the first (valid) call delivered.
+	if len(f.snapshot()) != 1 {
+		t.Errorf("only the valid call should have delivered: %+v", f.snapshot())
+	}
+}
+
+func TestMCPSendCodeFromFile(t *testing.T) {
+	f := &fakeSender{}
+	m := newTestMCP(t, f)
+	outbox := t.TempDir()
+	code := "package main\n\nfunc main() {}\n"
+	if err := os.WriteFile(filepath.Join(outbox, "snip.go"), []byte(code), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	tok, _ := m.Register(Route{ChatID: 1}, outbox)
+	resp := postRPC(t, m.URL(), tok, map[string]any{
+		"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+		"params": map[string]any{"name": toolSendCode, "arguments": map[string]any{"code_file": "snip.go", "language": "go"}},
+	})
+	if isToolError(resp) {
+		t.Fatalf("code_file send should deliver: %v", resp)
+	}
+	calls := f.snapshot()
+	if len(calls) != 1 || calls[0].mode != "HTML" ||
+		!strings.Contains(calls[0].text, "func main") ||
+		!strings.Contains(calls[0].text, `class="language-go"`) {
+		t.Fatalf("code_file not rendered as a code block: %+v", calls)
+	}
+}

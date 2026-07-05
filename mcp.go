@@ -337,31 +337,31 @@ func toolsListResult() map[string]any {
 	return map[string]any{"tools": []map[string]any{
 		{
 			"name":        toolSendMessage,
-			"description": "Send a text message as the bot's reply. The chat and reply target are pinned by the dispatcher — you never choose them.",
+			"description": "Send a text message as the bot's reply. The chat and reply target are pinned by the dispatcher — you never choose them. Supply the body either inline (text) or as a file in your outbox (text_file) — exactly one.",
 			"inputSchema": map[string]any{
 				"type": "object",
 				"properties": map[string]any{
-					"text":     strProp("The message text."),
-					"html":     boolProp("Render as Telegram HTML (parse_mode=HTML); supply valid, escaped HTML. Default false (plain text)."),
-					"silent":   boolProp("Deliver without a notification. Default false."),
-					"progress": progressProp,
+					"text":      strProp("The message body, inline. Omit when you pass text_file."),
+					"text_file": strProp("Instead of text: the basename of a file in your outbox holding the body. Use this for content produced by another tool (e.g. gitlab-links output with commit SHAs) so it reaches Telegram verbatim — never retyped through your reply, where a stray edit could corrupt it. Exactly one of text / text_file."),
+					"html":      boolProp("Render as Telegram HTML (parse_mode=HTML); supply valid, escaped HTML. Default false (plain text)."),
+					"silent":    boolProp("Deliver without a notification. Default false."),
+					"progress":  progressProp,
 				},
-				"required": []string{"text"},
 			},
 		},
 		{
 			"name":        toolSendCode,
-			"description": "Send a preformatted code block. It is wrapped in <pre><code> and escaped for you, and spills to a document if it exceeds Telegram's size limit.",
+			"description": "Send a preformatted code block. It is wrapped in <pre><code> and escaped for you, and spills to a document if it exceeds Telegram's size limit. Supply the body either inline (code) or as a file in your outbox (code_file) — exactly one.",
 			"inputSchema": map[string]any{
 				"type": "object",
 				"properties": map[string]any{
-					"code":     strProp("The raw code/preformatted text (do not pre-wrap it in HTML)."),
-					"language": strProp("Optional source language tag (e.g. go, python)."),
-					"caption":  strProp("Optional line shown before the block."),
-					"silent":   boolProp("Deliver without a notification. Default false."),
-					"progress": progressProp,
+					"code":      strProp("The raw code/preformatted text, inline (do not pre-wrap it in HTML). Omit when you pass code_file."),
+					"code_file": strProp("Instead of code: the basename of a file in your outbox holding the raw code. Use this to echo a file verbatim without retyping it. Exactly one of code / code_file."),
+					"language":  strProp("Optional source language tag (e.g. go, python)."),
+					"caption":   strProp("Optional line shown before the block."),
+					"silent":    boolProp("Deliver without a notification. Default false."),
+					"progress":  progressProp,
 				},
-				"required": []string{"code"},
 			},
 		},
 		{
@@ -486,6 +486,7 @@ func descriptorFromCall(name string, args json.RawMessage, docDir string) (*Desc
 	case toolSendMessage:
 		var a struct {
 			Text     string `json:"text"`
+			TextFile string `json:"text_file"`
 			HTML     bool   `json:"html"`
 			Silent   bool   `json:"silent"`
 			Progress bool   `json:"progress"`
@@ -493,7 +494,11 @@ func descriptorFromCall(name string, args json.RawMessage, docDir string) (*Desc
 		if err := json.Unmarshal(args, &a); err != nil {
 			return nil, fmt.Errorf("invalid %s arguments: %w", name, err)
 		}
-		d := &Descriptor{Kind: KindText, Text: a.Text, Silent: a.Silent, Progress: a.Progress}
+		text, err := bodyFromArgOrFile(name, "text", a.Text, a.TextFile, docDir)
+		if err != nil {
+			return nil, err
+		}
+		d := &Descriptor{Kind: KindText, Text: text, Silent: a.Silent, Progress: a.Progress}
 		if a.HTML {
 			d.Format = FormatHTML
 		}
@@ -501,6 +506,7 @@ func descriptorFromCall(name string, args json.RawMessage, docDir string) (*Desc
 	case toolSendCode:
 		var a struct {
 			Code     string `json:"code"`
+			CodeFile string `json:"code_file"`
 			Language string `json:"language"`
 			Caption  string `json:"caption"`
 			Silent   bool   `json:"silent"`
@@ -509,7 +515,11 @@ func descriptorFromCall(name string, args json.RawMessage, docDir string) (*Desc
 		if err := json.Unmarshal(args, &a); err != nil {
 			return nil, fmt.Errorf("invalid %s arguments: %w", name, err)
 		}
-		d := &Descriptor{Kind: KindCode, Code: a.Code, Language: a.Language, Caption: a.Caption, Silent: a.Silent, Progress: a.Progress}
+		code, err := bodyFromArgOrFile(name, "code", a.Code, a.CodeFile, docDir)
+		if err != nil {
+			return nil, err
+		}
+		d := &Descriptor{Kind: KindCode, Code: code, Language: a.Language, Caption: a.Caption, Silent: a.Silent, Progress: a.Progress}
 		return d, d.validate()
 	case toolSendDocument:
 		var a struct {
@@ -554,6 +564,48 @@ func confineDoc(docDir, p string) (string, error) {
 		return "", fmt.Errorf("attachment %q is a directory", base)
 	}
 	return full, nil
+}
+
+// maxBodyFileBytes caps a text_file / code_file body so a stray huge file cannot
+// exhaust memory. A legitimate over-limit answer is far smaller — it spills only
+// because it exceeds Telegram's 4096-char message cap, not because it is megabytes.
+const maxBodyFileBytes = 4 << 20 // 4 MiB
+
+// readOutboxBody reads a message body from a file in the invocation's outbox, path-
+// confined exactly like a document attachment (basename only, must already exist). It
+// lets a caller hand the body as a PATH instead of an inline string, so content
+// produced by another tool (e.g. gitlab-links output carrying commit SHAs) reaches
+// Telegram verbatim — never laundered through the model's tokens, where a stray space
+// in a SHA would break a permalink.
+func readOutboxBody(docDir, name string) (string, error) {
+	full, err := confineDoc(docDir, name)
+	if err != nil {
+		return "", err
+	}
+	if info, err := os.Stat(full); err == nil && info.Size() > maxBodyFileBytes {
+		return "", fmt.Errorf("body file %q too large (%d bytes, max %d)", filepath.Base(name), info.Size(), maxBodyFileBytes)
+	}
+	b, err := os.ReadFile(full)
+	if err != nil {
+		return "", fmt.Errorf("reading body file %q: %w", filepath.Base(name), err)
+	}
+	return string(b), nil
+}
+
+// bodyFromArgOrFile resolves a message body supplied EITHER inline (inlineVal) OR as
+// the basename of an outbox file (fileVal); exactly one may be set. field names the
+// inline argument for error text ("text" / "code"); the file argument is field+"_file".
+// An empty result is passed through so the descriptor's validate() owns the single
+// "empty body" error.
+func bodyFromArgOrFile(tool, field, inlineVal, fileVal, docDir string) (string, error) {
+	switch {
+	case inlineVal != "" && fileVal != "":
+		return "", fmt.Errorf("%s: provide either %s or %s_file, not both", tool, field, field)
+	case fileVal != "":
+		return readOutboxBody(docDir, fileVal)
+	default:
+		return inlineVal, nil
+	}
 }
 
 // toolText and toolError build the CallToolResult content for a success / failure.
