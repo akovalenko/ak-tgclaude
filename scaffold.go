@@ -492,6 +492,9 @@ func uploadNote(command string, thresholdMB, maxMB int) string {
 	if maxMB > 0 {
 		note += fmt.Sprintf(" You can send files up to ~%d MB this way; a file larger than that is rejected with an error.", maxMB)
 	}
+	// The uploaded name reaches an operator script, so keep it plain — letters,
+	// digits, spaces, and . _ - are safe; shell metacharacters are refused.
+	note += " Give the file a plain name (letters, digits, spaces, `. _ -`); a name with shell metacharacters is refused."
 	return note + "\n\n"
 }
 

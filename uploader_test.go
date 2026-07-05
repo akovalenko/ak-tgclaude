@@ -94,6 +94,40 @@ func TestUploaderDeliverTooBig(t *testing.T) {
 	}
 }
 
+func TestUploaderDeliverRejectsUnsafeName(t *testing.T) {
+	// A shell-dangerous name is refused BEFORE the uploader runs, whether it rides
+	// the display Filename or the outbox file's own basename (both reach the script).
+	cases := []struct {
+		name, filename, path string
+	}{
+		{"backtick display name", "file`rm -rf`.txt", "/out/safe.txt"},
+		{"dollar display name", "x$(id).bin", "/out/safe.bin"},
+		{"dangerous outbox basename", "safe.txt", "/out/evil`whoami`.txt"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			u := &uploader{command: "/definitely/not/run"}
+			f := &fakeSender{}
+			d := &Descriptor{Kind: KindDocument, Path: tc.path, Filename: tc.filename}
+			_, err := u.deliver(context.Background(), d, Route{ChatID: 1}, f, 10)
+			var ue *uploadError
+			if !errors.As(err, &ue) || !strings.Contains(ue.Error(), "sane file name") {
+				t.Fatalf("want a sane-name rejection, got %v", err)
+			}
+			if len(f.snapshot()) != 0 {
+				t.Errorf("nothing must be sent when the name is rejected")
+			}
+		})
+	}
+	// Spaces and non-ASCII are fine — the uploader is expected to quote them.
+	if !uploadNameOK("Отчёт за июль 2026.pdf") {
+		t.Errorf("a spaced, non-ASCII name should be allowed")
+	}
+	if uploadNameOK("a;b.txt") || uploadNameOK("a|b.txt") || uploadNameOK("a\nb.txt") {
+		t.Errorf("shell metacharacters / newlines must be rejected")
+	}
+}
+
 func TestUploaderRunFailure(t *testing.T) {
 	cmd := writeScript(t, `echo "boom" >&2; exit 3`)
 	u := &uploader{command: cmd, thresholdBytes: 0}

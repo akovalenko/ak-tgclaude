@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"unicode"
 )
 
 // uploader is the dispatcher's large-file fallback for send_document. When a
@@ -54,6 +55,21 @@ func (e *uploadError) Error() string { return e.msg }
 // the caller already stat'd (and found over the threshold). A file over the hard
 // cap is rejected before the uploader runs.
 func (u *uploader) deliver(ctx context.Context, d *Descriptor, r Route, s Sender, size int64) (int64, error) {
+	// The uploader is an operator script run UNSANDBOXED, and both the source path
+	// (arg1) and the destination name (arg2) carry a model-chosen basename — a
+	// naive script that splices them into a shell command or an ssh/scp/rsync remote
+	// path (which the far side re-parses) would let a name like file`rm -rf`.txt run
+	// commands. We can't fix every uploader, so we refuse a dangerous name at the
+	// gate and tell the model to rename. Fail-fast, not sanitize: the responder owns
+	// the outbox and can just pick a saner name (spaces and non-ASCII are fine — see
+	// uploadNameOK). This is enforced only on the upload path; a small file sent as a
+	// Telegram attachment goes through argv/multipart, no shell.
+	for _, n := range []string{d.Filename, filepath.Base(d.Path)} {
+		if n != "" && !uploadNameOK(n) {
+			return 0, &uploadError{fmt.Sprintf("Please choose a sane file name: %q has characters that aren't allowed for an uploaded file. "+
+				"Use letters, digits, spaces, and . _ - , + @ %% (no quotes, backticks, $, or other shell metacharacters).", n)}
+		}
+	}
 	if u.hardCapBytes > 0 && size > u.hardCapBytes {
 		return 0, &uploadError{fmt.Sprintf("файл слишком большой даже для облака (%s > %s)", mbStr(size), mbStr(u.hardCapBytes))}
 	}
@@ -73,6 +89,29 @@ func (u *uploader) deliver(ctx context.Context, d *Descriptor, r Route, s Sender
 		text = d.Caption + "\n" + text
 	}
 	return s.SendMessage(ctx, r, text, "", d.Silent)
+}
+
+// uploadNameSafePunct is the punctuation allowed in an uploaded file name on top
+// of Unicode letters and digits. Space is included (the uploader is expected to
+// quote it — the shipped example uses rsync --protect-args); the shell-dangerous
+// characters (quotes, backtick, $, ;, &, |, <, >, (), *, ?, …) are all absent, so
+// an allowed name is safe to splice into a shell command or an ssh remote path.
+const uploadNameSafePunct = " ._-,+@%"
+
+// uploadNameOK reports whether name is safe to hand to the operator uploader
+// (see deliver). Allowlist rather than denylist — bulletproof against a
+// metacharacter we forgot: a name passes only if every rune is a Unicode letter,
+// a digit, or one of uploadNameSafePunct. So "Отчёт за июль.pdf" passes and
+// "file`rm -rf`.txt" does not. Empty is treated as OK (the caller skips it and
+// falls back to another name).
+func uploadNameOK(name string) bool {
+	for _, r := range name {
+		if unicode.IsLetter(r) || unicode.IsDigit(r) || strings.ContainsRune(uploadNameSafePunct, r) {
+			continue
+		}
+		return false
+	}
+	return true
 }
 
 // run executes the uploader on file (passing the suggested destination name as
