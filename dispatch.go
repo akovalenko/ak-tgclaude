@@ -859,6 +859,15 @@ var botCommands = []BotCommand{
 	{Command: "clear", Description: "Start a fresh conversation (forget context)"},
 }
 
+// groupBotCommands is the command menu uploaded for the all_group_chats scope:
+// /do (delegation) is the group-specific verb, plus /clear. This is only the
+// autocomplete list clients show — NOT access control; the user-id gate still
+// decides whether a command runs.
+var groupBotCommands = []BotCommand{
+	{Command: "do", Description: "Run this — reply to a message, or /do <task>"},
+	{Command: "clear", Description: "Start a fresh conversation (forget context)"},
+}
+
 // defaultHelpText is the /help and /start reply when the operator sets no
 // help_text. Deliberately domain-blind — it describes the bot's mechanics, not
 // the project (a deployment supplies specifics via help_text).
@@ -1087,9 +1096,13 @@ func runDispatch(args []string) error {
 		log.Printf("ak-tgclaude: bot @%s", me.Username)
 	}
 
-	// Publish the command menu (best-effort: the bot works without it).
-	if err := client.SetMyCommands(ctx, botCommands); err != nil {
+	// Publish the command menus (best-effort: the bot works without them). The default
+	// menu covers private chats; a separate all_group_chats menu surfaces /do in groups.
+	if err := client.SetMyCommands(ctx, botCommands, nil); err != nil {
 		log.Printf("ak-tgclaude: setMyCommands: %v", err)
+	}
+	if err := client.SetMyCommands(ctx, groupBotCommands, &BotCommandScope{Type: "all_group_chats"}); err != nil {
+		log.Printf("ak-tgclaude: setMyCommands(group): %v", err)
 	}
 
 	kind := "fixed"

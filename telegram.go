@@ -236,11 +236,23 @@ type BotCommand struct {
 	Description string `json:"description"`
 }
 
+// BotCommandScope narrows a setMyCommands upload to a subset of chats — e.g.
+// {Type:"all_group_chats"} for a menu shown only in groups. A nil scope uploads
+// to the default scope. See the Bot API BotCommandScope types.
+type BotCommandScope struct {
+	Type   string `json:"type"`
+	ChatID int64  `json:"chat_id,omitempty"`
+}
+
 // SetMyCommands uploads the bot's command menu (the "/" list clients show),
-// replacing any previously set commands for the default scope. Best-effort at
-// startup — the bot works without a menu, so the caller may just log a failure.
-func (c *Client) SetMyCommands(ctx context.Context, commands []BotCommand) error {
+// replacing any previously set commands for the given scope (nil => default
+// scope). Best-effort at startup — the bot works without a menu, so the caller
+// may just log a failure.
+func (c *Client) SetMyCommands(ctx context.Context, commands []BotCommand, scope *BotCommandScope) error {
 	payload := map[string]any{"commands": commands}
+	if scope != nil {
+		payload["scope"] = scope
+	}
 	status, body, err := c.postJSON(ctx, "setMyCommands", payload)
 	if err != nil {
 		return err

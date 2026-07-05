@@ -110,7 +110,8 @@ func TestClientSetMyCommands(t *testing.T) {
 
 	c := &Client{Token: "T", BaseURL: srv.URL, HTTP: srv.Client()}
 	cmds := []BotCommand{{Command: "help", Description: "help"}, {Command: "clear", Description: "reset"}}
-	if err := c.SetMyCommands(context.Background(), cmds); err != nil {
+	// Default scope (nil): no "scope" key in the payload.
+	if err := c.SetMyCommands(context.Background(), cmds, nil); err != nil {
 		t.Fatalf("SetMyCommands: %v", err)
 	}
 	if gotPath != "/botT/setMyCommands" {
@@ -123,6 +124,17 @@ func TestClientSetMyCommands(t *testing.T) {
 	first := list[0].(map[string]any)
 	if first["command"] != "help" || first["description"] != "help" {
 		t.Errorf("first command = %v", first)
+	}
+	if _, has := body["scope"]; has {
+		t.Errorf("nil scope should omit the scope key, got %v", body["scope"])
+	}
+	// A group scope rides in the payload under "scope".
+	if err := c.SetMyCommands(context.Background(), cmds, &BotCommandScope{Type: "all_group_chats"}); err != nil {
+		t.Fatalf("SetMyCommands(scope): %v", err)
+	}
+	scope, ok := body["scope"].(map[string]any)
+	if !ok || scope["type"] != "all_group_chats" {
+		t.Errorf("scope payload = %v", body["scope"])
 	}
 }
 
