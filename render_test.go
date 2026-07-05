@@ -61,9 +61,25 @@ func TestFitsAndSpill(t *testing.T) {
 		t.Errorf("text exactly at the limit should fit")
 	}
 
-	// Both kinds spill as Markdown: code as snippet.md, prose as message.md.
-	if n := spillName(&Descriptor{Kind: KindCode, Language: "py"}); n != "snippet.md" {
+	// Both kinds spill as Markdown: code as example.<lang>.md, prose as message.md.
+	if n := spillName(&Descriptor{Kind: KindCode, Language: "py"}); n != "example.py.md" {
 		t.Errorf("spillName code = %q", n)
+	}
+	// No language => example.md (no dangling dot).
+	if n := spillName(&Descriptor{Kind: KindCode}); n != "example.md" {
+		t.Errorf("spillName code, no lang = %q", n)
+	}
+	// A junk-laden language is sanitized to a bare token before it lands in the name.
+	if n := spillName(&Descriptor{Kind: KindCode, Language: "../etc/pas swd\n"}); n != "example.etcpasswd.md" {
+		t.Errorf("spillName code, junk lang = %q", n)
+	}
+	// A language that sanitizes away entirely falls back to example.md.
+	if n := spillName(&Descriptor{Kind: KindCode, Language: "/。/"}); n != "example.md" {
+		t.Errorf("spillName code, empty-after-sanitize lang = %q", n)
+	}
+	// Real language names with punctuation survive (c++, c#).
+	if n := spillName(&Descriptor{Kind: KindCode, Language: "c++"}); n != "example.c++.md" {
+		t.Errorf("spillName code, c++ = %q", n)
 	}
 	if n := spillName(&Descriptor{Kind: KindText, Format: FormatHTML}); n != "message.md" {
 		t.Errorf("spillName html = %q", n)

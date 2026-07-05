@@ -54,9 +54,9 @@ func TestSendDescriptorSpillsOversized(t *testing.T) {
 	if len(calls) != 2 {
 		t.Fatalf("want 2 calls, got %d", len(calls))
 	}
-	// Both spill as Markdown now: code as snippet.md, prose as message.md.
-	if calls[0].kind != "document" || calls[0].filename != "snippet.md" {
-		t.Errorf("oversized code should spill to snippet.md: %+v", calls[0])
+	// Both spill as Markdown now: code as example.<lang>.md, prose as message.md.
+	if calls[0].kind != "document" || calls[0].filename != "example.go.md" {
+		t.Errorf("oversized code should spill to example.go.md: %+v", calls[0])
 	}
 	if calls[1].kind != "document" || calls[1].filename != "message.md" {
 		t.Errorf("oversized text should spill to message.md: %+v", calls[1])
@@ -87,8 +87,8 @@ func TestSendDescriptorOverflowError(t *testing.T) {
 		t.Fatalf("code should spill under overflow=error, got %v", err)
 	}
 	calls := f.snapshot()
-	if len(calls) != 1 || calls[0].kind != "document" || calls[0].filename != "snippet.md" {
-		t.Errorf("code should spill to snippet.md under overflow=error: %+v", calls)
+	if len(calls) != 1 || calls[0].kind != "document" || calls[0].filename != "example.go.md" {
+		t.Errorf("code should spill to example.go.md under overflow=error: %+v", calls)
 	}
 }
 
