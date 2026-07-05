@@ -908,7 +908,15 @@ func resolveResponderCwd(cfg *Config) (dir string, ephemeral bool, err error) {
 		}
 		return project, false, nil
 	}
-	dir, err = os.MkdirTemp(resolveRuntimeBase(cfg.RuntimeBase), "ak-tgclaude-cwd-")
+	// The base can come from $XDG_RUNTIME_DIR / os.TempDir(), which skip the config
+	// validatePath pass — but the ephemeral cwd's outbox lands in the sandbox
+	// deny-read glob, so validate the RESOLVED base too (a glob metacharacter in
+	// $TMPDIR would silently mis-scope that deny-read).
+	base := resolveRuntimeBase(cfg.RuntimeBase)
+	if err := validatePath("runtime_base", base); err != nil {
+		return "", false, err
+	}
+	dir, err = os.MkdirTemp(base, "ak-tgclaude-cwd-")
 	if err != nil {
 		return "", false, fmt.Errorf("creating ephemeral cwd: %w", err)
 	}

@@ -75,6 +75,11 @@ func TestParseConfigUsageLog(t *testing.T) {
 	if cflag.UsageLog != "/data/from-flag.jsonl" {
 		t.Errorf("CLI usage_log should override file, got %q", cflag.UsageLog)
 	}
+	// The path now feeds the sandbox allow/denyRead glob, so a glob metacharacter is
+	// rejected at load — otherwise the non-owner denyRead would silently mis-scope.
+	if _, err := parseConfig([]string{"--usage-log", "/data/usage-*.jsonl"}); err == nil {
+		t.Errorf("a glob metacharacter in usage_log should be rejected")
+	}
 }
 
 func TestParseConfigAllowUserInvalid(t *testing.T) {

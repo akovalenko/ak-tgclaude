@@ -673,8 +673,11 @@ func (c *Config) resolvePaths() {
 	// UploadCommand is a path (exec'd by the dispatcher, not sandbox-glob-matched, so
 	// no validatePath); resolve ~ and make it absolute like every other path.
 	c.UploadCommand = resolvePath(c.UploadCommand)
-	// UsageLog is written by the dispatcher (unsandboxed) and never reaches the
-	// responder/sandbox, so like UploadCommand it resolves but needs no validatePath.
+	// UsageLog is written by the dispatcher (unsandboxed), but its PATH now reaches
+	// the sandbox: the per-invocation overlay carves it into allowRead (owner) or
+	// denyRead (everyone else), both fnmatch-globbed. So it is validated in
+	// validatePaths like the other glob-bound paths — a glob metacharacter here would
+	// silently break the non-owner denyRead (leaking the cost log across chats).
 	c.UsageLog = resolvePath(c.UsageLog)
 	for _, l := range [][]string{c.WireSkills, c.AddSkills, c.AddAgents, c.DenyRead} {
 		for i := range l {
@@ -705,6 +708,7 @@ func (c *Config) validatePaths() error {
 		{"workdir", c.Workdir},
 		{"state_dir", c.StateDir},
 		{"transcript_dir", c.TranscriptDir},
+		{"usage_log", c.UsageLog},
 		{"runtime_base", c.RuntimeBase},
 		{"config", c.ConfigPath},
 	} {

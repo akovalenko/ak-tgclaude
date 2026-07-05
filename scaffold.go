@@ -1117,11 +1117,16 @@ func runScaffold(args []string) error {
 	if cfg.Agent != "" {
 		agentFlag = " --agent " + cfg.Agent
 	}
+	// This is a copy-pasteable shell command, so shell-quote the values that carry a
+	// runtime path (the outbox, under workdir) or JSON with metacharacters (the
+	// settings overlay): a space or an apostrophe in the workdir — both legal, since
+	// only glob metacharacters are rejected — would otherwise break the paste. The
+	// dispatcher's own invocation is argv, not a shell, so it needs none of this.
 	fmt.Printf("\nrun claude there by hand to observe the sandbox (the --settings\n")
 	fmt.Printf("overlay grants write to just this outbox, as the dispatcher does per invocation;\n")
 	fmt.Printf("the MCP send tools are NOT wired here — they need the running dispatcher):\n")
-	fmt.Printf("  cd %s\n", project)
-	fmt.Printf("  AK_TGCLAUDE_OUTBOX=%s claude -p --setting-sources project --permission-mode dontAsk \\\n", outboxRoot)
-	fmt.Printf("    --settings '%s'%s 'hello'\n", buildInvocationSettings(outboxRoot, "", "", false), agentFlag)
+	fmt.Printf("  cd %s\n", shellQuote(project))
+	fmt.Printf("  AK_TGCLAUDE_OUTBOX=%s claude -p --setting-sources project --permission-mode dontAsk \\\n", shellQuote(outboxRoot))
+	fmt.Printf("    --settings %s%s 'hello'\n", shellQuote(buildInvocationSettings(outboxRoot, "", "", false)), agentFlag)
 	return nil
 }
