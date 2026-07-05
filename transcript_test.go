@@ -218,6 +218,45 @@ func TestTranscriptTimestampSecondsRFC3339(t *testing.T) {
 	}
 }
 
+func TestTranscriptAuthorFields(t *testing.T) {
+	root := t.TempDir()
+	s := NewTranscriptStore(root)
+	// A group turn carries first_name in Name and the @handle in Username, kept apart.
+	if err := s.Append(8, TranscriptRecord{
+		MsgID: 1, TS: fixedTS(2026, 7, 4, 9), Role: "user", Text: "hi",
+		User: 777, Name: "Anton", Username: "akovalenko",
+	}, nil); err != nil {
+		t.Fatal(err)
+	}
+	// A speaker with no @handle: Username is omitted, Name still carries the first name.
+	if err := s.Append(8, TranscriptRecord{
+		MsgID: 2, TS: fixedTS(2026, 7, 4, 9), Role: "user", Text: "hey",
+		User: 888, Name: "Nick",
+	}, nil); err != nil {
+		t.Fatal(err)
+	}
+	lines := readLines(t, filepath.Join(root, "8", "2026-07-04.jsonl"))
+	if len(lines) != 2 {
+		t.Fatalf("want 2 lines, got %d", len(lines))
+	}
+
+	var withHandle TranscriptRecord
+	if err := json.Unmarshal([]byte(lines[0]), &withHandle); err != nil {
+		t.Fatal(err)
+	}
+	if withHandle.Name != "Anton" || withHandle.Username != "akovalenko" || withHandle.User != 777 {
+		t.Errorf("author fields not split: %+v", withHandle)
+	}
+	// The raw line keeps the msg_id grep anchor at the front despite the new fields.
+	if !strings.HasPrefix(lines[0], `{"msg_id":1,`) {
+		t.Errorf("author fields broke the grep anchor: %s", lines[0])
+	}
+	// A missing @handle is omitted from the JSON (private-side shape preserved).
+	if strings.Contains(lines[1], "username") {
+		t.Errorf("empty username should be omitted: %s", lines[1])
+	}
+}
+
 func TestTranscriptReplyToOmittedWhenZero(t *testing.T) {
 	root := t.TempDir()
 	s := NewTranscriptStore(root)

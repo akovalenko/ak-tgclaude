@@ -377,7 +377,8 @@ it treats them:
   delivered and works; a second bot would need `/do@thisbot`.)
 - **Chatter feeds recall.** Every group message (addressed or not, authorized or
   not) is appended to the [transcript](#transcripts--recall) when that feature is
-  on, attributed to its author (`user`/`name`). So when an authorized member
+  on, attributed to its author (`user` id, `name` = first_name, `username` =
+  @handle). So when an authorized member
   later addresses the bot, its responder can recall what the room has been
   discussing. Group support is most useful with `transcripts` on; without it,
   unaddressed chatter is simply dropped.

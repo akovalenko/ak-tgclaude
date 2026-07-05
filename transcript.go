@@ -48,13 +48,21 @@ type TranscriptRecord struct {
 	PartOf int64              `json:"part_of,omitempty"`
 	Text   string             `json:"text"`
 	Attach []TranscriptAttach `json:"attach,omitempty"`
-	// User/Name identify the AUTHOR of a turn — needed in a GROUP transcript, where one
-	// chat carries many speakers and meta.json holds only the latest. Omitted (0/"") on
-	// the private side, where the single chat partner is implied, so private-chat lines
-	// keep their old shape. User is a Telegram user id. Declared after MsgID so the
-	// recall grep's `{"msg_id":N,` anchor is unaffected.
-	User int64  `json:"user,omitempty"`
-	Name string `json:"name,omitempty"`
+	// User/Name/Username identify the AUTHOR of a turn — needed in a GROUP transcript,
+	// where one chat carries many speakers and meta.json holds only the latest. Omitted
+	// (0/"") on the private side, where the single chat partner is implied, so
+	// private-chat lines keep their old shape. User is the Telegram user id; Name is the
+	// sender's first_name (always present for a real user); Username is the @handle
+	// without the @ (may be absent). Declared after MsgID so the recall grep's
+	// `{"msg_id":N,` anchor is unaffected.
+	//
+	// Legacy: records written before Name and Username were split stored an
+	// @username-or-first_name blend in Name and had no Username field. They are left
+	// as-is (never rewritten), so an old Name may actually be a handle; only records
+	// from this version on keep the two apart.
+	User     int64  `json:"user,omitempty"`
+	Name     string `json:"name,omitempty"`
+	Username string `json:"username,omitempty"`
 }
 
 // TranscriptAttach records that a turn carried a file — metadata only, never the

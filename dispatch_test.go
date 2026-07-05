@@ -866,7 +866,8 @@ func TestHandleGroupUnauthorizedRecordsButSilent(t *testing.T) {
 	if err := json.Unmarshal([]byte(lines[0]), &rec); err != nil {
 		t.Fatal(err)
 	}
-	if rec.User != 5 || rec.Name != "stranger" || rec.Text != "hello room" {
+	// Name is the first_name and Username the @handle, kept apart.
+	if rec.User != 5 || rec.Name != "S" || rec.Username != "stranger" || rec.Text != "hello room" {
 		t.Errorf("group record wrong (author must be attributed): %+v", rec)
 	}
 }

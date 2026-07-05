@@ -292,14 +292,15 @@ func (d *Dispatcher) recordUserTurnAs(m *Message, text string, meta []Transcript
 		ident = &ChatIdentity{Username: m.From.Username, FirstName: m.From.FirstName}
 	}
 	rec := TranscriptRecord{
-		MsgID:   m.MessageID,
-		TS:      messageSentAt(m),
-		Role:    "user",
-		ReplyTo: replyToID(m),
-		Text:    text,
-		Attach:  meta,
-		User:    userID(m.From),
-		Name:    userName(m.From),
+		MsgID:    m.MessageID,
+		TS:       messageSentAt(m),
+		Role:     "user",
+		ReplyTo:  replyToID(m),
+		Text:     text,
+		Attach:   meta,
+		User:     userID(m.From),
+		Name:     userFirstName(m.From),
+		Username: userHandle(m.From),
 	}
 	if err := d.transcripts.Append(m.Chat.ID, rec, ident); err != nil {
 		log.Printf("ak-tgclaude: transcript(user) chat=%d msg=%d: %v", m.Chat.ID, m.MessageID, err)
@@ -791,17 +792,24 @@ func (d *Dispatcher) personaForChat(chatID int64) persona {
 	return d.groupDefaultPersona
 }
 
-// userName renders a message sender for transcript attribution: the @username
-// when present, else the first name, else "". Distinct from userLabel (which is
-// for logs and includes the numeric id).
-func userName(u *User) string {
+// userFirstName is a sender's first name for transcript attribution — always
+// present for a real user, "" when there is no sender. The transcript keeps it
+// apart from the @handle so a group reader sees the real name even when a handle
+// exists (userHandle carries the handle separately).
+func userFirstName(u *User) string {
 	if u == nil {
 		return ""
 	}
-	if u.Username != "" {
-		return u.Username
-	}
 	return u.FirstName
+}
+
+// userHandle is a sender's @username (without the @) for transcript attribution,
+// or "" when they have none (or there is no sender).
+func userHandle(u *User) string {
+	if u == nil {
+		return ""
+	}
+	return u.Username
 }
 
 // userLabel renders a message sender for logs: the numeric id, plus @username
