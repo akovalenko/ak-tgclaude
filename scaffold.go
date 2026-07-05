@@ -568,58 +568,51 @@ func materializeSkills(claudeDir, project, uploadNote string, transcriptsOn, usa
 	})
 }
 
-// wireSkills materializes each operator skill template into
-// <cwd>/.claude/skills/<name> (substituting {{PROJECT}}) and returns the skill
-// names, so they can be preloaded into the built-in agent. Each path must be a
-// skill DIRECTORY (its basename is the skill name): the whole tree is copied, so
-// bundled resources (reference.md, scripts, selftest) come along and executable
-// bits are preserved. A bare SKILL.md file is rejected — copying only it would
-// silently drop the skill's siblings (least surprise). The directory basename
-// must match the skill's frontmatter `name:` for the preload reference to resolve.
-func wireSkills(claudeDir, project string, paths []string) ([]string, error) {
+// copySkillDirs copies each skill DIRECTORY (its basename is the skill name)
+// into <claudeDir>/skills/<name> and returns the names. The whole tree is
+// copied, so bundled resources (reference.md, scripts, selftest) come along and
+// executable bits are preserved; a bare SKILL.md file is rejected — copying only
+// it would silently drop the skill's siblings (least surprise). project is
+// substituted for {{PROJECT}} in every file ("" copies verbatim); verb labels
+// errors after the config knob ("wire skill" / "add skill").
+func copySkillDirs(claudeDir, project string, paths []string, verb string) ([]string, error) {
 	var names []string
 	for _, p := range paths {
 		info, err := os.Stat(p)
 		if err != nil {
-			return nil, fmt.Errorf("wire skill %s: %w", p, err)
+			return nil, fmt.Errorf("%s %s: %w", verb, p, err)
 		}
 		if !info.IsDir() {
-			return nil, fmt.Errorf("wire skill %s: must be a skill DIRECTORY, not a file "+
+			return nil, fmt.Errorf("%s %s: must be a skill DIRECTORY, not a file "+
 				"(the whole skill tree is copied so bundled resources come along) — pass %s instead",
-				p, filepath.Dir(p))
+				verb, p, filepath.Dir(p))
 		}
 		name := filepath.Base(p)
 		if err := copyTreeMaterialize(p, filepath.Join(claudeDir, "skills", name), project); err != nil {
-			return nil, fmt.Errorf("wire skill %s: %w", p, err)
+			return nil, fmt.Errorf("%s %s: %w", verb, p, err)
 		}
 		names = append(names, name)
 	}
 	return names, nil
 }
 
+// wireSkills materializes each operator skill template into
+// <cwd>/.claude/skills/<name> (substituting {{PROJECT}}) and returns the skill
+// names, so they can be preloaded into the built-in agent. The directory
+// basename must match the skill's frontmatter `name:` for the preload reference
+// to resolve.
+func wireSkills(claudeDir, project string, paths []string) ([]string, error) {
+	return copySkillDirs(claudeDir, project, paths, "wire skill")
+}
+
 // addSkills copies each GENERIC skill DIRECTORY verbatim into
-// <cwd>/.claude/skills/<name> — no {{PROJECT}} substitution (empty project) and
-// no agent preload. The skill is left for on-demand use: its description sits in
-// the responder's context (the skill "table of contents") and it invokes the
-// skill via the Skill tool when relevant. Like wireSkills, a bare SKILL.md file is
-// rejected — the whole tree is copied so bundled resources (and +x) come along.
+// <cwd>/.claude/skills/<name> — no {{PROJECT}} substitution and no agent
+// preload. The skill is left for on-demand use: its description sits in the
+// responder's context (the skill "table of contents") and it invokes the skill
+// via the Skill tool when relevant.
 func addSkills(claudeDir string, paths []string) error {
-	for _, p := range paths {
-		info, err := os.Stat(p)
-		if err != nil {
-			return fmt.Errorf("add skill %s: %w", p, err)
-		}
-		if !info.IsDir() {
-			return fmt.Errorf("add skill %s: must be a skill DIRECTORY, not a file "+
-				"(the whole skill tree is copied so bundled resources come along) — pass %s instead",
-				p, filepath.Dir(p))
-		}
-		name := filepath.Base(p)
-		if err := copyTreeMaterialize(p, filepath.Join(claudeDir, "skills", name), ""); err != nil {
-			return fmt.Errorf("add skill %s: %w", p, err)
-		}
-	}
-	return nil
+	_, err := copySkillDirs(claudeDir, "", paths, "add skill")
+	return err
 }
 
 // addAgents copies each GENERIC agent .md FILE verbatim into

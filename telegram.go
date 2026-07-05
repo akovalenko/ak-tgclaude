@@ -146,18 +146,7 @@ func (c *Client) GetUpdates(ctx context.Context, offset int64, timeoutSec int) (
 	if err != nil {
 		return nil, err
 	}
-	var r struct {
-		OK          bool     `json:"ok"`
-		Description string   `json:"description"`
-		Result      []Update `json:"result"`
-	}
-	if err := json.Unmarshal(body, &r); err != nil {
-		return nil, fmt.Errorf("decoding getUpdates (HTTP %d): %w", status, err)
-	}
-	if !r.OK {
-		return nil, fmt.Errorf("getUpdates error (HTTP %d): %s", status, r.Description)
-	}
-	return r.Result, nil
+	return decodeEnvelope[[]Update](status, body)
 }
 
 // fileURL builds the download URL for a getFile file_path. Note the /file/
@@ -175,24 +164,16 @@ func (c *Client) GetFile(ctx context.Context, fileID string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	var r struct {
-		OK          bool   `json:"ok"`
-		ErrorCode   int    `json:"error_code"`
-		Description string `json:"description"`
-		Result      struct {
-			FilePath string `json:"file_path"`
-		} `json:"result"`
+	res, err := decodeEnvelope[struct {
+		FilePath string `json:"file_path"`
+	}](status, body)
+	if err != nil {
+		return "", err
 	}
-	if err := json.Unmarshal(body, &r); err != nil {
-		return "", fmt.Errorf("decoding getFile (HTTP %d): %w", status, err)
-	}
-	if !r.OK {
-		return "", newAPIError(status, r.ErrorCode, r.Description, nil)
-	}
-	if r.Result.FilePath == "" {
+	if res.FilePath == "" {
 		return "", fmt.Errorf("getFile (HTTP %d): empty file_path", status)
 	}
-	return r.Result.FilePath, nil
+	return res.FilePath, nil
 }
 
 // DownloadFile streams the file at a getFile file_path into dst and returns the
@@ -426,40 +407,43 @@ func newAPIError(status, errorCode int, description string, params *apiErrorPara
 	return e
 }
 
-// checkOK verifies a Bot API response envelope carries ok:true (for methods
-// whose result payload the caller does not need, e.g. sendChatAction).
-func checkOK(status int, body []byte) error {
+// decodeEnvelope decodes a Bot API {ok, error_code, description, parameters,
+// result} envelope and returns the result payload (T is the method's result
+// shape). Every Bot API method funnels through here, so a non-OK envelope
+// uniformly becomes a structured *APIError — the dispatcher's errors.As
+// classification works on any method's failure, getUpdates included.
+func decodeEnvelope[T any](status int, body []byte) (T, error) {
 	var ar struct {
 		OK          bool            `json:"ok"`
 		ErrorCode   int             `json:"error_code"`
 		Description string          `json:"description"`
 		Parameters  *apiErrorParams `json:"parameters"`
+		Result      T               `json:"result"`
 	}
+	var zero T
 	if err := json.Unmarshal(body, &ar); err != nil {
-		return fmt.Errorf("decoding Telegram response (HTTP %d): %w", status, err)
+		return zero, fmt.Errorf("decoding Telegram response (HTTP %d): %w", status, err)
 	}
 	if !ar.OK {
-		return newAPIError(status, ar.ErrorCode, ar.Description, ar.Parameters)
+		return zero, newAPIError(status, ar.ErrorCode, ar.Description, ar.Parameters)
 	}
-	return nil
+	return ar.Result, nil
+}
+
+// checkOK verifies a Bot API response envelope carries ok:true (for methods
+// whose result payload the caller does not need, e.g. sendChatAction).
+func checkOK(status int, body []byte) error {
+	_, err := decodeEnvelope[json.RawMessage](status, body)
+	return err
 }
 
 // decodeMessageID unwraps the {ok, result:{message_id}} envelope.
 func decodeMessageID(status int, body []byte) (int64, error) {
-	var ar struct {
-		OK          bool            `json:"ok"`
-		ErrorCode   int             `json:"error_code"`
-		Description string          `json:"description"`
-		Parameters  *apiErrorParams `json:"parameters"`
-		Result      struct {
-			MessageID int64 `json:"message_id"`
-		} `json:"result"`
+	res, err := decodeEnvelope[struct {
+		MessageID int64 `json:"message_id"`
+	}](status, body)
+	if err != nil {
+		return 0, err
 	}
-	if err := json.Unmarshal(body, &ar); err != nil {
-		return 0, fmt.Errorf("decoding Telegram response (HTTP %d): %w", status, err)
-	}
-	if !ar.OK {
-		return 0, newAPIError(status, ar.ErrorCode, ar.Description, ar.Parameters)
-	}
-	return ar.Result.MessageID, nil
+	return res.MessageID, nil
 }

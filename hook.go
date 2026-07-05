@@ -93,7 +93,7 @@ func envFilePolicy(deny []string) filePolicy {
 // by this hook.
 func runHookPreToolUse(args []string) {
 	fs := flag.NewFlagSet("hook pretooluse", flag.ContinueOnError)
-	var deny multiFlag
+	var deny stringList
 	fs.Var(&deny, "deny-read", "path the responder must not read (repeatable)")
 	bangBug := fs.Bool("bang-bug", false, `deny sandboxed Bash whose command contains \! (bug #64301: the sandbox corrupts the bang char)`)
 	logFile := fs.String("log-file", "", "append every PreToolUse call (tool, decision, full input) to this file")
@@ -243,13 +243,4 @@ func emitDecision(decision, reason string) {
 	out.HookSpecificOutput.PermissionDecisionReason = reason
 	_ = json.NewEncoder(os.Stdout).Encode(&out)
 	os.Exit(0)
-}
-
-// multiFlag collects a repeatable string flag.
-type multiFlag []string
-
-func (m *multiFlag) String() string { return strings.Join(*m, ",") }
-func (m *multiFlag) Set(v string) error {
-	*m = append(*m, v)
-	return nil
 }
