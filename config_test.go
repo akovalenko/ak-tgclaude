@@ -41,6 +41,41 @@ func TestParseConfigEphemeralAndBillFlags(t *testing.T) {
 	}
 }
 
+func TestParseConfigUsageLog(t *testing.T) {
+	// Default: off (empty path).
+	d, _ := parseConfig(nil)
+	if d.UsageLog != "" {
+		t.Errorf("usage_log should default off, got %q", d.UsageLog)
+	}
+	// --usage-log sets it, expanded to an absolute path like every other path field.
+	c, err := parseConfig([]string{"--usage-log", "var/usage.jsonl"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !filepath.IsAbs(c.UsageLog) || !strings.HasSuffix(c.UsageLog, string(os.PathSeparator)+filepath.Join("var", "usage.jsonl")) {
+		t.Errorf("usage_log should resolve to an absolute path, got %q", c.UsageLog)
+	}
+	// File value works; CLI overrides it.
+	path := filepath.Join(t.TempDir(), "bot.toml")
+	if err := os.WriteFile(path, []byte("usage_log = \"/data/from-file.jsonl\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cf, err := parseConfig([]string{"--config", path})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cf.UsageLog != "/data/from-file.jsonl" {
+		t.Errorf("file usage_log = %q, want /data/from-file.jsonl", cf.UsageLog)
+	}
+	cflag, err := parseConfig([]string{"--config", path, "--usage-log", "/data/from-flag.jsonl"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cflag.UsageLog != "/data/from-flag.jsonl" {
+		t.Errorf("CLI usage_log should override file, got %q", cflag.UsageLog)
+	}
+}
+
 func TestParseConfigAllowUserInvalid(t *testing.T) {
 	if _, err := parseConfig([]string{"--allow-user", "notanumber"}); err == nil {
 		t.Error("non-numeric --allow-user should error")

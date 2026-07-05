@@ -224,6 +224,15 @@ type Config struct {
 	// run would cost at API rates), not real billing. Default false. Also --bill.
 	Bill bool `toml:"bill"`
 
+	// UsageLog is a path to an append-only JSONL file recording one line per
+	// answered round: {ts, chat_id, user_id, msg_id, elapsed, cost}. msg_id is the
+	// incoming message id (joins the transcript store). elapsed is the round's
+	// wall-clock seconds (whole round, so a delivery-guard re-prompt is counted in),
+	// cost is the summed total_cost_usd (0 when absent). The PATH is the switch:
+	// empty => off (nothing written, the default); set => on. Written by the
+	// dispatcher (unsandboxed), never handed to the responder. Also --usage-log.
+	UsageLog string `toml:"usage_log"`
+
 	// AllowSilent DISABLES the delivery guard. The guard (on by default) catches a
 	// responder that ended without calling any send tool — a weaker model sometimes
 	// dumps its answer into its final text, which is only the discarded status
@@ -429,6 +438,7 @@ func parseConfig(args []string) (*Config, error) {
 	owner := fs.Int64("owner", 0, "Telegram user id treated as the bot owner: auto-whitelisted and granted the relaxed owner persona (norefuse + introspect) unless it has an explicit policy_overrides entry")
 	ephemeralSessions := fs.Bool("ephemeral-sessions", false, "keep chat→session bindings in memory only (never persisted; offset still persists; each restart starts fresh)")
 	bill := fs.Bool("bill", false, "after each answer, send the run's dollar cost as a bare \"$n.nnn\" message (only when present and non-zero)")
+	usageLog := fs.String("usage-log", "", "path to an append-only JSONL usage log ({ts,chat_id,user_id,msg_id,elapsed,cost} per answered round; elapsed=whole-round seconds, cost=summed USD); the path is the switch — empty => off (default)")
 	allowSilent := fs.Bool("allow-silent", false, "DISABLE the delivery guard (on by default): allow a responder turn that sends nothing. Normally a no-send turn is re-prompted once, then answered with undelivered_text")
 	debug := fs.Bool("debug", false, "troubleshooting output to the dispatcher log: pass --debug to the responder's `claude -p` (MCP handshake/tool-call transport diagnostics), dump each run's final text, and on a chat's first spawn log the resolved persona (selector label + the composed --append-system-prompt); verbose")
 	bangBug := fs.Bool("bang-bug", false, `deny sandboxed Bash containing \! (workaround for bug #64301 corrupting the bang char); the responder writes such commands to a file instead`)
@@ -554,6 +564,9 @@ func parseConfig(args []string) (*Config, error) {
 	if *bill {
 		c.Bill = true
 	}
+	if *usageLog != "" {
+		c.UsageLog = *usageLog
+	}
 	if *allowSilent {
 		c.AllowSilent = true
 	}
@@ -626,6 +639,9 @@ func parseConfig(args []string) (*Config, error) {
 	// UploadCommand is a path (exec'd by the dispatcher, not sandbox-glob-matched, so
 	// no validatePath); resolve ~ and make it absolute like every other path.
 	c.UploadCommand = resolvePath(c.UploadCommand)
+	// UsageLog is written by the dispatcher (unsandboxed) and never reaches the
+	// responder/sandbox, so like UploadCommand it resolves but needs no validatePath.
+	c.UsageLog = resolvePath(c.UsageLog)
 	for i := range c.WireSkills {
 		c.WireSkills[i] = resolvePath(c.WireSkills[i])
 	}

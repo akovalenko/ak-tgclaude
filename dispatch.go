@@ -84,6 +84,10 @@ type Dispatcher struct {
 	transcriptRoot string
 	owner          int64
 	ownerReadsAll  bool
+
+	// usage, when non-nil, appends one JSONL line per answered round (elapsed +
+	// round-summed cost). Enabled solely by configuring usage_log; nil => off.
+	usage *UsageLog
 }
 
 // Run long-polls and dispatches updates to per-chat workers until ctx is
@@ -461,6 +465,10 @@ func (d *Dispatcher) handleUpdate(ctx context.Context, u Update) {
 		}
 	}
 
+	// Round accounting: the run's cost, to which a delivery-guard re-prompt (below)
+	// adds its own — one round, one summed figure for both --bill and the usage log.
+	roundCost := res.CostUSD
+
 	// Delivery guard: the responder's final text is only a status signal (discarded),
 	// so an answer reaches the user ONLY through a send tool. A weaker model sometimes
 	// ends without calling one, dumping its answer into that discarded text. If this
@@ -485,6 +493,7 @@ func (d *Dispatcher) handleUpdate(ctx context.Context, u Update) {
 			TranscriptScope: transcriptScope,
 		})
 		rStopTyping()
+		roundCost += res2.CostUSD // fold the re-prompt's cost into the round (0 if it errored)
 		if err != nil {
 			log.Printf("ak-tgclaude: redeliver chat=%d user=%s msg=%d FAILED: %v", m.Chat.ID, ulabel, m.MessageID, err)
 		} else if res2.SessionID != "" {
@@ -502,18 +511,29 @@ func (d *Dispatcher) handleUpdate(ctx context.Context, u Update) {
 		}
 	}
 
+	// Whole-round wall time, captured before the (dispatcher-side) bill/usage sends so
+	// their own latency doesn't inflate "how long the model took"; covers any re-prompt.
+	roundElapsed := time.Since(start)
+
 	if d.bill {
-		if line, ok := billLine(res.CostUSD); ok {
+		if line, ok := billLine(roundCost); ok {
 			if _, err := d.sender.SendMessage(ctx, route, line, "", false); err != nil {
 				log.Printf("ak-tgclaude: bill %d: %v", m.Chat.ID, err)
 			}
 		}
 	}
+
+	if d.usage != nil {
+		if err := d.usage.Append(start, m.Chat.ID, userID(m.From), m.MessageID, roundElapsed, roundCost); err != nil {
+			log.Printf("ak-tgclaude: usage log chat=%d: %v", m.Chat.ID, err)
+		}
+	}
 }
 
-// billLine renders the run's dollar cost for the --bill message: a bare "$n.nnn"
-// at tenth-of-a-cent precision. ok is false when the cost is absent or rounds to
-// zero (total_cost_usd null/0 — e.g. a fully cached turn), so the dispatcher
+// billLine renders the round's dollar cost for the --bill message: a bare "$n.nnn"
+// at tenth-of-a-cent precision (the round is the run plus any delivery-guard
+// re-prompt, summed by the caller). ok is false when the cost is absent or rounds
+// to zero (total_cost_usd null/0 — e.g. a fully cached turn), so the dispatcher
 // sends nothing rather than a meaningless "$0.000".
 func billLine(costUSD float64) (string, bool) {
 	if costUSD <= 0 {
@@ -669,6 +689,17 @@ func runDispatch(args []string) {
 		}
 		transcripts = NewTranscriptStore(root)
 		log.Printf("ak-tgclaude: transcripts on, root %s (owner_reads_all=%v)", root, cfg.OwnerReadsAllTranscripts())
+	}
+
+	// The usage log (nil unless usage_log is set): one JSONL line per answered round.
+	var usage *UsageLog
+	if p := cfg.UsageLog; p != "" {
+		usage, err = NewUsageLog(p)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "ak-tgclaude: dispatch: %v\n", err)
+			os.Exit(1)
+		}
+		log.Printf("ak-tgclaude: usage log on, path %s", p)
 	}
 
 	client := NewClient(cfg.BotToken)
@@ -836,6 +867,8 @@ func runDispatch(args []string) {
 		transcriptRoot: cfg.TranscriptRoot(),
 		owner:          cfg.Owner,
 		ownerReadsAll:  cfg.OwnerReadsAllTranscripts(),
+
+		usage: usage,
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)

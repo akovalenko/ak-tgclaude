@@ -184,11 +184,26 @@ never race on the same `--resume` session). For each message:
    clears the action; the next refresh re-asserts it).
 3. When the responder finishes, the session id it used (parsed from
    `--output-format json`) is bound to the chat, so the next message
-   `--resume`s it. With **`bill`** (`--bill`) set, the run's `total_cost_usd`
+   `--resume`s it. With **`bill`** (`--bill`) set, the round's `total_cost_usd`
    (also from that JSON) is sent to the chat as a bare **`$n.nnn`** message —
    only when it is present and non-zero, otherwise nothing. Under a Claude
    subscription the figure is *notional* (what the run would cost at API rates),
-   not real billing.
+   not real billing. The **round** is the run plus any delivery-guard re-prompt
+   (below): its cost is the two summed, and that same round figure feeds the
+   usage log.
+
+**Usage log (`usage_log` / `--usage-log`).** Point it at a file and the dispatcher
+appends one compact **JSONL** line per answered round —
+`{"ts","chat_id","user_id","msg_id","elapsed","cost"}` — for cost/latency
+analytics; leave it empty (the default) and nothing is written. `ts` is the round's
+start (RFC3339, host-local zone, whole seconds); `msg_id` is the incoming message's
+Telegram id, so a row **joins the transcript store** (keyed on `chat_id` + `msg_id`)
+for that turn; `elapsed` is the **whole-round** wall-clock in
+seconds (a delivery-guard re-prompt is counted in, so it is *not* the per-`claude -p`
+time); `cost` is the round-summed `total_cost_usd`, `0` when absent. The path is
+the only switch, the parent dir is created if missing, and concurrent per-chat
+rounds append safely. It is written by the dispatcher and never exposed to the
+responder.
 
 **The per-invocation token is the route capability.** The dispatcher pins the
 route in memory and binds it to the bearer token it handed this one responder; the

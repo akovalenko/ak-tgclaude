@@ -323,6 +323,7 @@ func TestHandleClearDropsSessionAndSkipsResponder(t *testing.T) {
 type scriptedResponder struct {
 	sid     string
 	rounds  [][]string
+	costs   []float64 // per-call cost (costs[i] for the i-th call; 0 past the end)
 	calls   int
 	prompts []string
 }
@@ -333,13 +334,17 @@ func (s *scriptedResponder) Respond(ctx context.Context, req RespondRequest) (Re
 	if s.calls < len(s.rounds) {
 		replies = s.rounds[s.calls]
 	}
+	var cost float64
+	if s.calls < len(s.costs) {
+		cost = s.costs[s.calls]
+	}
 	s.calls++
 	for _, text := range replies {
 		if err := mcpStubSend(ctx, req.MCPURL, req.MCPToken, text); err != nil {
 			return RespondResult{}, err
 		}
 	}
-	return RespondResult{SessionID: s.sid}, nil
+	return RespondResult{SessionID: s.sid, CostUSD: cost}, nil
 }
 
 func TestDeliveryGuardRepromptsThenDelivers(t *testing.T) {
@@ -524,6 +529,95 @@ func TestHandleBillSilentWhenZeroOrDisabled(t *testing.T) {
 	d2.handleUpdate(context.Background(), textUpdate(1, 42, 7, "hi"))
 	if calls := sender2.snapshot(); len(calls) != 1 {
 		t.Fatalf("bill disabled should send no bill: %+v", calls)
+	}
+}
+
+func TestHandleUsageLogWritesRow(t *testing.T) {
+	resp := &fakeResponder{sid: "s", cost: 0.0123, replies: []string{"answer"}}
+	sender := &fakeSender{}
+	d := newTestDispatcher(t, resp, sender)
+	path := filepath.Join(t.TempDir(), "usage.jsonl")
+	var err error
+	if d.usage, err = NewUsageLog(path); err != nil {
+		t.Fatal(err)
+	}
+
+	up := Update{UpdateID: 1, Message: &Message{
+		MessageID: 7, Text: "hi", Chat: Chat{ID: 42}, From: &User{ID: 5},
+	}}
+	d.handleUpdate(context.Background(), up)
+
+	rows := readUsageRows(t, path)
+	if len(rows) != 1 {
+		t.Fatalf("want exactly one usage row, got %d", len(rows))
+	}
+	r := rows[0]
+	if r.ChatID != 42 || r.UserID != 5 || r.MsgID != 7 {
+		t.Errorf("row ids = chat %d user %d msg %d, want 42/5/7", r.ChatID, r.UserID, r.MsgID)
+	}
+	if r.Cost != 0.0123 {
+		t.Errorf("row cost = %v, want 0.0123", r.Cost)
+	}
+	if r.Elapsed < 0 {
+		t.Errorf("elapsed should be >= 0, got %d", r.Elapsed)
+	}
+	if r.TS.IsZero() {
+		t.Errorf("row ts should be set")
+	}
+}
+
+func TestHandleUsageLogOffWritesNothing(t *testing.T) {
+	// No usage_log configured (d.usage nil): a normal round writes no file.
+	resp := &fakeResponder{sid: "s", cost: 1, replies: []string{"answer"}}
+	d := newTestDispatcher(t, resp, &fakeSender{})
+	d.handleUpdate(context.Background(), textUpdate(1, 42, 7, "hi")) // must not panic
+}
+
+func TestHandleUsageLogSumsRepromptCost(t *testing.T) {
+	// First turn sends nothing (cost 0.01), the guard re-prompts and the second
+	// delivers (cost 0.02): the row's cost is the whole-round sum, 0.03.
+	resp := &scriptedResponder{sid: "s", rounds: [][]string{nil, {"answer"}}, costs: []float64{0.01, 0.02}}
+	sender := &fakeSender{}
+	d := newTestDispatcher(t, resp, sender)
+	d.requireDelivery = true
+	path := filepath.Join(t.TempDir(), "usage.jsonl")
+	var err error
+	if d.usage, err = NewUsageLog(path); err != nil {
+		t.Fatal(err)
+	}
+
+	d.handleUpdate(context.Background(), textUpdate(1, 42, 7, "question"))
+
+	if resp.calls != 2 {
+		t.Fatalf("expected a re-prompt (2 calls), got %d", resp.calls)
+	}
+	rows := readUsageRows(t, path)
+	if len(rows) != 1 {
+		t.Fatalf("want one row for the whole round, got %d", len(rows))
+	}
+	// Float sum: compare with a small epsilon rather than ==.
+	if got := rows[0].Cost; got < 0.0299 || got > 0.0301 {
+		t.Errorf("round cost = %v, want 0.03 (0.01 + re-prompt 0.02)", got)
+	}
+}
+
+func TestHandleBillCountsRepromptCost(t *testing.T) {
+	// The bill and the usage log share one round-cost: a re-prompt's cost is billed
+	// too (previously the bill dropped it). 0.01 + 0.02 => "$0.030".
+	resp := &scriptedResponder{sid: "s", rounds: [][]string{nil, {"answer"}}, costs: []float64{0.01, 0.02}}
+	sender := &fakeSender{}
+	d := newTestDispatcher(t, resp, sender)
+	d.requireDelivery = true
+	d.bill = true
+
+	d.handleUpdate(context.Background(), textUpdate(1, 42, 7, "question"))
+
+	calls := sender.snapshot()
+	if len(calls) != 2 {
+		t.Fatalf("want the re-delivered answer + a bill, got %d: %+v", len(calls), calls)
+	}
+	if calls[1].text != "$0.030" {
+		t.Errorf("bill = %q, want $0.030 (round sum incl. re-prompt)", calls[1].text)
 	}
 }
 

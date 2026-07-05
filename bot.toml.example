@@ -103,6 +103,16 @@ project = "~/code/example-project"
 # notional (what the run would cost at API rates), not real billing. Also --bill.
 # bill = false
 
+# Append-only JSONL usage log: one line per answered round, for cost/latency
+# analytics. The PATH is the switch — set it to enable, leave empty (default) to
+# write nothing. Each line is {ts, chat_id, user_id, msg_id, elapsed, cost}: ts is
+# the round's start (RFC3339, local zone, whole seconds); msg_id is the incoming
+# message id (joins the transcript store); elapsed is the whole-round
+# wall-clock in seconds (a delivery-guard re-prompt is counted in); cost is the
+# summed total_cost_usd (0 when absent). Written by the dispatcher, never exposed
+# to the responder. The parent dir is created if missing. Also --usage-log.
+# usage_log = "/var/lib/ak-tgclaude/usage.jsonl"
+
 # Keep the chat->session map in memory only: it is never written to disk, so
 # every restart starts each chat fresh. The getUpdates offset still persists (a
 # restart won't reprocess the backlog). Default false (bindings persist). Also
