@@ -62,6 +62,37 @@ func TestSendDescriptorSpillsOversized(t *testing.T) {
 	}
 }
 
+func TestSendDescriptorSplitsText(t *testing.T) {
+	f := &fakeSender{}
+	// Two near-limit lines: together over the limit, but the depth-0 newline between
+	// them is a clean break, so the message splits into two sends (not a spill).
+	line := strings.Repeat("y", telegramTextLimit-5)
+	ids, err := sendDescriptor(context.Background(),
+		&Descriptor{Kind: KindText, Text: line + "\n" + line}, Route{ChatID: 7, ReplyTo: 42}, f, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ids) != 2 {
+		t.Fatalf("want 2 message ids, got %d: %v", len(ids), ids)
+	}
+	calls := f.snapshot()
+	if len(calls) != 2 {
+		t.Fatalf("want 2 message sends, got %d", len(calls))
+	}
+	for i, c := range calls {
+		if c.kind != "message" {
+			t.Errorf("part %d should be a message, not %q", i, c.kind)
+		}
+	}
+	// Only the anchor quotes the incoming message; the piece is a plain follow-up.
+	if calls[0].route.ReplyTo != 42 {
+		t.Errorf("anchor should reply to the incoming message (42), got %d", calls[0].route.ReplyTo)
+	}
+	if calls[1].route.ReplyTo != 0 {
+		t.Errorf("piece should not reply (0), got %d", calls[1].route.ReplyTo)
+	}
+}
+
 func TestDeliveryError(t *testing.T) {
 	if got := deliveryError(&APIError{Code: 400, Description: "bad html"}); got != "bad html" {
 		t.Errorf("APIError should surface Description, got %q", got)

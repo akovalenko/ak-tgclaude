@@ -401,7 +401,7 @@ func (m *mcpServer) callTool(ctx context.Context, tok string, rt mcpRoute, param
 		log.Printf("ak-tgclaude: mcp: tools/call %s chat=%d: rejected: %v", call.Name, rt.route.ChatID, err)
 		return toolError(err.Error())
 	}
-	id, err := sendDescriptor(ctx, d, rt.route, m.sender, m.uploader)
+	ids, err := sendDescriptor(ctx, d, rt.route, m.sender, m.uploader)
 	if err != nil {
 		// An upload-path failure (too large, uploader crashed, no URL) is surfaced
 		// to the model verbatim; only a genuine Telegram API error gets the "Telegram
@@ -428,23 +428,29 @@ func (m *mcpServer) callTool(ctx context.Context, tok string, rt mcpRoute, param
 		m.recordDelivered(tok)
 	}
 	// Record the bot's turn: every delivered message (progress notes too — they carry
-	// real ids a later reply_to may point at). ReplyTo is the incoming user message
-	// this reply threads to. Non-fatal on error.
+	// real ids a later reply_to may point at). A message that split across several
+	// sends writes one record per piece — the anchor (first id) carries the full text
+	// and threads to the incoming message; each later piece is a light stub pointing
+	// at the anchor via PartOf, so the answer is stored once yet every physical
+	// message_id resolves. Non-fatal on error.
+	anchor := ids[0]
 	if m.transcripts != nil {
-		brec := TranscriptRecord{
-			MsgID:   id,
-			TS:      time.Now(),
-			Role:    "bot",
-			ReplyTo: rt.route.ReplyTo,
-			Text:    botText(d),
-			Attach:  botAttach(d),
-		}
-		if err := m.transcripts.Append(rt.route.ChatID, brec, nil); err != nil {
-			log.Printf("ak-tgclaude: transcript(bot) chat=%d msg=%d: %v", rt.route.ChatID, id, err)
+		for i, mid := range ids {
+			brec := TranscriptRecord{MsgID: mid, TS: time.Now(), Role: "bot"}
+			if i == 0 {
+				brec.ReplyTo = rt.route.ReplyTo
+				brec.Text = botText(d)
+				brec.Attach = botAttach(d)
+			} else {
+				brec.PartOf = anchor
+			}
+			if err := m.transcripts.Append(rt.route.ChatID, brec, nil); err != nil {
+				log.Printf("ak-tgclaude: transcript(bot) chat=%d msg=%d: %v", rt.route.ChatID, mid, err)
+			}
 		}
 	}
-	log.Printf("ak-tgclaude: mcp: tools/call %s chat=%d -> message_id=%d progress=%t", call.Name, rt.route.ChatID, id, d.Progress)
-	return toolText(fmt.Sprintf("delivered (message_id %d)", id))
+	log.Printf("ak-tgclaude: mcp: tools/call %s chat=%d -> message_id=%d parts=%d progress=%t", call.Name, rt.route.ChatID, anchor, len(ids), d.Progress)
+	return toolText(fmt.Sprintf("delivered (message_id %d)", anchor))
 }
 
 // botText is the transcript text for a delivered descriptor: the message body, the

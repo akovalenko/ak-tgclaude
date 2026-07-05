@@ -81,6 +81,34 @@ func toolErrorText(resp map[string]any) string {
 	return s
 }
 
+// readTranscript parses every JSONL record under a chat's transcript dir, in file
+// (append) order.
+func readTranscript(t *testing.T, dir string) []TranscriptRecord {
+	t.Helper()
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("read transcript dir: %v", err)
+	}
+	var recs []TranscriptRecord
+	for _, e := range entries {
+		if !strings.HasSuffix(e.Name(), ".jsonl") {
+			continue
+		}
+		b, _ := os.ReadFile(filepath.Join(dir, e.Name()))
+		for _, ln := range strings.Split(strings.TrimSpace(string(b)), "\n") {
+			if ln == "" {
+				continue
+			}
+			var rec TranscriptRecord
+			if err := json.Unmarshal([]byte(ln), &rec); err != nil {
+				t.Fatalf("bad record %q: %v", ln, err)
+			}
+			recs = append(recs, rec)
+		}
+	}
+	return recs
+}
+
 func TestMCPToolsCallDelivers(t *testing.T) {
 	f := &fakeSender{}
 	m := newTestMCP(t, f)
@@ -132,6 +160,40 @@ func TestMCPRecordsBotTurn(t *testing.T) {
 	// route's incoming target.
 	if rec.Role != "bot" || rec.Text != "the answer" || rec.ReplyTo != 7 || rec.MsgID != 1 {
 		t.Errorf("bot record wrong: %+v", rec)
+	}
+}
+
+func TestMCPRecordsSplitTurn(t *testing.T) {
+	f := &fakeSender{}
+	m := newTestMCP(t, f)
+	root := t.TempDir()
+	m.transcripts = NewTranscriptStore(root)
+	tok, err := m.Register(Route{ChatID: 42, ReplyTo: 7}, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// An oversized message that splits into two sends must write two records: the
+	// anchor with the FULL text, and a light stub pointing back at it.
+	line := strings.Repeat("y", telegramTextLimit-5)
+	full := line + "\n" + line
+	if resp := callSendMessage(t, m, tok, full, false); isToolError(resp) {
+		t.Fatalf("unexpected tool error: %v", resp)
+	}
+	if n := len(f.snapshot()); n != 2 {
+		t.Fatalf("want 2 sends, got %d", n)
+	}
+	recs := readTranscript(t, filepath.Join(root, "42"))
+	if len(recs) != 2 {
+		t.Fatalf("want 2 records (anchor + stub), got %d: %+v", len(recs), recs)
+	}
+	anchor, stub := recs[0], recs[1]
+	if anchor.MsgID != 1 || anchor.PartOf != 0 || anchor.ReplyTo != 7 || anchor.Text != full {
+		t.Errorf("anchor wrong: MsgID=%d PartOf=%d ReplyTo=%d textLen=%d (want full=%d)",
+			anchor.MsgID, anchor.PartOf, anchor.ReplyTo, len(anchor.Text), len(full))
+	}
+	if stub.MsgID != 2 || stub.PartOf != 1 || stub.Text != "" || stub.ReplyTo != 0 {
+		t.Errorf("stub wrong: %+v", stub)
 	}
 }
 

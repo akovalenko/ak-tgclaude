@@ -38,6 +38,12 @@ Each day-file has one JSON object per line, oldest first:
 
 - `role` is `user` (the person) or `bot` (a past reply you sent).
 - `reply_to` is the `msg_id` this message answered (0 = none) — the thread edge.
+- `part_of`, when present, marks a **split-message piece**. A long reply that ran
+  over Telegram's size limit was delivered as several messages, but only the FIRST
+  — the *anchor* — carries the text. A piece is a stub `{"msg_id":M,…,"part_of":A}`
+  with empty `text`, where `A` is the anchor's `msg_id`. Follow `part_of` to the
+  anchor for the content (see the point lookup below), and skip pieces when
+  summarizing — the anchor already holds the whole answer.
 - `attach` lists any files by metadata only (`kind`/`name`/`size`); the bytes are
   not stored.
 - `user`/`name` (present in **group** chats) attribute a turn to its author — a
@@ -65,11 +71,22 @@ In the whole-root (owner) shape, search one level deeper:
 grep -rE '"msg_id":5123[,}]' "$AK_TGCLAUDE_TRANSCRIPT_DIR"
 ```
 
+If the record you land on is a **piece** — it has `"part_of":A` and an empty
+`text` — it is one message of a split reply. Look up the anchor `A` for the text:
+
+```
+grep -E '"msg_id":<A>[,}]' "$AK_TGCLAUDE_TRANSCRIPT_DIR"/*.jsonl
+```
+
+(Replace `<A>` with the `part_of` value. A reply quoting *any* piece of a split
+answer resolves this way to the single anchor record that holds it.)
+
 ## Writeup of a period (e.g. "this week")
 
 Day-files are named by date, so "this week" is the last seven `YYYY-MM-DD.jsonl`
 files. Read them, parse the lines, and summarize. For "what did people ask", filter
-to `role:"user"`. In the owner shape, walk each chat subdirectory and use its
+to `role:"user"`. Skip split-message pieces (records carrying `part_of`) — their
+text lives at the anchor, so counting them would show blanks or double-count. In the owner shape, walk each chat subdirectory and use its
 `meta.json` to attribute questions to a person; in a **group** chat, attribute
 per-record via `name`/`user` (there `meta.json` names only the latest speaker). Deliver the summary with the
 **tg-emit** send tools; a long writeup is best sent as a document

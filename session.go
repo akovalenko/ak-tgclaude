@@ -14,7 +14,11 @@ import (
 // chat's persistent working dir and last-used time). It must survive restarts, so
 // it is persisted to a JSON file under the state dir.
 //
-// A future reply-resurrection feature will add a message→session map here.
+// A future reply-resurrection feature will add a message→session map here. When it
+// lands it must resolve a split-message piece to its anchor before the lookup: an
+// oversized reply is delivered as several messages but recorded once at the anchor
+// (transcript PartOf), so a reply that quotes a piece has to follow PartOf to reach
+// the binding. (Recall already follows PartOf — see the tg-recall skill.)
 type SessionStore struct {
 	path string
 

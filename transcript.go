@@ -35,11 +35,19 @@ type TranscriptRecord struct {
 	// "2026-07-04T09:14:07+03:00" — readable local time for the model AND a fully
 	// determined instant any DB ingests as timestamptz. Append truncates it to whole
 	// seconds (Telegram's precision), so bot-side time.Now() nanos don't leak in.
-	TS      time.Time          `json:"ts"`
-	Role    string             `json:"role"` // "user" | "bot"
-	ReplyTo int64              `json:"reply_to,omitempty"`
-	Text    string             `json:"text"`
-	Attach  []TranscriptAttach `json:"attach,omitempty"`
+	TS      time.Time `json:"ts"`
+	Role    string    `json:"role"` // "user" | "bot"
+	ReplyTo int64     `json:"reply_to,omitempty"`
+	// PartOf links a split-message piece to its anchor. An oversized reply is
+	// delivered as several messages (see splitHTML), but only the FIRST — the anchor
+	// — carries the full Text; each later piece is a light stub {msg_id, part_of:
+	// anchor} with empty Text, so the answer is stored once. A reader that lands on a
+	// piece (recall, or a reply that threads to it) follows PartOf to the anchor for
+	// the text. Zero (omitted) for a normal, unsplit message. Placed after MsgID so
+	// the recall grep's `{"msg_id":N,` anchor is unaffected.
+	PartOf int64              `json:"part_of,omitempty"`
+	Text   string             `json:"text"`
+	Attach []TranscriptAttach `json:"attach,omitempty"`
 	// User/Name identify the AUTHOR of a turn — needed in a GROUP transcript, where one
 	// chat carries many speakers and meta.json holds only the latest. Omitted (0/"") on
 	// the private side, where the single chat partner is implied, so private-chat lines
