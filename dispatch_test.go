@@ -239,6 +239,45 @@ func TestScopeSelection(t *testing.T) {
 	}
 }
 
+func TestUsageLogAccessSplit(t *testing.T) {
+	// The usage-log path reaches the responder on EVERY invocation when the feature is
+	// on (empty when off); UsageLogOwner is true only for the configured owner. The
+	// responder turns that into an allowRead (owner) vs denyRead (everyone else).
+	cases := []struct {
+		name      string
+		path      string
+		owner     int64
+		fromID    int64
+		wantPath  string
+		wantOwner bool
+	}{
+		{"feature off", "", 5, 9, "", false},
+		{"owner", "/v/u.jsonl", 5, 5, "/v/u.jsonl", true},
+		{"non-owner", "/v/u.jsonl", 5, 9, "/v/u.jsonl", false},
+		{"no owner configured", "/v/u.jsonl", 0, 9, "/v/u.jsonl", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			resp := &fakeResponder{}
+			d := newTestDispatcher(t, resp, &fakeSender{})
+			d.usageLogPath = tc.path
+			d.owner = tc.owner
+
+			up := Update{UpdateID: 1, Message: &Message{
+				MessageID: 7, Text: "hi", Chat: Chat{ID: 42}, From: &User{ID: tc.fromID},
+			}}
+			d.handleUpdate(context.Background(), up)
+
+			if resp.gotReq.UsageLogPath != tc.wantPath {
+				t.Errorf("UsageLogPath = %q, want %q", resp.gotReq.UsageLogPath, tc.wantPath)
+			}
+			if resp.gotReq.UsageLogOwner != tc.wantOwner {
+				t.Errorf("UsageLogOwner = %v, want %v", resp.gotReq.UsageLogOwner, tc.wantOwner)
+			}
+		})
+	}
+}
+
 func TestHandleTranscriptsOffWritesNothing(t *testing.T) {
 	resp := &fakeResponder{replies: []string{"answer"}}
 	sender := &fakeSender{}

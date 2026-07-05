@@ -403,6 +403,36 @@ func TestTranscriptSkillAbsentWhenOff(t *testing.T) {
 	}
 }
 
+func TestUsageSkillMaterializedButNotPreloadedWhenOn(t *testing.T) {
+	cwd := t.TempDir()
+	if err := materializeScaffold(cwd, scaffoldParams{CacheDir: "/c", UsageLogOn: true}); err != nil {
+		t.Fatal(err)
+	}
+	// The skill body is materialized (available on demand)...
+	if _, err := os.ReadFile(filepath.Join(cwd, ".claude", "skills", "tg-usage", "SKILL.md")); err != nil {
+		t.Errorf("tg-usage skill not materialized when on: %v", err)
+	}
+	// ...but deliberately NOT preloaded into the agent frontmatter (owner-only, rare —
+	// Anton's explicit ask). The agent must list only the built-in tg-emit.
+	agent, err := os.ReadFile(filepath.Join(cwd, ".claude", "agents", defaultAgent+".md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(agent), "tg-usage") {
+		t.Errorf("agent must NOT preload tg-usage (available-only): %q", string(agent))
+	}
+}
+
+func TestUsageSkillAbsentWhenOff(t *testing.T) {
+	cwd := t.TempDir()
+	if err := materializeScaffold(cwd, scaffoldParams{CacheDir: "/c"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(cwd, ".claude", "skills", "tg-usage")); !os.IsNotExist(err) {
+		t.Errorf("tg-usage should not be materialized when the feature is off (err=%v)", err)
+	}
+}
+
 func TestWireSkillMaterializesAndPreloads(t *testing.T) {
 	skillDir := writeSkill(t, t.TempDir(), "eputs-qa-knowledge",
 		"---\nname: eputs-qa-knowledge\ndescription: eputs domain\n---\nSources live under {{PROJECT}}/notes/eputs.\n")

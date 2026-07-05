@@ -88,6 +88,11 @@ type Dispatcher struct {
 	// usage, when non-nil, appends one JSONL line per answered round (elapsed +
 	// round-summed cost). Enabled solely by configuring usage_log; nil => off.
 	usage *UsageLog
+	// usageLogPath mirrors cfg.UsageLog ("" => off): the file the OWNER's responder is
+	// granted read of (sandbox allowRead + env + prompt hint), and every other
+	// responder is DENIED read of (per-invocation sandbox denyRead). Distinct from
+	// `usage` (the writer) — this drives the reader-side access split in handleUpdate.
+	usageLogPath string
 }
 
 // Run long-polls and dispatches updates to per-chat workers until ctx is
@@ -415,6 +420,12 @@ func (d *Dispatcher) handleUpdate(ctx context.Context, u Update) {
 			transcriptScope = filepath.Join(d.transcriptRoot, strconv.FormatInt(m.Chat.ID, 10))
 		}
 	}
+	// Usage-log access split (feature on when usageLogPath != ""): the owner is granted
+	// read of the file, everyone else is denied it (buildInvocationSettings emits
+	// allowRead vs denyRead accordingly). Identity comes from the trusted from.id, never
+	// the model. The file appears in NO static setting — the per-invocation grant is the
+	// whole access story, so a non-owner cannot grep it even though read is default-open.
+	usageLogOwner := m.From != nil && d.owner != 0 && m.From.ID == d.owner
 	res, err := d.resp.Respond(ctx, RespondRequest{
 		Prompt:             incomingText(m),
 		SentAt:             messageSentAt(m),
@@ -425,6 +436,8 @@ func (d *Dispatcher) handleUpdate(ctx context.Context, u Update) {
 		MCPToken:           token,
 		AppendSystemPrompt: appendPrompt,
 		TranscriptScope:    transcriptScope,
+		UsageLogPath:       d.usageLogPath,
+		UsageLogOwner:      usageLogOwner,
 		ReplyToMsgID:       replyToID(m),
 	})
 	stopTyping()
@@ -766,6 +779,7 @@ func runDispatch(args []string) {
 			CacheDir:       cacheDir,
 			OutboxRoot:     outboxRoot,
 			TranscriptRoot: cfg.TranscriptRoot(),
+			UsageLogOn:     cfg.UsageLog != "",
 			TokenFile:      cfg.ConfigPath,
 			Project:        cfg.Project,
 			WireSkills:     cfg.WireSkills,
@@ -868,7 +882,8 @@ func runDispatch(args []string) {
 		owner:          cfg.Owner,
 		ownerReadsAll:  cfg.OwnerReadsAllTranscripts(),
 
-		usage: usage,
+		usage:        usage,
+		usageLogPath: cfg.UsageLog,
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)

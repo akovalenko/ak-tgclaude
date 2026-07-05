@@ -76,6 +76,10 @@ func envFilePolicy(deny []string) filePolicy {
 	// The transcript read scope (a chat's own subdir, or the whole root for the
 	// owner) is readable by the Read tool too; an unset env adds nothing.
 	readRoots = append(readRoots, envRoots(transcriptEnv)...)
+	// The usage-log file is readable by the Read tool too, but ONLY when the env is
+	// set — which the dispatcher does solely for the owner's invocation. A non-owner
+	// has no such env (adds nothing) AND a sandbox denyRead, so it stays closed.
+	readRoots = append(readRoots, envRoots(usageLogEnv)...)
 	return filePolicy{deny: deny, readRoots: readRoots, writeRoots: writeRoots}
 }
 

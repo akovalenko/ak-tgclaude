@@ -230,7 +230,10 @@ type Config struct {
 	// wall-clock seconds (whole round, so a delivery-guard re-prompt is counted in),
 	// cost is the summed total_cost_usd (0 when absent). The PATH is the switch:
 	// empty => off (nothing written, the default); set => on. Written by the
-	// dispatcher (unsandboxed), never handed to the responder. Also --usage-log.
+	// dispatcher (unsandboxed). On the READ side it is owner-only: the OWNER's
+	// responder is granted sandboxed read of it (for cost/usage questions — see the
+	// tg-usage skill), and every other responder is DENIED read (a per-invocation
+	// sandbox denyRead — otherwise it is readable by default). Also --usage-log.
 	UsageLog string `toml:"usage_log"`
 
 	// AllowSilent DISABLES the delivery guard. The guard (on by default) catches a

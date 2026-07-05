@@ -202,8 +202,19 @@ for that turn; `elapsed` is the **whole-round** wall-clock in
 seconds (a delivery-guard re-prompt is counted in, so it is *not* the per-`claude -p`
 time); `cost` is the round-summed `total_cost_usd`, `0` when absent. The path is
 the only switch, the parent dir is created if missing, and concurrent per-chat
-rounds append safely. It is written by the dispatcher and never exposed to the
-responder.
+rounds append safely. It is written by the dispatcher.
+
+On the **read** side it is **owner-only**. When the feature is on, the owner's
+responder is granted sandboxed read of the file (path injected into its prompt and
+`$AK_TGCLAUDE_USAGE_LOG`, plus a **tg-usage** skill teaching it to aggregate the
+JSONL and join names via the transcript store), so the owner can ask the bot cost
+questions — "how much did we spend this week", "which chat costs the most". Every
+**other** responder is *denied* read of the file (a per-invocation sandbox
+`denyRead`; the file is otherwise readable by default, so this is what closes it).
+The file appears in **no** static setting — each invocation carries exactly one of
+allow (owner) / deny (everyone else), so allow-vs-deny precedence never arises. The
+tg-usage skill is materialized but **not** preloaded into the agent (owner-only and
+rare), so an ordinary user's turn never carries it.
 
 **The per-invocation token is the route capability.** The dispatcher pins the
 route in memory and binds it to the bearer token it handed this one responder; the

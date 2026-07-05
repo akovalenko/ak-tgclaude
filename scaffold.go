@@ -97,6 +97,7 @@ type scaffoldParams struct {
 	CacheDir       string   // isolated Go caches root
 	OutboxRoot     string   // parent of per-invocation outboxes (deny-read as a group)
 	TranscriptRoot string   // transcript store root: deny-read the whole root; per-invocation allowRead carves the scope back
+	UsageLogOn     bool     // usage-log feature on: materialize the tg-usage skill (available, NOT preloaded). The PATH stays out of static settings — access is a per-invocation allow/deny, see buildInvocationSettings
 	TokenFile      string   // config file holding the token; "" if token came via --bot-token
 	HookBinary     string   // default "ak-tgclaude"
 	DenyEnvVars    []string // secrets to unset in the sandbox
@@ -373,7 +374,7 @@ func materializeScaffold(cwd string, p scaffoldParams) error {
 		return fmt.Errorf("writing %s: %w", path, err)
 	}
 	transcriptsOn := p.TranscriptRoot != ""
-	if err := materializeSkills(claudeDir, p.Project, p.UploadNote, transcriptsOn); err != nil {
+	if err := materializeSkills(claudeDir, p.Project, p.UploadNote, transcriptsOn, p.UsageLogOn); err != nil {
 		return err
 	}
 	// Wire operator skill templates into the scaffold (materialized + {{PROJECT}}
@@ -397,6 +398,11 @@ func materializeScaffold(cwd string, p scaffoldParams) error {
 	// Preload tg-recall into the agent alongside operator wire-skills, but only when
 	// the transcript feature is on (its body is materialized above under the same
 	// gate). Off => neither the skill nor the preload — "ни записи, ни скилла".
+	//
+	// tg-usage is deliberately NOT here: when the usage-log feature is on its body is
+	// materialized (available on-demand via the Skill tool, like a generic addSkill),
+	// but it is NOT preloaded into the frontmatter — it is owner-only and rarely
+	// needed, so it should not weigh on every ordinary user's turn.
 	preload := append([]string(nil), wired...)
 	if transcriptsOn {
 		preload = append(preload, "tg-recall")
@@ -496,13 +502,21 @@ func scaffoldFileMode(src os.FileMode) os.FileMode {
 // materializeSkills copies the embedded skills tree into <cwd>/.claude/skills,
 // substituting the {{UPLOAD_NOTE}} marker (in tg-emit) with the large-file
 // capability paragraph — empty when the fallback is off, so the marker vanishes.
-func materializeSkills(claudeDir, project, uploadNote string, transcriptsOn bool) error {
+func materializeSkills(claudeDir, project, uploadNote string, transcriptsOn, usageLogOn bool) error {
 	return fs.WalkDir(scaffoldAssets, "assets/skills", func(p string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
 		// tg-recall ships to the responder only when the transcript feature is on.
 		if !transcriptsOn && (p == "assets/skills/tg-recall" || strings.HasPrefix(p, "assets/skills/tg-recall/")) {
+			if d.IsDir() {
+				return fs.SkipDir
+			}
+			return nil
+		}
+		// tg-usage ships only when the usage-log feature is on (like tg-recall). Unlike
+		// tg-recall it is NOT preloaded into the agent — just available on demand.
+		if !usageLogOn && (p == "assets/skills/tg-usage" || strings.HasPrefix(p, "assets/skills/tg-usage/")) {
 			if d.IsDir() {
 				return fs.SkipDir
 			}
@@ -971,16 +985,26 @@ func appendAgentSkills(data []byte, add []string) []byte {
 }
 
 // buildInvocationSettings returns the per-invocation --settings JSON that scopes
-// SANDBOXED-BASH access to exactly this invocation's outbox, merged on top of the
-// static project settings:
+// SANDBOXED-BASH access for exactly this invocation, merged on top of the static
+// project settings:
 //   - allowWrite — so `send`/`cp` can write only this outbox, not a sibling's;
 //   - allowRead — carving this outbox back out of the static denyRead so
-//     `send --file` can read its own body, while sibling outboxes stay masked.
+//     `send --file` can read its own body, while sibling outboxes stay masked;
+//     also the transcript scope, and — for the OWNER — the usage-log file.
+//   - denyRead — for NON-owners, the usage-log file (see below).
+//
+// Usage log: it appears in NO static setting. Each invocation gets EXACTLY ONE of
+// allow/deny for it — the owner an allowRead, everyone else a denyRead — never
+// both, so the (undocumented) allow-vs-deny precedence for an identical path never
+// arises. Read is allow-by-default, so the per-invocation denyRead is what actually
+// closes the file to non-owners; the owner's allowRead is explicit (and would carry
+// the carve even if the base default ever changed). usageLog=="" => feature off,
+// nothing emitted either way.
 //
 // The Write TOOL to the outbox is granted by the PreToolUse hook (path-scoped),
-// not here. Empty outbox => "".
-func buildInvocationSettings(outbox, transcriptScope string) string {
-	if outbox == "" && transcriptScope == "" {
+// not here. All inputs empty => "".
+func buildInvocationSettings(outbox, transcriptScope, usageLog string, usageLogOwner bool) string {
+	if outbox == "" && transcriptScope == "" && usageLog == "" {
 		return ""
 	}
 	var s struct {
@@ -988,6 +1012,7 @@ func buildInvocationSettings(outbox, transcriptScope string) string {
 			Filesystem struct {
 				AllowWrite []string `json:"allowWrite,omitempty"`
 				AllowRead  []string `json:"allowRead,omitempty"`
+				DenyRead   []string `json:"denyRead,omitempty"`
 			} `json:"filesystem"`
 		} `json:"sandbox"`
 	}
@@ -999,6 +1024,15 @@ func buildInvocationSettings(outbox, transcriptScope string) string {
 		// Read-only: carve the chat's own transcript subdir (or, for the owner, the
 		// whole root) back out of the static denyRead. Never AllowWrite.
 		s.Sandbox.Filesystem.AllowRead = append(s.Sandbox.Filesystem.AllowRead, transcriptScope)
+	}
+	if usageLog != "" {
+		// Exactly one of allow/deny — never both (see the doc comment). Read-only either
+		// way; the usage log is never writable by the responder (the dispatcher owns it).
+		if usageLogOwner {
+			s.Sandbox.Filesystem.AllowRead = append(s.Sandbox.Filesystem.AllowRead, usageLog)
+		} else {
+			s.Sandbox.Filesystem.DenyRead = append(s.Sandbox.Filesystem.DenyRead, usageLog)
+		}
 	}
 	b, _ := json.Marshal(&s)
 	return string(b)
@@ -1089,5 +1123,5 @@ func runScaffold(args []string) {
 	fmt.Printf("the MCP send tools are NOT wired here — they need the running dispatcher):\n")
 	fmt.Printf("  cd %s\n", project)
 	fmt.Printf("  AK_TGCLAUDE_OUTBOX=%s claude -p --setting-sources project --permission-mode dontAsk \\\n", outboxRoot)
-	fmt.Printf("    --settings '%s'%s 'hello'\n", buildInvocationSettings(outboxRoot, ""), agentFlag)
+	fmt.Printf("    --settings '%s'%s 'hello'\n", buildInvocationSettings(outboxRoot, "", "", false), agentFlag)
 }

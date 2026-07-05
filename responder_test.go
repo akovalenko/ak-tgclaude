@@ -11,21 +11,21 @@ func TestBuildClaudeArgs(t *testing.T) {
 	base := "-p --output-format json --setting-sources project --permission-mode dontAsk"
 
 	// No docDir and no MCP endpoint, no debug, no passthrough => bare args.
-	if got := strings.Join(buildClaudeArgs("", "", "", "", "", "", "", false, nil, nil), " "); got != base {
+	if got := strings.Join(buildClaudeArgs("", "", "", "", "", "", false, "", "", false, nil, nil), " "); got != base {
 		t.Errorf("bare args = %q", got)
 	}
 
 	// --debug (alone) is inserted right after the base flags when enabled.
-	if got := strings.Join(buildClaudeArgs("", "", "", "", "", "", "", true, nil, nil), " "); got != base+" --debug" {
+	if got := strings.Join(buildClaudeArgs("", "", "", "", "", "", false, "", "", true, nil, nil), " "); got != base+" --debug" {
 		t.Errorf("debug args = %q", got)
 	}
 
 	// Operator passthrough is appended verbatim, after everything else.
-	if got := strings.Join(buildClaudeArgs("", "", "", "", "", "", "", false, nil, []string{"--model", "opus", "--effort", "high"}), " "); got != base+" --model opus --effort high" {
+	if got := strings.Join(buildClaudeArgs("", "", "", "", "", "", false, "", "", false, nil, []string{"--model", "opus", "--effort", "high"}), " "); got != base+" --model opus --effort high" {
 		t.Errorf("passthrough args = %q", got)
 	}
 
-	got := buildClaudeArgs("eputs-telegram-guide", "sess-7", "", "/run/out/outbox-A1", "", "http://127.0.0.1:9/mcp", "tok9", false, nil, nil)
+	got := buildClaudeArgs("eputs-telegram-guide", "sess-7", "", "/run/out/outbox-A1", "", "", false, "http://127.0.0.1:9/mcp", "tok9", false, nil, nil)
 	joined := strings.Join(got, " ")
 	// MCP wiring: the inline config (url + Authorization token), strict-only, and
 	// the send tools permitted under dontAsk.
@@ -51,18 +51,18 @@ func TestBuildClaudeArgs(t *testing.T) {
 func TestBuildClaudeArgsAppendSystemPrompt(t *testing.T) {
 	// On a FRESH spawn (empty sessionID), the persona is injected via
 	// --append-system-prompt.
-	fresh := strings.Join(buildClaudeArgs("faq-responder", "", "PERSONA TEXT", "", "", "", "", false, nil, nil), " ")
+	fresh := strings.Join(buildClaudeArgs("faq-responder", "", "PERSONA TEXT", "", "", "", false, "", "", false, nil, nil), " ")
 	if !strings.Contains(fresh, "--append-system-prompt PERSONA TEXT") {
 		t.Errorf("fresh spawn should inject the persona: %q", fresh)
 	}
 	// On a RESUME the persona is frozen into the session, so it is NOT re-sent even
 	// if passed.
-	resume := strings.Join(buildClaudeArgs("faq-responder", "sess-1", "PERSONA TEXT", "", "", "", "", false, nil, nil), " ")
+	resume := strings.Join(buildClaudeArgs("faq-responder", "sess-1", "PERSONA TEXT", "", "", "", false, "", "", false, nil, nil), " ")
 	if strings.Contains(resume, "--append-system-prompt") {
 		t.Errorf("resume should not re-send the persona: %q", resume)
 	}
 	// Empty persona => no flag.
-	none := strings.Join(buildClaudeArgs("faq-responder", "", "", "", "", "", "", false, nil, nil), " ")
+	none := strings.Join(buildClaudeArgs("faq-responder", "", "", "", "", "", false, "", "", false, nil, nil), " ")
 	if strings.Contains(none, "--append-system-prompt") {
 		t.Errorf("empty persona should add no flag: %q", none)
 	}
@@ -71,7 +71,7 @@ func TestBuildClaudeArgsAppendSystemPrompt(t *testing.T) {
 func TestBuildClaudeArgsExtraTools(t *testing.T) {
 	// Operator extra tools join --allowedTools after the send tools, deduped; a
 	// duplicate of a send tool is not repeated.
-	got := strings.Join(buildClaudeArgs("", "", "", "", "", "http://127.0.0.1:9/mcp", "tok", false,
+	got := strings.Join(buildClaudeArgs("", "", "", "", "", "", false, "http://127.0.0.1:9/mcp", "tok", false,
 		[]string{"Agent", "WebFetch", "mcp__tg__send_message"}, nil), " ")
 	want := "--allowedTools mcp__tg__send_message,mcp__tg__send_code,mcp__tg__send_document,Agent,WebFetch"
 	if !strings.Contains(got, want) {
@@ -84,7 +84,7 @@ func TestBuildClaudeArgsScopedToolKeepsScope(t *testing.T) {
 	// literal — args are exec.Command elements, never shell-expanded), and two scopes
 	// of the same verb are BOTH kept as distinct permission rules — the opposite of
 	// the frontmatter, which collapses them to one bare name.
-	got := strings.Join(buildClaudeArgs("", "", "", "", "", "http://127.0.0.1:9/mcp", "tok", false,
+	got := strings.Join(buildClaudeArgs("", "", "", "", "", "", false, "http://127.0.0.1:9/mcp", "tok", false,
 		[]string{"WebFetch(domain:github.com)", "WebFetch(domain:*.github.com)"}, nil), " ")
 	want := "--allowedTools mcp__tg__send_message,mcp__tg__send_code,mcp__tg__send_document,WebFetch(domain:github.com),WebFetch(domain:*.github.com)"
 	if !strings.Contains(got, want) {
@@ -93,10 +93,10 @@ func TestBuildClaudeArgsScopedToolKeepsScope(t *testing.T) {
 }
 
 func TestBuildInvocationSettings(t *testing.T) {
-	if buildInvocationSettings("", "") != "" {
+	if buildInvocationSettings("", "", "", false) != "" {
 		t.Errorf("empty outbox + empty scope => empty overlay")
 	}
-	s := buildInvocationSettings("/o/x", "")
+	s := buildInvocationSettings("/o/x", "", "", false)
 	if !strings.Contains(s, `"allowWrite":["/o/x"]`) || !strings.Contains(s, `"allowRead":["/o/x"]`) {
 		t.Errorf("overlay JSON wrong: %s", s)
 	}
@@ -111,7 +111,7 @@ func TestBuildInvocationSettings(t *testing.T) {
 }
 
 func TestBuildInvocationSettingsTranscriptScope(t *testing.T) {
-	s := buildInvocationSettings("/o/x", "/s/transcripts/42")
+	s := buildInvocationSettings("/o/x", "/s/transcripts/42", "", false)
 	if !strings.Contains(s, `"allowWrite":["/o/x"]`) {
 		t.Errorf("allowWrite should be the outbox only: %s", s)
 	}
@@ -119,16 +119,79 @@ func TestBuildInvocationSettingsTranscriptScope(t *testing.T) {
 		t.Errorf("allowRead should include outbox + transcript scope: %s", s)
 	}
 	// Scope-only (no outbox) still grants read, and carries no allowWrite.
-	s2 := buildInvocationSettings("", "/s/transcripts")
+	s2 := buildInvocationSettings("", "/s/transcripts", "", false)
 	if !strings.Contains(s2, `"allowRead":["/s/transcripts"]`) || strings.Contains(s2, "allowWrite") {
 		t.Errorf("scope-only overlay wrong: %s", s2)
 	}
 }
 
 func TestBuildClaudeArgsThreadsScope(t *testing.T) {
-	joined := strings.Join(buildClaudeArgs("", "", "", "/o/x", "/s/transcripts/42", "", "", false, nil, nil), " ")
+	joined := strings.Join(buildClaudeArgs("", "", "", "/o/x", "/s/transcripts/42", "", false, "", "", false, nil, nil), " ")
 	if !strings.Contains(joined, `"allowRead":["/o/x","/s/transcripts/42"]`) {
 		t.Errorf("transcript scope should reach the --settings allowRead: %q", joined)
+	}
+}
+
+func TestBuildInvocationSettingsUsageLog(t *testing.T) {
+	// Owner: the usage-log file is carved into allowRead (alongside the outbox), never
+	// denyRead — the owner may grep/awk it.
+	owner := buildInvocationSettings("/o/x", "", "/v/usage.jsonl", true)
+	if !strings.Contains(owner, `"allowRead":["/o/x","/v/usage.jsonl"]`) {
+		t.Errorf("owner overlay should allowRead the usage log: %s", owner)
+	}
+	if strings.Contains(owner, "denyRead") {
+		t.Errorf("owner overlay must not denyRead: %s", owner)
+	}
+	// Non-owner: the usage-log file is denied — the whole point (read is otherwise
+	// default-open). It never appears in allowRead.
+	other := buildInvocationSettings("/o/x", "", "/v/usage.jsonl", false)
+	if !strings.Contains(other, `"denyRead":["/v/usage.jsonl"]`) {
+		t.Errorf("non-owner overlay should denyRead the usage log: %s", other)
+	}
+	if strings.Contains(other, `"allowRead":["/o/x","/v/usage.jsonl"]`) {
+		t.Errorf("non-owner overlay must not allowRead the usage log: %s", other)
+	}
+	// Feature off (empty usage path): neither allow nor deny of any usage file.
+	off := buildInvocationSettings("/o/x", "", "", false)
+	if strings.Contains(off, "denyRead") || strings.Contains(off, "usage") {
+		t.Errorf("no usage path => no allow/deny for it: %s", off)
+	}
+}
+
+func TestBuildClaudeArgsThreadsUsageLog(t *testing.T) {
+	// Owner path reaches the --settings allowRead.
+	owner := strings.Join(buildClaudeArgs("", "", "", "/o/x", "", "/v/usage.jsonl", true, "", "", false, nil, nil), " ")
+	if !strings.Contains(owner, `"allowRead":["/o/x","/v/usage.jsonl"]`) {
+		t.Errorf("owner usage log should reach --settings allowRead: %q", owner)
+	}
+	// Non-owner path reaches the --settings denyRead.
+	other := strings.Join(buildClaudeArgs("", "", "", "/o/x", "", "/v/usage.jsonl", false, "", "", false, nil, nil), " ")
+	if !strings.Contains(other, `"denyRead":["/v/usage.jsonl"]`) {
+		t.Errorf("non-owner usage log should reach --settings denyRead: %q", other)
+	}
+}
+
+func TestUsageLogEnvValue(t *testing.T) {
+	// The env var / prompt hint carry the path ONLY for the owner — a non-owner is told
+	// nothing (and is denied the file), even though UsageLogPath is set for them.
+	if v := (RespondRequest{UsageLogPath: "/v/u.jsonl", UsageLogOwner: true}).usageLogEnvValue(); v != "/v/u.jsonl" {
+		t.Errorf("owner env value = %q, want the path", v)
+	}
+	if v := (RespondRequest{UsageLogPath: "/v/u.jsonl", UsageLogOwner: false}).usageLogEnvValue(); v != "" {
+		t.Errorf("non-owner env value = %q, want empty", v)
+	}
+}
+
+func TestBuildPromptUsageLog(t *testing.T) {
+	// Owner (usageLog non-empty): the prompt announces the file + points at tg-usage.
+	p := buildPrompt("/code", "/out", "", "/v/usage.jsonl", "how much did we spend?", time.Time{}, nil, 0)
+	if !strings.Contains(p, "/v/usage.jsonl") || !strings.Contains(p, "tg-usage") {
+		t.Errorf("owner prompt should announce the usage log + tg-usage: %q", p)
+	}
+	// Non-owner (empty): no usage-log line at all.
+	q := buildPrompt("/code", "/out", "", "", "hi", time.Time{}, nil, 0)
+	if strings.Contains(q, "Usage log") || strings.Contains(q, "tg-usage") {
+		t.Errorf("non-owner prompt must not mention the usage log: %q", q)
 	}
 }
 
@@ -155,7 +218,7 @@ func TestMergeNoProxy(t *testing.T) {
 
 func TestBuildPrompt(t *testing.T) {
 	sent := time.Date(2026, 7, 3, 14, 5, 0, 0, time.UTC)
-	p := buildPrompt("/home/bot/code", "/run/out/outbox-A1", "", "how does foo work?", sent, nil, 0)
+	p := buildPrompt("/home/bot/code", "/run/out/outbox-A1", "", "", "how does foo work?", sent, nil, 0)
 	if !strings.Contains(p, "Project directory (read-only): /home/bot/code") {
 		t.Errorf("missing literal project path: %q", p)
 	}
@@ -180,7 +243,7 @@ func TestBuildPrompt(t *testing.T) {
 
 // A zero SentAt omits the stamp entirely (no 1970 epoch leaking into the prompt).
 func TestBuildPromptOmitsZeroTime(t *testing.T) {
-	p := buildPrompt("/p", "/o", "", "hi", time.Time{}, nil, 0)
+	p := buildPrompt("/p", "/o", "", "", "hi", time.Time{}, nil, 0)
 	if !strings.Contains(p, "Incoming Telegram message to answer:") {
 		t.Errorf("zero time should yield the unstamped header: %q", p)
 	}
@@ -194,7 +257,7 @@ func TestBuildPromptWithAttachment(t *testing.T) {
 
 	// With a caption: the file block announces the path + description, and the
 	// caption is still appended as the message.
-	p := buildPrompt("/code", "/run/out/o1", "", "summarize this", time.Time{}, att, 0)
+	p := buildPrompt("/code", "/run/out/o1", "", "", "summarize this", time.Time{}, att, 0)
 	if !strings.Contains(p, "/run/out/o1/incoming/42-report.pdf") {
 		t.Errorf("missing attachment path: %q", p)
 	}
@@ -209,14 +272,14 @@ func TestBuildPromptWithAttachment(t *testing.T) {
 	}
 
 	// Without a caption: a placeholder tells the model to decide what to do.
-	p = buildPrompt("/code", "/run/out/o1", "", "", time.Time{}, att, 0)
+	p = buildPrompt("/code", "/run/out/o1", "", "", "", time.Time{}, att, 0)
 	if !strings.Contains(p, "no caption") {
 		t.Errorf("empty-caption placeholder missing: %q", p)
 	}
 }
 
 func TestBuildPromptTranscriptDir(t *testing.T) {
-	p := buildPrompt("/code", "/out", "/s/transcripts/42", "hi", time.Time{}, nil, 0)
+	p := buildPrompt("/code", "/out", "/s/transcripts/42", "", "hi", time.Time{}, nil, 0)
 	if !strings.Contains(p, "Your transcript directory (this conversation's history, read-only): /s/transcripts/42") {
 		t.Errorf("missing transcript-dir line: %q", p)
 	}
@@ -224,13 +287,13 @@ func TestBuildPromptTranscriptDir(t *testing.T) {
 		t.Errorf("transcript line should mention the skill + env var: %q", p)
 	}
 	// Empty scope omits the block entirely.
-	if q := buildPrompt("/code", "/out", "", "hi", time.Time{}, nil, 0); strings.Contains(q, "transcript directory") {
+	if q := buildPrompt("/code", "/out", "", "", "hi", time.Time{}, nil, 0); strings.Contains(q, "transcript directory") {
 		t.Errorf("empty scope should add no transcript line: %q", q)
 	}
 }
 
 func TestBuildPromptReplyToHint(t *testing.T) {
-	p := buildPrompt("/code", "/out", "", "hi", time.Time{}, nil, 5123)
+	p := buildPrompt("/code", "/out", "", "", "hi", time.Time{}, nil, 5123)
 	if !strings.Contains(p, "replies to an earlier message (msg 5123)") {
 		t.Errorf("missing reply-to hint: %q", p)
 	}
@@ -238,7 +301,7 @@ func TestBuildPromptReplyToHint(t *testing.T) {
 		t.Errorf("reply-to hint should carry the untrusted-reference frame: %q", p)
 	}
 	// No reply => no hint.
-	if q := buildPrompt("/code", "/out", "", "hi", time.Time{}, nil, 0); strings.Contains(q, "replies to an earlier message") {
+	if q := buildPrompt("/code", "/out", "", "", "hi", time.Time{}, nil, 0); strings.Contains(q, "replies to an earlier message") {
 		t.Errorf("replyTo=0 should add no hint: %q", q)
 	}
 }

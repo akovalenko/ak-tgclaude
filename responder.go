@@ -32,9 +32,26 @@ type RespondRequest struct {
 	// for a user, the whole root for the owner. It is opened to the sandbox (allowRead)
 	// and the Read tool (via the env var). Empty => no transcript access.
 	TranscriptScope string
+	// UsageLogPath is the usage-log file, set on EVERY invocation when the feature is
+	// on (empty => off). UsageLogOwner splits its treatment: the owner gets a sandbox
+	// allowRead + the env var + a prompt hint; everyone else gets a sandbox denyRead
+	// and nothing else (the file, otherwise readable by default, is closed to them).
+	UsageLogPath  string
+	UsageLogOwner bool
 	// ReplyToMsgID is the message_id the incoming message replies to (0 => none),
 	// surfaced to the model as a prompt hint.
 	ReplyToMsgID int64
+}
+
+// usageLogEnvValue is the usage-log path exposed to THIS invocation's env var and
+// prompt hint: the path for the owner, "" for everyone else. It is deliberately
+// narrower than UsageLogPath (which is set for non-owners too, to drive their
+// sandbox denyRead): a non-owner is denied the file and told nothing about it.
+func (r RespondRequest) usageLogEnvValue() string {
+	if r.UsageLogOwner {
+		return r.UsageLogPath
+	}
+	return ""
 }
 
 // RespondResult reports the session the responder used (so the dispatcher can
@@ -70,6 +87,13 @@ const outboxEnv = "AK_TGCLAUDE_OUTBOX"
 // to bash grep. Set only when the transcript feature is on. Empty => none.
 const transcriptEnv = "AK_TGCLAUDE_TRANSCRIPT_DIR"
 
+// usageLogEnv names the usage-log file, set ONLY on the OWNER's invocation (the
+// hook folds it into readRoots so the owner's Read tool reaches it; the
+// per-invocation sandbox allowRead opens it to bash grep/awk). Everyone else gets
+// no such env and a per-invocation sandbox denyRead instead — see
+// buildInvocationSettings. Empty => not the owner (or the feature is off).
+const usageLogEnv = "AK_TGCLAUDE_USAGE_LOG"
+
 // claudeResponder spawns a headless `claude -p` for each update.
 type claudeResponder struct {
 	agent      string   // --agent <name>; empty => the configured default agent
@@ -86,10 +110,10 @@ type claudeResponder struct {
 // (route-pinned by MCPToken). It returns the session id parsed from the JSON
 // result.
 func (c *claudeResponder) Respond(ctx context.Context, req RespondRequest) (RespondResult, error) {
-	cmd := exec.CommandContext(ctx, "claude", buildClaudeArgs(c.agent, req.SessionID, req.AppendSystemPrompt, req.DocDir, req.TranscriptScope, req.MCPURL, req.MCPToken, c.debug, c.extraTools, c.claudeArgs)...)
+	cmd := exec.CommandContext(ctx, "claude", buildClaudeArgs(c.agent, req.SessionID, req.AppendSystemPrompt, req.DocDir, req.TranscriptScope, req.UsageLogPath, req.UsageLogOwner, req.MCPURL, req.MCPToken, c.debug, c.extraTools, c.claudeArgs)...)
 	cmd.Dir = c.cwd
-	cmd.Env = c.env(req.DocDir, req.TranscriptScope)
-	cmd.Stdin = strings.NewReader(buildPrompt(c.project, req.DocDir, req.TranscriptScope, req.Prompt, req.SentAt, req.Attachment, req.ReplyToMsgID))
+	cmd.Env = c.env(req.DocDir, req.TranscriptScope, req.usageLogEnvValue())
+	cmd.Stdin = strings.NewReader(buildPrompt(c.project, req.DocDir, req.TranscriptScope, req.usageLogEnvValue(), req.Prompt, req.SentAt, req.Attachment, req.ReplyToMsgID))
 	var out bytes.Buffer
 	cmd.Stdout = &out
 	cmd.Stderr = os.Stderr
@@ -111,7 +135,7 @@ func (c *claudeResponder) Respond(ctx context.Context, req RespondRequest) (Resp
 // the server is never dialed and no tools appear. Forcing loopback into NO_PROXY
 // makes the MCP request go direct while everything else (the Anthropic API) still
 // honors the proxy. Existing NO_PROXY entries are preserved.
-func (c *claudeResponder) env(docDir, transcriptScope string) []string {
+func (c *claudeResponder) env(docDir, transcriptScope, usageLog string) []string {
 	noProxy := mergeNoProxy(os.Getenv("NO_PROXY"), os.Getenv("no_proxy"))
 	var out []string
 	for _, kv := range os.Environ() {
@@ -136,6 +160,12 @@ func (c *claudeResponder) env(docDir, transcriptScope string) []string {
 		// The transcript read scope, so the sandboxed grep/cat can reach it (the hook
 		// also folds this env into the Read tool's readRoots).
 		out = append(out, transcriptEnv+"="+transcriptScope)
+	}
+	if usageLog != "" {
+		// Owner only (the caller passes "" for everyone else): the usage-log file, so
+		// the sandboxed grep/awk can reach it (the hook also folds this env into the
+		// Read tool's readRoots). Non-owners get no env and a sandbox denyRead instead.
+		out = append(out, usageLogEnv+"="+usageLog)
 	}
 	if c.cacheDir != "" {
 		// The isolated Go cache, so the sandboxed `go` inherits it (a settings-file
@@ -185,7 +215,7 @@ func mergeNoProxy(existing ...string) string {
 // attach, when non-nil, is an incoming file the dispatcher already saved into
 // the outbox; its path and description are announced so the model can read or
 // Edit it in place (its content is untrusted, like the message text).
-func buildPrompt(project, outbox, transcriptDir, message string, sentAt time.Time, attach *Attachment, replyTo int64) string {
+func buildPrompt(project, outbox, transcriptDir, usageLog, message string, sentAt time.Time, attach *Attachment, replyTo int64) string {
 	var b strings.Builder
 	b.WriteString("Project directory (read-only): ")
 	b.WriteString(project)
@@ -202,6 +232,14 @@ func buildPrompt(project, outbox, transcriptDir, message string, sentAt time.Tim
 		b.WriteString(transcriptDir)
 		b.WriteString("\nUse it to recall lost context or build a writeup — see the tg-recall skill; " +
 			"the same path is $AK_TGCLAUDE_TRANSCRIPT_DIR for shell (grep).\n\n")
+	}
+	if usageLog != "" {
+		// Owner only (the caller passes "" for a non-owner): announce the usage-log
+		// file so the owner can answer resource/cost questions about the whole bot.
+		b.WriteString("Usage log (this bot's per-round cost/time record, read-only, owner access): ")
+		b.WriteString(usageLog)
+		b.WriteString("\nA JSONL file — use it to answer cost/usage questions about the bot; see the " +
+			"tg-usage skill. The same path is $AK_TGCLAUDE_USAGE_LOG for shell (grep/awk).\n\n")
 	}
 	if attach != nil {
 		b.WriteString("The user attached a file, already saved in your outbox at ")
@@ -246,7 +284,7 @@ func buildPrompt(project, outbox, transcriptDir, message string, sentAt time.Tim
 // --agent and freezes into the session, so it is omitted on --resume). Any operator
 // passthrough (extra) is appended last — validated against the denylist at config
 // load, so it cannot name a flag set above.
-func buildClaudeArgs(agent, sessionID, appendSystemPrompt, docDir, transcriptScope, mcpURL, mcpToken string, debug bool, extraTools, extra []string) []string {
+func buildClaudeArgs(agent, sessionID, appendSystemPrompt, docDir, transcriptScope, usageLog string, usageLogOwner bool, mcpURL, mcpToken string, debug bool, extraTools, extra []string) []string {
 	args := []string{
 		"-p", "--output-format", "json",
 		"--setting-sources", "project",
@@ -270,7 +308,7 @@ func buildClaudeArgs(agent, sessionID, appendSystemPrompt, docDir, transcriptSco
 			"--allowedTools", strings.Join(combineTools(mcpTools, extraTools), ","),
 		)
 	}
-	if s := buildInvocationSettings(docDir, transcriptScope); s != "" {
+	if s := buildInvocationSettings(docDir, transcriptScope, usageLog, usageLogOwner); s != "" {
 		args = append(args, "--settings", s)
 	}
 	if agent != "" {
