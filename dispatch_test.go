@@ -781,3 +781,46 @@ func TestIsClearCommand(t *testing.T) {
 		}
 	}
 }
+
+func TestMentionsBot(t *testing.T) {
+	d := &Dispatcher{botUsername: "mybot"}
+	for _, tc := range []struct {
+		name, text, caption string
+		want                bool
+	}{
+		{"in text", "hey @mybot what is X", "", true},
+		{"in caption", "", "look @MyBot at this", true},
+		{"case-insensitive", "@MYBOT hi", "", true},
+		{"prefix collision", "@mybot2 is someone else", "", false},
+		{"trailing punctuation ok", "thanks @mybot, please", "", true},
+		{"no mention", "just chatting here", "", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := d.mentionsBot(&Message{Text: tc.text, Caption: tc.caption}); got != tc.want {
+				t.Errorf("mentionsBot(text=%q,caption=%q) = %v, want %v", tc.text, tc.caption, got, tc.want)
+			}
+		})
+	}
+	// An empty botUsername (getMe failed) disables the check.
+	off := &Dispatcher{}
+	if off.mentionsBot(&Message{Text: "@mybot hi"}) {
+		t.Errorf("mentionsBot should be false when botUsername is empty")
+	}
+}
+
+func TestAddressed(t *testing.T) {
+	d := &Dispatcher{botUsername: "mybot"}
+	for _, tc := range []struct {
+		text string
+		want bool
+	}{
+		{"/do", true},
+		{"/do@mybot fix it", true},
+		{"@mybot help", true},
+		{"just a normal line", false},
+	} {
+		if got := d.addressed(&Message{Text: tc.text}); got != tc.want {
+			t.Errorf("addressed(%q) = %v, want %v", tc.text, got, tc.want)
+		}
+	}
+}

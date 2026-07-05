@@ -640,6 +640,43 @@ func isSlashCommand(text, name string) bool {
 // isClearCommand reports whether text is the /clear command.
 func isClearCommand(text string) bool { return isSlashCommand(text, "clear") }
 
+// isUsernameByte reports whether b can appear inside a Telegram @username
+// (letters lowercased, digits, underscore). Used to find the right edge of an
+// @mention so "@bot" does not match inside "@bot2".
+func isUsernameByte(b byte) bool {
+	return b == '_' || (b >= '0' && b <= '9') || (b >= 'a' && b <= 'z')
+}
+
+// mentionsBot reports whether the message text or caption @mentions this bot by
+// username (case-insensitive), as a whole token — a trailing username byte (e.g.
+// "@bot2" when we are "bot") does not count. Empty botUsername (getMe failed)
+// disables the check. The mention is NOT stripped: the model sees the text as
+// sent (a deliberate design choice).
+func (d *Dispatcher) mentionsBot(m *Message) bool {
+	if d.botUsername == "" {
+		return false
+	}
+	hay := strings.ToLower(m.Text + " " + m.Caption)
+	at := "@" + d.botUsername
+	for i := 0; ; {
+		j := strings.Index(hay[i:], at)
+		if j < 0 {
+			return false
+		}
+		k := i + j + len(at)
+		if k == len(hay) || !isUsernameByte(hay[k]) {
+			return true
+		}
+		i = k
+	}
+}
+
+// addressed reports whether a group message is directed at the bot: an @mention
+// or the /do command. Free chatter that is neither is recorded but not answered.
+func (d *Dispatcher) addressed(m *Message) bool {
+	return isSlashCommand(m.Text, "do") || d.mentionsBot(m)
+}
+
 // botCommands is the command menu uploaded via setMyCommands at startup. /start
 // is handled too but conventionally not listed (clients surface it as START).
 var botCommands = []BotCommand{
