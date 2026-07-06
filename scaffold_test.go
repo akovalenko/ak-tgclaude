@@ -26,13 +26,12 @@ func TestBuildSettingsShape(t *testing.T) {
 	if got := s.Sandbox.Filesystem.AllowWrite; len(got) != 1 || got[0] != "/state/cache" {
 		t.Errorf("allowWrite should be just the cache, got %v", got)
 	}
-	// File tools are governed by the PreToolUse hook, so the static permissions
-	// grant only the deferred tools (no Read/Write); permissions.deny carries the
+	// No allow list — tools are granted via the hook (file tools), the sandbox
+	// (Bash), and --allowedTools (MCP send + Skill); a populated allow list only
+	// trips the untrusted-workspace warning. Only permissions.deny is set: the
 	// non-timeout-able secret backstop (tested in full below).
-	for _, a := range s.Permissions.Allow {
-		if strings.HasPrefix(a, "Write(") || a == "Read" {
-			t.Errorf("static settings must not grant Read/Write (the hook does), got %v", s.Permissions.Allow)
-		}
+	if len(s.Permissions.Allow) != 0 {
+		t.Errorf("static settings should carry no permissions.allow (granted via --allowedTools), got %v", s.Permissions.Allow)
 	}
 	if !contains(s.Permissions.Deny, "Read(//cfg/bot.toml)") || !contains(s.Permissions.Deny, "Read(//cfg/bot.toml/**)") {
 		t.Errorf("permissions.deny should back-stop the token file, got %v", s.Permissions.Deny)
@@ -1033,7 +1032,7 @@ func TestMaterializeAgentInjectsMCPTools(t *testing.T) {
 	if strings.Contains(body, mcpToolsPlaceholder) {
 		t.Errorf("{{MCP_TOOLS}} left unsubstituted:\n%s", body)
 	}
-	want := "tools: Read, Grep, Glob, Bash, Write, Edit, Skill, " + strings.Join(mcpTools, ", ")
+	want := "tools: Read, Bash, Write, Edit, Skill, " + strings.Join(mcpTools, ", ")
 	if !strings.Contains(body, want) {
 		t.Errorf("MCP tools not appended to tools: as expected\nwant line: %q\ngot:\n%s", want, body)
 	}
@@ -1051,7 +1050,7 @@ func TestMaterializeAgentGrantsExtraTools(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := "tools: Read, Grep, Glob, Bash, Write, Edit, Skill, " + strings.Join(mcpTools, ", ") + ", Agent"
+	want := "tools: Read, Bash, Write, Edit, Skill, " + strings.Join(mcpTools, ", ") + ", Agent"
 	if body := string(b); !strings.Contains(body, want) {
 		t.Errorf("extra tool not in tools: frontmatter (or dedup failed)\nwant line: %q\ngot:\n%s", want, body)
 	}
@@ -1099,7 +1098,7 @@ func TestMaterializeAgentScopedExtraToolBareInFrontmatter(t *testing.T) {
 	}
 	body := string(b)
 	// A single bare WebFetch (the two scopes deduped), then Agent — no scoped spec.
-	want := "tools: Read, Grep, Glob, Bash, Write, Edit, Skill, " + strings.Join(mcpTools, ", ") + ", WebFetch, Agent"
+	want := "tools: Read, Bash, Write, Edit, Skill, " + strings.Join(mcpTools, ", ") + ", WebFetch, Agent"
 	if !strings.Contains(body, want) {
 		t.Errorf("scoped tool not reduced to a single bare name in frontmatter\nwant line: %q\ngot:\n%s", want, body)
 	}

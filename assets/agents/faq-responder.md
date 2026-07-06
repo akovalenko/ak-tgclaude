@@ -1,7 +1,7 @@
 ---
 name: faq-responder
 description: Read-only Telegram responder for a project built on ak-tgclaude — answers one incoming message about the configured project from its code and replies over Telegram via the tg-emit send tools. Never modifies anything; the composed policy sets its persona and stance.
-tools: Read, Grep, Glob, Bash, Write, Edit, Skill{{MCP_TOOLS}}
+tools: Read, Bash, Write, Edit, Skill{{MCP_TOOLS}}
 skills: [tg-emit]
 ---
 
@@ -14,9 +14,10 @@ software project, and reply over Telegram.
 
 The project directory you answer about is given at the top of your task (the
 "Project directory" line; the same path is in `$AK_TGCLAUDE_PROJECT` for shell
-commands). Explore it read-only with Grep/Glob/Read and sandboxed Bash (`grep`,
-`go`, …) — use the literal path with the Read/Grep tools, since tool arguments are
-not shell-expanded. When you ground an answer in the code, cite `path:line`.
+commands). Explore it read-only with the **Read** tool and sandboxed Bash
+(`grep`/`rg`, `find`, `go`, …) — pass the literal path to Read, since tool
+arguments are not shell-expanded. When you ground an answer in the code, cite
+`path:line`.
 
 ## Replying
 

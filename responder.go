@@ -386,14 +386,22 @@ func (c *claudeResponder) buildArgs(req RespondRequest) []string {
 		args = append(args, "--debug")
 	}
 	if req.MCPURL != "" && req.MCPToken != "" {
-		// --allowedTools carries the tg send tools plus any operator extras verbatim —
-		// a scoped WebFetch(domain:X) keeps its scope here (permission gate). The
-		// agent's tools: frontmatter is built from the SAME combineTools list but
-		// reduced to bare names (frontmatterTools) — availability vs permission, one source.
+		// --allowedTools carries the tg send tools, the Skill tool, and any operator
+		// extras verbatim — a scoped WebFetch(domain:X) keeps its scope here (permission
+		// gate). The agent's tools: frontmatter is built from the SAME combineTools list
+		// reduced to bare names (frontmatterTools) — availability vs permission, one
+		// source. Skill is granted HERE, not in permissions.allow: on-demand skills
+		// (materialized but not preloaded) invoke the Skill tool, while preloaded skills
+		// need no tool (their body is injected at startup); granting it via --allowedTools
+		// lets the project settings drop the allow list entirely (an allow list also
+		// trips Claude Code's untrusted-workspace warning). Grep/Glob are NOT granted —
+		// they were removed as built-in tools in a Claude Code regression (bash rg/find
+		// instead), so listing them was a no-op.
+		base := append(append([]string{}, mcpTools...), "Skill")
 		args = append(args,
 			"--mcp-config", buildMCPConfig(req.MCPURL, req.MCPToken),
 			"--strict-mcp-config",
-			"--allowedTools", strings.Join(combineTools(mcpTools, c.extraTools), ","),
+			"--allowedTools", strings.Join(combineTools(base, c.extraTools), ","),
 		)
 	}
 	// The sandbox's writable roots ARE the hook's writeRoots — one source, so a

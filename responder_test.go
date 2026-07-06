@@ -128,7 +128,7 @@ func TestBuildArgsExtraTools(t *testing.T) {
 	// duplicate of a send tool is not repeated.
 	got := strings.Join((&claudeResponder{extraTools: []string{"Agent", "WebFetch", "mcp__tg__send_message"}}).
 		buildArgs(RespondRequest{MCPURL: "http://127.0.0.1:9/mcp", MCPToken: "tok"}), " ")
-	want := "--allowedTools mcp__tg__send_message,mcp__tg__send_code,mcp__tg__send_document,Agent,WebFetch"
+	want := "--allowedTools mcp__tg__send_message,mcp__tg__send_code,mcp__tg__send_document,Skill,Agent,WebFetch"
 	if !strings.Contains(got, want) {
 		t.Errorf("extra tools not merged into --allowedTools\nwant substring: %q\ngot: %q", want, got)
 	}
@@ -141,7 +141,7 @@ func TestBuildArgsScopedToolKeepsScope(t *testing.T) {
 	// the frontmatter, which collapses them to one bare name.
 	got := strings.Join((&claudeResponder{extraTools: []string{"WebFetch(domain:github.com)", "WebFetch(domain:*.github.com)"}}).
 		buildArgs(RespondRequest{MCPURL: "http://127.0.0.1:9/mcp", MCPToken: "tok"}), " ")
-	want := "--allowedTools mcp__tg__send_message,mcp__tg__send_code,mcp__tg__send_document,WebFetch(domain:github.com),WebFetch(domain:*.github.com)"
+	want := "--allowedTools mcp__tg__send_message,mcp__tg__send_code,mcp__tg__send_document,Skill,WebFetch(domain:github.com),WebFetch(domain:*.github.com)"
 	if !strings.Contains(got, want) {
 		t.Errorf("scoped tools not kept verbatim in --allowedTools\nwant substring: %q\ngot: %q", want, got)
 	}

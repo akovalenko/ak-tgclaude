@@ -372,12 +372,13 @@ func buildSettings(p scaffoldParams) *claudeSettings {
 	s := &claudeSettings{
 		Env: goCacheEnv(p.CacheDir),
 		Permissions: &permissionsCfg{
-			// The file tools (Read/Edit/Write/NotebookEdit) are governed by the
-			// PreToolUse hook (path-scoped: read the project, write the outbox/tmp),
-			// so they are NOT listed here. Only the tools the hook defers are
-			// allowed — the search/skill tools; Bash is auto-allowed when sandboxed.
-			Allow: []string{"Grep", "Glob", "Skill"},
-			// The non-timeout-able secret backstop (see secretDenies above).
+			// NO allow list. The file tools are hook-governed, Bash is auto-allowed when
+			// sandboxed, and the tools that need an explicit grant (the MCP send tools and
+			// the Skill tool for on-demand skills) ride --allowedTools + the agent
+			// frontmatter — see (*claudeResponder).buildArgs. A populated allow list buys
+			// nothing here and trips Claude Code's untrusted-workspace warning; Grep/Glob
+			// are a dead built-in (a regression), so listing them was a no-op anyway.
+			// Only permissions.deny is set — the non-timeout-able secret backstop.
 			Deny: permissionDenyRules(secretDenies),
 		},
 		Sandbox: &sandboxCfg{
