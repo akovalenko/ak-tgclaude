@@ -481,9 +481,10 @@ shell could otherwise read the operator's own secrets. The generated
   **`~/.claude/projects`** (transcripts of the operator's other sessions, which
   may quote secrets from that work) via `sandbox.filesystem.denyRead`.
 
-This is the **Bash layer** only — the file tools (`Read`/`Grep`/`Glob`) are
-already confined to the project by the PreToolUse hook (default-closed allowlist),
-so they can't reach these paths either. Denying `~/.claude/.credentials.json` does
+This is the **Bash layer**; the **Read tool** is unsandboxed (only the hook gates
+it), and since Read is default-open (it mirrors the sandbox) the hook carries these
+same host secrets in its **absolute-deny** set — so neither Bash nor Read reaches
+them. Denying `~/.claude/.credentials.json` does
 **not** break the responder's own `claude -p` auth: the parent process reads its
 credentials **unsandboxed**; only the Bash tools it spawns are confined. (`~/` is
 expanded by the sandbox to the responder's home.)
@@ -491,11 +492,13 @@ expanded by the sandbox to the responder's home.)
 **Extra paths — `deny_reads` / `--deny-read`.** To hide more paths (a secrets
 file inside the project, a sibling repo, a mounted volume), list them in
 `deny_reads` (or repeat `--deny-read <path>`; the two merge, like
-`wire_skills`/`allowed_users`). Each path is denied at **both** layers: the hook
-blocks the **Read tool** (checked before the project-read allow, so it wins even
-for a path *inside* the project) and `sandbox.filesystem.denyRead` blocks the
-**sandboxed Bash**. Paths take `~` and, like every config path, resolve relative
-entries against the dispatcher's **launch cwd** (see [Configuration](#configuration)).
+`wire_skills`/`allowed_users`). Each path is denied at **both** layers: it joins the
+hook's **absolute-deny** set (checked first, so it blocks the **Read tool** even for
+a path that reads open by default) and `sandbox.filesystem.denyRead` blocks the
+**sandboxed Bash**. Both are projected from the one config source — the dispatcher's
+file policy for the hook, the generated settings for the sandbox. Paths take `~`
+and, like every config path, resolve relative entries against the dispatcher's
+**launch cwd** (see [Configuration](#configuration)).
 
 **Extra env vars — `deny_envs` / `--deny-env`.** `ANTHROPIC_API_KEY` and
 `ANTHROPIC_AUTH_TOKEN` are **always** scrubbed from the responder's sandboxed
@@ -762,18 +765,30 @@ while the scaffold is still writable. Types match the masks (files vs the one di
 the list tracks Claude Code's internal mask set, and a future version masking a new
 path fails a sandboxed Bash with EROFS naming it — the signal to add it.
 
-The **PreToolUse hook** is the single authority for the **file tools**,
-path-scoped from the responder's env:
+The **PreToolUse hook** is the single authority for the **file tools**, driven by
+one JSON policy the dispatcher hands it (`AK_TGCLAUDE_FILE_POLICY` — the same source
+the sandbox settings project, so the two cannot drift):
 
-- **Read** → allowed under the project (`$AK_TGCLAUDE_PROJECT`) **and the writable
-  areas** (so the responder can read back what it authored), else denied (read
-  elsewhere with sandboxed Bash);
-- **Edit/Write/NotebookEdit** → allowed under this invocation's outbox
-  (`$AK_TGCLAUDE_OUTBOX`) or the sandbox tmp (`/tmp/claude-<uid>`), else denied
-  (so the project stays read-only but the responder can author/iterate on files);
-- a **protected-path** touch (`--deny-read`: the token file, plus any operator
-  `deny_reads`/`--deny-read`) is denied first — it wins even if that path happens to
-  sit under the project.
+- **Read** → **mirrors the sandbox**: default-OPEN, minus the masked roots (sibling
+  outboxes, other chats' transcripts, a non-owner's usage log — the sandbox's
+  `denyRead`), with this invocation's own scopes carved back (its outbox, its
+  transcript scope, an owner's usage log — the sandbox's `allowRead`). So the Read
+  tool reaches exactly what sandboxed Bash reaches — no project confinement, no
+  "denied here, `cat` it via Bash" theatre that bought nothing (Bash could read it
+  anyway). An **absolute-deny** set — host secrets (SSH keys, Claude
+  credentials/history/projects), the token, operator `deny_reads` — is checked
+  first and never carved, so the unsandboxed Read tool cannot slurp a secret even
+  though reads are otherwise open.
+- **Edit/Write/NotebookEdit** → a strict allowlist: this invocation's outbox
+  (`$AK_TGCLAUDE_OUTBOX`, temp lands there too), else denied (the project and
+  everything else stay non-writable; the responder authors only in its outbox).
+
+Read default-open shifts weight onto the guard, so the hook `timeout` is set to an
+effectively-infinite 24h: a PreToolUse hook that times out **fails open** (Claude
+Code lets the tool proceed), which would let an attacker starve the machine to slip
+a secret Read past a short window. The guard does microseconds of work, so it never
+times out in practice; a crash still fails safe (a Go panic exits 2 = block, a parse
+error self-denies).
 
 It also **allows sandboxed** Bash / **denies unsandboxed** Bash, and **defers**
 everything else (Grep/Glob/Skill/…) to the permission layer. With `bang_bug`

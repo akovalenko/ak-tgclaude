@@ -33,24 +33,38 @@ func bashInput(cmd string, disableSandbox bool) *preToolUseInput {
 }
 
 var testPolicy = filePolicy{
-	deny:       []string{"/cfg/bot.toml"},
-	readRoots:  []string{"/proj"},
-	writeRoots: []string{"/run/out/outbox-A1"},
+	deny:       []string{"/host/.ssh", "/cfg/bot.toml"},      // host secret + token: never
+	readAllow:  []string{"/run/out/outbox-A1", "/s/tr/42"},   // own outbox + own transcript
+	readDeny:   []string{"/run/out", "/s/tr"},                // sibling outboxes + transcript roots
+	writeRoots: []string{"/run/out/outbox-A1"},               // writes: the outbox only
 }
 
-func TestDecideReadScopedToProject(t *testing.T) {
-	if d, _ := decidePreToolUse(fileInput("Read", "/proj/main.go"), testPolicy); d != "allow" {
-		t.Errorf("read within project => %q, want allow", d)
+func TestDecideReadMirrorsSandbox(t *testing.T) {
+	// Read is default-OPEN — the project and any ordinary external file are allowed,
+	// exactly as sandboxed Bash reads them: no project confinement, no cat-via-Bash.
+	for _, p := range []string{"/proj/main.go", "/etc/hostname", "/var/log/x", "/home/other/notes.txt"} {
+		if d, _ := decidePreToolUse(fileInput("Read", p), testPolicy); d != "allow" {
+			t.Errorf("read %q => %q, want allow (default-open)", p, d)
+		}
 	}
-	if d, _ := decidePreToolUse(fileInput("Read", "/proj"), testPolicy); d != "allow" {
-		t.Errorf("read of project root => %q, want allow", d)
+	// This invocation's own outbox and transcript: readable via the carve.
+	for _, p := range []string{"/run/out/outbox-A1/reply.md", "/s/tr/42/2026.jsonl"} {
+		if d, _ := decidePreToolUse(fileInput("Read", p), testPolicy); d != "allow" {
+			t.Errorf("read own scope %q => %q, want allow", p, d)
+		}
 	}
-	if d, _ := decidePreToolUse(fileInput("Read", "/etc/passwd"), testPolicy); d != "deny" {
-		t.Errorf("read outside project => %q, want deny", d)
+	// A sibling's outbox / another chat's transcript: masked (under a readDeny root,
+	// not carved) — the cross-chat isolation the project allowlist used to give.
+	for _, p := range []string{"/run/out/outbox-B2/steal.md", "/s/tr/99/2026.jsonl"} {
+		if d, _ := decidePreToolUse(fileInput("Read", p), testPolicy); d != "deny" {
+			t.Errorf("read sibling %q => %q, want deny (masked)", p, d)
+		}
 	}
-	// A sibling that merely shares a prefix is NOT inside the project.
-	if d, _ := decidePreToolUse(fileInput("Read", "/proj-secret/x"), testPolicy); d != "deny" {
-		t.Errorf("prefix-sibling read => %q, want deny", d)
+	// Host secret + token: absolute deny, wins over the default-open.
+	for _, p := range []string{"/host/.ssh/id_rsa", "/cfg/bot.toml"} {
+		if d, _ := decidePreToolUse(fileInput("Read", p), testPolicy); d != "deny" {
+			t.Errorf("read secret %q => %q, want deny", p, d)
+		}
 	}
 }
 
@@ -73,15 +87,16 @@ func TestDecideWriteScopedToOutbox(t *testing.T) {
 	}
 }
 
-func TestDecideTokenWinsOverProject(t *testing.T) {
-	// The token sits under the project, but the deny check runs first.
-	pol := filePolicy{deny: []string{"/proj/secret.toml"}, readRoots: []string{"/proj"}}
+func TestDecideAbsoluteDenyWinsOverDefaultOpen(t *testing.T) {
+	// A protected path is denied even though Read is otherwise default-open (the deny
+	// check runs first).
+	pol := filePolicy{deny: []string{"/proj/secret.toml"}}
 	if d, _ := decidePreToolUse(fileInput("Read", "/proj/secret.toml"), pol); d != "deny" {
-		t.Errorf("token under project => %q, want deny", d)
+		t.Errorf("protected path => %q, want deny", d)
 	}
-	// A normal project file is still allowed.
+	// A normal file next to it reads fine (default-open).
 	if d, _ := decidePreToolUse(fileInput("Read", "/proj/main.go"), pol); d != "allow" {
-		t.Errorf("project file => %q, want allow", d)
+		t.Errorf("ordinary file => %q, want allow", d)
 	}
 }
 
@@ -127,37 +142,24 @@ func TestDecideDefersOtherTools(t *testing.T) {
 func TestEnvFilePolicy(t *testing.T) {
 	setFilePolicyEnv(t, hookFilePolicy{
 		WriteRoots: []string{"/run/out/o1"},
-		ReadRoots:  []string{"/proj", "/run/out/o1"},
+		ReadAllow:  []string{"/run/out/o1"},
+		ReadDeny:   []string{"/run/out"},
 		Deny:       []string{"/cfg/bot.toml"},
 	})
 	pol := envFilePolicy()
 
-	// Read is allowed in the project AND the writable area (read what you write,
-	// so authoring can iterate).
-	for _, p := range []string{"/proj/main.go", "/run/out/o1/draft.md"} {
-		if d, _ := decidePreToolUse(fileInput("Read", p), pol); d != "allow" {
-			t.Errorf("read %q => %q, want allow", p, d)
+	for _, c := range []struct{ tool, path, want string }{
+		{"Read", "/run/out/o1/draft.md", "allow"}, // own outbox: carve
+		{"Write", "/run/out/o1/draft.md", "allow"}, // own outbox: writable
+		{"Read", "/proj/main.go", "allow"},         // project: default-open
+		{"Read", "/etc/hostname", "allow"},         // external: default-open (no dance)
+		{"Write", "/proj/main.go", "deny"},         // writes are outbox-only
+		{"Read", "/run/out/o2/steal.md", "deny"},   // sibling outbox: masked
+		{"Read", "/cfg/bot.toml", "deny"},          // token: absolute deny
+	} {
+		if d, _ := decidePreToolUse(fileInput(c.tool, c.path), pol); d != c.want {
+			t.Errorf("%s %s => %q, want %q", c.tool, c.path, d, c.want)
 		}
-	}
-	// Write is allowed only in the outbox, not the (read-only) project.
-	if d, _ := decidePreToolUse(fileInput("Write", "/run/out/o1/draft.md"), pol); d != "allow" {
-		t.Errorf("write outbox => %q, want allow", d)
-	}
-	if d, _ := decidePreToolUse(fileInput("Write", "/proj/main.go"), pol); d != "deny" {
-		t.Errorf("write project => %q, want deny (read-only)", d)
-	}
-	// /tmp/claude-<uid> is no longer a scratch root: read and write are denied
-	// (temp now lives under the outbox via TMPDIR).
-	const tmp = "/tmp/claude-1000/scratch.txt"
-	if d, _ := decidePreToolUse(fileInput("Read", tmp), pol); d != "deny" {
-		t.Errorf("read /tmp => %q, want deny", d)
-	}
-	if d, _ := decidePreToolUse(fileInput("Write", tmp), pol); d != "deny" {
-		t.Errorf("write /tmp => %q, want deny", d)
-	}
-	// Token denied first even though it isn't under any root.
-	if d, _ := decidePreToolUse(fileInput("Read", "/cfg/bot.toml"), pol); d != "deny" {
-		t.Errorf("token read => %q, want deny", d)
 	}
 }
 
@@ -183,7 +185,7 @@ func TestEnvFilePolicyColonPath(t *testing.T) {
 	// JSON round-trips a path holding a ':' exactly — the reason we do not join the
 	// list PATH-style (which would split such a path).
 	const p = "/run/out/o:1"
-	setFilePolicyEnv(t, hookFilePolicy{WriteRoots: []string{p}, ReadRoots: []string{p}})
+	setFilePolicyEnv(t, hookFilePolicy{WriteRoots: []string{p}, ReadAllow: []string{p}})
 	pol := envFilePolicy()
 	if d, _ := decidePreToolUse(fileInput("Write", p+"/draft.md"), pol); d != "allow" {
 		t.Errorf("write under colon-path => %q, want allow (path must round-trip intact)", d)
@@ -193,19 +195,20 @@ func TestEnvFilePolicyColonPath(t *testing.T) {
 func TestEnvFilePolicyTranscriptScope(t *testing.T) {
 	setFilePolicyEnv(t, hookFilePolicy{
 		WriteRoots: []string{"/run/out/o1"},
-		ReadRoots:  []string{"/proj", "/run/out/o1", "/s/transcripts/42"},
+		ReadAllow:  []string{"/run/out/o1", "/s/transcripts/42"},
+		ReadDeny:   []string{"/s/transcripts"},
 	})
 	pol := envFilePolicy()
 
-	// Read is allowed under this chat's own transcript scope...
+	// Read is allowed under this chat's own transcript scope (the carve)...
 	if d, _ := decidePreToolUse(fileInput("Read", "/s/transcripts/42/2026-07-04.jsonl"), pol); d != "allow" {
 		t.Errorf("read own transcript => %q, want allow", d)
 	}
-	// ...but a sibling chat's dir is not under the scope => deny (no cross-chat read).
+	// ...but a sibling chat's dir is under the masked root, not the carve => deny.
 	if d, _ := decidePreToolUse(fileInput("Read", "/s/transcripts/99/2026-07-04.jsonl"), pol); d != "deny" {
 		t.Errorf("read sibling transcript => %q, want deny", d)
 	}
-	// The transcript is read-only: a Write is denied.
+	// The transcript is read-only: a Write is denied (outbox-only writes).
 	if d, _ := decidePreToolUse(fileInput("Write", "/s/transcripts/42/x"), pol); d != "deny" {
 		t.Errorf("write transcript => %q, want deny", d)
 	}

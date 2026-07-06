@@ -1035,15 +1035,18 @@ func runDispatch(args []string) error {
 		if _, err := os.Stat(agentFile); err != nil {
 			return fmt.Errorf("agent %q not materialized (%s); use the default %q (custom agents are not wired yet)", cfg.Agent, agentFile, defaultAgent)
 		}
-		// The hook's protected paths: operator deny_reads plus the token file (when it
-		// lives in a config). The SAME paths the sandbox denies for Bash — sourced once
-		// here from config, projected into the per-invocation file policy (env) and,
-		// separately, the static sandbox denyRead.
-		denyPaths := append([]string(nil), cfg.DenyRead...)
+		// The hook's absolute-deny set: host secrets, plus operator deny_reads, plus
+		// the token file (when it lives in a config). The SAME paths the sandbox denies
+		// for Bash — sourced once here, projected into the per-invocation file policy
+		// (env) and, separately, the static sandbox denyRead/credentials. With Read now
+		// default-open (it mirrors the sandbox), the host secrets MUST be here or the
+		// unsandboxed Read tool could slurp them.
+		denyPaths := hostSecretHookDeny()
+		denyPaths = append(denyPaths, cfg.DenyRead...)
 		if cfg.ConfigPath != "" {
 			denyPaths = append(denyPaths, cfg.ConfigPath)
 		}
-		resp = &claudeResponder{agent: cfg.Agent, cwd: cwd, project: cfg.Project, cacheDir: cacheDir, debug: cfg.Debug, claudeArgs: cfg.ClaudeArgs, extraTools: cfg.Tools, denyPaths: denyPaths}
+		resp = &claudeResponder{agent: cfg.Agent, cwd: cwd, project: cfg.Project, cacheDir: cacheDir, debug: cfg.Debug, claudeArgs: cfg.ClaudeArgs, extraTools: cfg.Tools, denyPaths: denyPaths, outboxRoot: outboxRoot, transcriptRoot: cfg.TranscriptRoot()}
 	}
 
 	helpText := cfg.HelpText

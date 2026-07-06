@@ -238,6 +238,20 @@ var hostSecretDenyRead = []string{
 	"~/.claude/projects",
 }
 
+// hostSecretHookDeny is the host-secret set as ABSOLUTE paths for the hook's
+// file-tool deny list. The Read tool is unsandboxed (only the hook gates it), so
+// with Read now default-open it needs these denied explicitly — the same paths the
+// sandbox masks for Bash (credentials.files + hostSecretDenyRead), sourced here so
+// the two cannot drift. The hook's matcher does no `~` expansion (it compares
+// filepath.Abs'd paths), so expand `~` now via resolvePath.
+func hostSecretHookDeny() []string {
+	var out []string
+	for _, p := range append(append([]string{}, hostSecretCredFiles...), hostSecretDenyRead...) {
+		out = append(out, resolvePath(p))
+	}
+	return out
+}
+
 // goCacheEnv is the isolated Go cache environment for the responder. It is both
 // written into settings.json and injected into the `claude -p` process env — the
 // latter is what actually reaches the sandboxed `go` (a project settings-file
@@ -369,12 +383,22 @@ func buildSettings(p scaffoldParams) *claudeSettings {
 		Hooks: []hookEntry{{
 			Type:          "command",
 			Command:       hookCmd,
-			Timeout:       10,
+			Timeout:       hookTimeoutSeconds,
 			StatusMessage: "ak-tgclaude token guard",
 		}},
 	}}}
 	return s
 }
+
+// hookTimeoutSeconds is effectively infinite (24h). A PreToolUse hook that times
+// out FAILS OPEN — Claude Code lets the tool proceed as if the hook never ran — so
+// a short timeout is a security bypass: starve the machine (e.g. a heavy build) so
+// the guard binary cannot be scheduled within the window, and a Read of a secret
+// slips through. This guard does microseconds of work; even under severe CPU
+// starvation it finishes in well under 24h, so it never times out in practice and
+// the tool simply waits for its verdict. (A crash still fails safe: a Go panic
+// exits 2 = block, and a parse error self-denies — see envFilePolicy/decidePreToolUse.)
+const hookTimeoutSeconds = 86400
 
 // resetDirContents removes every entry inside dir without removing dir itself, so
 // the caller can regenerate the contents from canon while preserving the dir's

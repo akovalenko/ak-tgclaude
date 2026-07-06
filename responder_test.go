@@ -9,23 +9,32 @@ import (
 )
 
 func TestFilePolicy(t *testing.T) {
-	// The single-source policy: writeRoots is the outbox; readRoots adds project +
-	// the read-only scopes; deny is the responder's denyPaths (token + operator
-	// deny_reads). A future writable dir would be one more entry in writeRoots here.
-	c := &claudeResponder{project: "/proj", denyPaths: []string{"/cfg/bot.toml", "/secret/a"}}
+	// The single-source mirror policy: writeRoots is the outbox; ReadAllow carves the
+	// own outbox + own transcript scope; ReadDeny masks the shared roots (sibling
+	// outboxes, other transcripts); Deny is the absolute set. A future writable dir
+	// would be one more entry in writeRoots here and flow to both hook and sandbox.
+	c := &claudeResponder{
+		project:        "/proj",
+		outboxRoot:     "/run/out",
+		transcriptRoot: "/s/transcripts",
+		denyPaths:      []string{"/host/.ssh", "/cfg/bot.toml"},
+	}
 	pol := c.filePolicy(RespondRequest{DocDir: "/run/out/o1", TranscriptScope: "/s/transcripts/42"})
-	if j := strings.Join(pol.WriteRoots, ","); j != "/run/out/o1" {
-		t.Errorf("writeRoots = %v, want [/run/out/o1]", pol.WriteRoots)
+	for _, tc := range []struct {
+		name, got, want string
+	}{
+		{"writeRoots", strings.Join(pol.WriteRoots, ","), "/run/out/o1"},
+		{"readAllow", strings.Join(pol.ReadAllow, ","), "/run/out/o1,/s/transcripts/42"},
+		{"readDeny", strings.Join(pol.ReadDeny, ","), "/run/out,/s/transcripts"},
+		{"deny", strings.Join(pol.Deny, ","), "/host/.ssh,/cfg/bot.toml"},
+	} {
+		if tc.got != tc.want {
+			t.Errorf("%s = %q, want %q", tc.name, tc.got, tc.want)
+		}
 	}
-	if j := strings.Join(pol.ReadRoots, ","); j != "/proj,/run/out/o1,/s/transcripts/42" {
-		t.Errorf("readRoots = %v, want [/proj /run/out/o1 /s/transcripts/42]", pol.ReadRoots)
-	}
-	if j := strings.Join(pol.Deny, ","); j != "/cfg/bot.toml,/secret/a" {
-		t.Errorf("deny = %v, want the denyPaths", pol.Deny)
-	}
-	// Non-owner (no usage-log env value) gets no usage-log read carve.
-	if strings.Contains(strings.Join(pol.ReadRoots, ","), "usage") {
-		t.Errorf("non-owner readRoots must not carry the usage log: %v", pol.ReadRoots)
+	// Non-owner (no usage-log env value) carves nothing for the usage log.
+	if strings.Contains(strings.Join(pol.ReadAllow, ","), "usage") {
+		t.Errorf("non-owner readAllow must not carry the usage log: %v", pol.ReadAllow)
 	}
 }
 

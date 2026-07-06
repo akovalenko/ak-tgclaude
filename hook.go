@@ -53,18 +53,23 @@ type preToolUseDecision struct {
 // filePolicy is the responder's file-tool access policy. The hook is the single
 // authority for the file tools (permissions carry only the deferred tools):
 //
-//	Read           -> allow under readRoots, else deny
-//	Edit/Write/...  -> allow under writeRoots (the outbox + tmp), else deny
-//	deny (token)    -> deny for any file tool (checked first, wins over the above)
+//	deny            -> deny for any file tool, first (host secrets, token, deny_reads)
+//	Read            -> readAllow carve wins; else readDeny mask denies; else ALLOW
+//	Edit/Write/...   -> allow under writeRoots (the outbox), else deny
 //
-// readRoots is a superset of writeRoots — the responder can read anything it can
-// write (so it can iterate on files it authored) plus the project; writeRoots is
-// the outbox (the project stays read-only). See envFilePolicy.
+// Read MIRRORS the sandbox: default-open, minus the masked roots (sibling outboxes,
+// other chats' transcripts, a non-owner's usage log), with this invocation's own
+// scopes (its outbox, its transcript scope, an owner's usage log) carved back in —
+// exactly the sandbox's denyRead + allowRead. So the Read tool reaches precisely
+// what sandboxed Bash reaches: no project confinement, no "denied here, cat it via
+// Bash" theatre. Writes stay a strict allowlist (the outbox). See envFilePolicy.
 type filePolicy struct {
-	deny       []string // protected paths (token); highest priority
-	readRoots  []string // Read allowed under these (project + writeRoots)
-	writeRoots []string // Edit/Write/NotebookEdit allowed under these
+	deny       []string // never read/written: host secrets, token, operator deny_reads; wins first
+	readAllow  []string // Read carves (own outbox/transcript, owner usage log) — win over readDeny
+	readDeny   []string // Read masks (sibling outboxes, other transcripts, non-owner usage log)
+	writeRoots []string // Edit/Write/NotebookEdit allowed only under these (the outbox)
 	bangBug    bool     // deny sandboxed Bash whose command contains `\!` (bug #64301)
+	failClosed bool     // no/invalid policy: deny every file tool (Read is otherwise default-open)
 }
 
 // hookFilePolicy is the file-tool access policy the dispatcher computes and hands
@@ -72,26 +77,30 @@ type filePolicy struct {
 // responder may read / write / never touch: the dispatcher derives it once (see
 // (*claudeResponder).filePolicy) and projects it both here (the file tools) and
 // into the sandbox settings (Bash, via allowWrite), so the two cannot drift — a
-// future writable location added to writeRoots flows to both. JSON, not a
-// separator-joined list, so a path holding any byte (including the ':' that would
-// break a PATH-style list) round-trips exactly.
+// the Read carves/masks mirror the sandbox's allowRead/denyRead, and writeRoots
+// feeds allowWrite. JSON, not a separator-joined list, so a path holding any byte
+// (including the ':' that would break a PATH-style list) round-trips exactly.
 type hookFilePolicy struct {
-	WriteRoots []string `json:"writeRoots"` // Edit/Write/NotebookEdit allowed under these
-	ReadRoots  []string `json:"readRoots"`  // Read allowed under these (a superset of writeRoots)
-	Deny       []string `json:"deny"`       // protected paths; highest priority, wins over the roots
+	WriteRoots []string `json:"writeRoots"`          // Edit/Write allowed only under these (the outbox)
+	ReadAllow  []string `json:"readAllow,omitempty"` // Read carves: own outbox/transcript, owner usage log
+	ReadDeny   []string `json:"readDeny,omitempty"`  // Read masks: sibling outboxes, other transcripts, non-owner usage log
+	Deny       []string `json:"deny,omitempty"`      // never read/written; wins first (host secrets, token, deny_reads)
 }
 
-// envFilePolicy decodes the hook's policy from filePolicyEnv. A missing or
-// malformed value yields the empty policy — fail-safe, since empty read/write
-// roots deny every file tool (Bash is governed by the sandbox, not this hook).
+// envFilePolicy decodes the hook's policy from filePolicyEnv. Read is default-OPEN
+// in the mirror model, so a missing or malformed policy is treated as a hard fail:
+// deny every file tool (a readDeny of "/" masks all absolute paths, writeRoots
+// cleared) rather than expose the filesystem on a corrupt spawn.
 func envFilePolicy() filePolicy {
 	var w hookFilePolicy
+	ok := false
 	if v := os.Getenv(filePolicyEnv); v != "" {
-		// A decode error is swallowed on purpose: w stays zero, so every file tool is
-		// denied rather than let through on a corrupt policy.
-		_ = json.Unmarshal([]byte(v), &w)
+		ok = json.Unmarshal([]byte(v), &w) == nil
 	}
-	return filePolicy{deny: w.Deny, readRoots: w.ReadRoots, writeRoots: w.WriteRoots}
+	if !ok {
+		return filePolicy{failClosed: true}
+	}
+	return filePolicy{deny: w.Deny, readAllow: w.ReadAllow, readDeny: w.ReadDeny, writeRoots: w.WriteRoots}
 }
 
 // runHookPreToolUse gates the responder's tool calls: it path-scopes the file
@@ -165,8 +174,8 @@ func appendHookLog(path, line string) {
 
 // decidePreToolUse returns "deny", "allow", or "" (defer).
 func decidePreToolUse(in *preToolUseInput, pol filePolicy) (decision, reason string) {
-	// Token guard first: a file tool touching a protected path is denied even if
-	// that path happens to sit under the project (checked before the read allow).
+	// Absolute deny first: host secrets, the token, operator deny_reads — never read
+	// or written by any file tool, wins over every allow below.
 	if p, ok := underAny(in.ToolInput.FilePath, pol.deny); ok {
 		return "deny", "ak-tgclaude hook: access to a protected path is denied: " + p
 	}
@@ -185,11 +194,19 @@ func decidePreToolUse(in *preToolUseInput, pol filePolicy) (decision, reason str
 		return "allow", "ak-tgclaude hook: sandboxed Bash allowed"
 
 	case "Read":
-		if _, ok := underAny(in.ToolInput.FilePath, pol.readRoots); ok {
-			return "allow", "ak-tgclaude hook: read within the project"
+		if pol.failClosed {
+			return "deny", "ak-tgclaude hook: no file-tool policy present — denying (fail-closed)"
 		}
-		return "deny", "ak-tgclaude hook: read is limited to the project " +
-			fmtRoots(pol.readRoots) + " — read other locations with sandboxed Bash"
+		// Mirror the sandbox: an own-scope carve wins, then a masked root denies, else
+		// read is open — exactly what sandboxed Bash can read, so no project confinement
+		// and no Bash-cat detour for an ordinary external file.
+		if _, ok := underAny(in.ToolInput.FilePath, pol.readAllow); ok {
+			return "allow", "ak-tgclaude hook: read allowed (own scope)"
+		}
+		if r, ok := underAny(in.ToolInput.FilePath, pol.readDeny); ok {
+			return "deny", "ak-tgclaude hook: read of a masked location is denied: " + r
+		}
+		return "allow", "ak-tgclaude hook: read allowed"
 
 	case "Edit", "MultiEdit", "Write", "NotebookEdit":
 		if _, ok := underAny(in.ToolInput.FilePath, pol.writeRoots); ok {

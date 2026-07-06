@@ -117,14 +117,16 @@ const filePolicyEnv = "AK_TGCLAUDE_FILE_POLICY"
 
 // claudeResponder spawns a headless `claude -p` for each update.
 type claudeResponder struct {
-	agent      string   // --agent <name>; empty => the configured default agent
-	cwd        string   // responder cwd (the materialized scaffold: settings.json + skills)
-	project    string   // the project the agent answers about ($AK_TGCLAUDE_PROJECT)
-	cacheDir   string   // isolated Go cache root, injected into the process env
-	debug      bool     // pass --debug to claude -p (diagnostics to stderr)
-	claudeArgs []string // operator passthrough appended to claude -p (validated at config load)
-	extraTools []string // EXTRA tools granted (config `tools`/--tool): added to --allowedTools
-	denyPaths  []string // protected paths for the hook's file-tool policy (token file + operator deny_reads); the SAME paths the sandbox denies for Bash, sourced once from config
+	agent          string   // --agent <name>; empty => the configured default agent
+	cwd            string   // responder cwd (the materialized scaffold: settings.json + skills)
+	project        string   // the project the agent answers about ($AK_TGCLAUDE_PROJECT)
+	cacheDir       string   // isolated Go cache root, injected into the process env
+	debug          bool     // pass --debug to claude -p (diagnostics to stderr)
+	claudeArgs     []string // operator passthrough appended to claude -p (validated at config load)
+	extraTools     []string // EXTRA tools granted (config `tools`/--tool): added to --allowedTools
+	denyPaths      []string // never read/written by a file tool: host secrets + token + operator deny_reads; the SAME set the sandbox denies for Bash, sourced once from config
+	outboxRoot     string   // parent of all per-chat outboxes: Read-masked so a responder cannot read a sibling's (its own outbox is carved back per invocation)
+	transcriptRoot string   // transcript store root: Read-masked so a responder cannot read another chat's history (its own scope is carved back per invocation)
 }
 
 // Respond runs `claude -p [--agent] [--resume] --output-format json`, feeding
@@ -147,31 +149,41 @@ func (c *claudeResponder) Respond(ctx context.Context, req RespondRequest) (Resp
 }
 
 // filePolicy is this invocation's file-tool access policy — the single definition
-// the hook enforces (handed over via filePolicyEnv) and the sandbox mirrors
-// (buildInvocationSettings' allowWrite = WriteRoots). writeRoots is the outbox;
-// readRoots adds the project plus the read-only scopes (the transcript scope, and
-// — owner only — the usage log); deny is the protected set (token + operator
-// deny_reads). A future writable location is one append to writeRoots here and
-// then flows to both the hook and the sandbox with no second edit.
+// the hook enforces (handed over via filePolicyEnv) and the sandbox mirrors. Read
+// mirrors the sandbox one-for-one: the masked roots (ReadDeny: sibling outboxes,
+// other chats' transcripts, a non-owner's usage log) are the sandbox's denyRead,
+// and the own-scope carves (ReadAllow: this outbox, this transcript scope, an
+// owner's usage log) are its allowRead; everything else reads by default. writeRoots
+// (the outbox) feeds allowWrite. Deny is the absolute set (host secrets + token +
+// operator deny_reads). A future writable location is one append to writeRoots here
+// and flows to both the hook and the sandbox with no second edit.
 func (c *claudeResponder) filePolicy(req RespondRequest) hookFilePolicy {
 	var writeRoots []string
 	if req.DocDir != "" {
 		writeRoots = append(writeRoots, req.DocDir)
 	}
-	var readRoots []string
-	if c.project != "" {
-		readRoots = append(readRoots, c.project)
-	}
-	readRoots = append(readRoots, writeRoots...)
+	// ReadAllow carves back this invocation's own scopes out of the masked roots.
+	readAllow := append([]string(nil), writeRoots...) // own outbox: readable
 	if req.TranscriptScope != "" {
-		readRoots = append(readRoots, req.TranscriptScope)
+		readAllow = append(readAllow, req.TranscriptScope)
 	}
-	// Owner only: usageLogEnvValue is "" for everyone else, so a non-owner gets no
-	// read carve here (and a sandbox denyRead), keeping the cost log closed.
+	// ReadDeny masks the shared roots so a responder cannot read a sibling's outbox
+	// or another chat's transcript (its own is carved above).
+	var readDeny []string
+	if c.outboxRoot != "" {
+		readDeny = append(readDeny, c.outboxRoot)
+	}
+	if c.transcriptRoot != "" {
+		readDeny = append(readDeny, c.transcriptRoot)
+	}
+	// Usage log: the owner reads it (carve), everyone else is masked — mirroring the
+	// sandbox's per-invocation allow/deny, never both, for the one file.
 	if u := req.usageLogEnvValue(); u != "" {
-		readRoots = append(readRoots, u)
+		readAllow = append(readAllow, u)
+	} else if req.UsageLogPath != "" {
+		readDeny = append(readDeny, req.UsageLogPath)
 	}
-	return hookFilePolicy{WriteRoots: writeRoots, ReadRoots: readRoots, Deny: c.denyPaths}
+	return hookFilePolicy{WriteRoots: writeRoots, ReadAllow: readAllow, ReadDeny: readDeny, Deny: c.denyPaths}
 }
 
 // env assembles the responder process environment: the inherited env, the
