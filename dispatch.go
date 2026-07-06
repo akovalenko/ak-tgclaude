@@ -1035,7 +1035,15 @@ func runDispatch(args []string) error {
 		if _, err := os.Stat(agentFile); err != nil {
 			return fmt.Errorf("agent %q not materialized (%s); use the default %q (custom agents are not wired yet)", cfg.Agent, agentFile, defaultAgent)
 		}
-		resp = &claudeResponder{agent: cfg.Agent, cwd: cwd, project: cfg.Project, cacheDir: cacheDir, debug: cfg.Debug, claudeArgs: cfg.ClaudeArgs, extraTools: cfg.Tools}
+		// The hook's protected paths: operator deny_reads plus the token file (when it
+		// lives in a config). The SAME paths the sandbox denies for Bash — sourced once
+		// here from config, projected into the per-invocation file policy (env) and,
+		// separately, the static sandbox denyRead.
+		denyPaths := append([]string(nil), cfg.DenyRead...)
+		if cfg.ConfigPath != "" {
+			denyPaths = append(denyPaths, cfg.ConfigPath)
+		}
+		resp = &claudeResponder{agent: cfg.Agent, cwd: cwd, project: cfg.Project, cacheDir: cacheDir, debug: cfg.Debug, claudeArgs: cfg.ClaudeArgs, extraTools: cfg.Tools, denyPaths: denyPaths}
 	}
 
 	helpText := cfg.HelpText

@@ -110,6 +110,11 @@ const binEnv = "AK_TGCLAUDE_BIN"
 // buildInvocationSettings. Empty => not the owner (or the feature is off).
 const usageLogEnv = "AK_TGCLAUDE_USAGE_LOG"
 
+// filePolicyEnv carries the responder's file-tool access policy (write/read/deny
+// roots) to the PreToolUse hook as JSON — the single source the hook enforces and
+// the sandbox mirrors (see (*claudeResponder).filePolicy and hookFilePolicy).
+const filePolicyEnv = "AK_TGCLAUDE_FILE_POLICY"
+
 // claudeResponder spawns a headless `claude -p` for each update.
 type claudeResponder struct {
 	agent      string   // --agent <name>; empty => the configured default agent
@@ -119,6 +124,7 @@ type claudeResponder struct {
 	debug      bool     // pass --debug to claude -p (diagnostics to stderr)
 	claudeArgs []string // operator passthrough appended to claude -p (validated at config load)
 	extraTools []string // EXTRA tools granted (config `tools`/--tool): added to --allowedTools
+	denyPaths  []string // protected paths for the hook's file-tool policy (token file + operator deny_reads); the SAME paths the sandbox denies for Bash, sourced once from config
 }
 
 // Respond runs `claude -p [--agent] [--resume] --output-format json`, feeding
@@ -138,6 +144,34 @@ func (c *claudeResponder) Respond(ctx context.Context, req RespondRequest) (Resp
 	}
 	sid, outcome, final, cost := parseResult(out.Bytes())
 	return RespondResult{SessionID: sid, Outcome: outcome, FinalText: final, CostUSD: cost}, nil
+}
+
+// filePolicy is this invocation's file-tool access policy — the single definition
+// the hook enforces (handed over via filePolicyEnv) and the sandbox mirrors
+// (buildInvocationSettings' allowWrite = WriteRoots). writeRoots is the outbox;
+// readRoots adds the project plus the read-only scopes (the transcript scope, and
+// — owner only — the usage log); deny is the protected set (token + operator
+// deny_reads). A future writable location is one append to writeRoots here and
+// then flows to both the hook and the sandbox with no second edit.
+func (c *claudeResponder) filePolicy(req RespondRequest) hookFilePolicy {
+	var writeRoots []string
+	if req.DocDir != "" {
+		writeRoots = append(writeRoots, req.DocDir)
+	}
+	var readRoots []string
+	if c.project != "" {
+		readRoots = append(readRoots, c.project)
+	}
+	readRoots = append(readRoots, writeRoots...)
+	if req.TranscriptScope != "" {
+		readRoots = append(readRoots, req.TranscriptScope)
+	}
+	// Owner only: usageLogEnvValue is "" for everyone else, so a non-owner gets no
+	// read carve here (and a sandbox denyRead), keeping the cost log closed.
+	if u := req.usageLogEnvValue(); u != "" {
+		readRoots = append(readRoots, u)
+	}
+	return hookFilePolicy{WriteRoots: writeRoots, ReadRoots: readRoots, Deny: c.denyPaths}
 }
 
 // env assembles the responder process environment: the inherited env, the
@@ -172,6 +206,12 @@ func (c *claudeResponder) env(req RespondRequest) []string {
 		// dispatcher's RemoveAll cleans it (instead of accumulating in /tmp/claude-<uid>).
 		"TMPDIR="+req.DocDir,
 	)
+	// The hook's file-tool policy as JSON — the single source the hook decodes (and
+	// the sandbox mirrors via allowWrite). A marshal failure (never for a []string
+	// struct) simply omits it, and the hook then fail-safe-denies the file tools.
+	if pol, err := json.Marshal(c.filePolicy(req)); err == nil {
+		out = append(out, filePolicyEnv+"="+string(pol))
+	}
 	if req.TranscriptScope != "" {
 		// The transcript read scope, so the sandboxed grep/cat can reach it (the hook
 		// also folds this env into the Read tool's readRoots).
@@ -344,7 +384,9 @@ func (c *claudeResponder) buildArgs(req RespondRequest) []string {
 			"--allowedTools", strings.Join(combineTools(mcpTools, c.extraTools), ","),
 		)
 	}
-	if s := buildInvocationSettings(req.DocDir, req.TranscriptScope, req.UsageLogPath, req.UsageLogOwner); s != "" {
+	// The sandbox's writable roots ARE the hook's writeRoots — one source, so a
+	// future writable location flows to Bash and the file tools together.
+	if s := buildInvocationSettings(c.filePolicy(req).WriteRoots, req.TranscriptScope, req.UsageLogPath, req.UsageLogOwner); s != "" {
 		args = append(args, "--settings", s)
 	}
 	if c.agent != "" {

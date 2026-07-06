@@ -1,11 +1,23 @@
 package main
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 )
+
+// setFilePolicyEnv marshals p to JSON and sets it as the hook's policy env, as the
+// dispatcher does when spawning the responder.
+func setFilePolicyEnv(t *testing.T, p hookFilePolicy) {
+	t.Helper()
+	b, err := json.Marshal(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(filePolicyEnv, string(b))
+}
 
 func fileInput(tool, path string) *preToolUseInput {
 	in := &preToolUseInput{ToolName: tool}
@@ -113,9 +125,12 @@ func TestDecideDefersOtherTools(t *testing.T) {
 }
 
 func TestEnvFilePolicy(t *testing.T) {
-	t.Setenv(projectEnv, "/proj")
-	t.Setenv(outboxEnv, "/run/out/o1")
-	pol := envFilePolicy([]string{"/cfg/bot.toml"})
+	setFilePolicyEnv(t, hookFilePolicy{
+		WriteRoots: []string{"/run/out/o1"},
+		ReadRoots:  []string{"/proj", "/run/out/o1"},
+		Deny:       []string{"/cfg/bot.toml"},
+	})
+	pol := envFilePolicy()
 
 	// Read is allowed in the project AND the writable area (read what you write,
 	// so authoring can iterate).
@@ -146,11 +161,41 @@ func TestEnvFilePolicy(t *testing.T) {
 	}
 }
 
+func TestEnvFilePolicyFailSafe(t *testing.T) {
+	// Missing or malformed policy => empty roots => every file tool denied (Bash is
+	// governed by the sandbox, not this hook, so it is unaffected).
+	for _, v := range []string{"", "{not json"} {
+		t.Setenv(filePolicyEnv, v)
+		pol := envFilePolicy()
+		if d, _ := decidePreToolUse(fileInput("Read", "/proj/main.go"), pol); d != "deny" {
+			t.Errorf("policy=%q: read => %q, want deny (fail-safe)", v, d)
+		}
+		if d, _ := decidePreToolUse(fileInput("Write", "/whatever"), pol); d != "deny" {
+			t.Errorf("policy=%q: write => %q, want deny (fail-safe)", v, d)
+		}
+		if d, _ := decidePreToolUse(bashInput("echo hi", false), pol); d != "allow" {
+			t.Errorf("policy=%q: sandboxed Bash => %q, want allow (sandbox governs it)", v, d)
+		}
+	}
+}
+
+func TestEnvFilePolicyColonPath(t *testing.T) {
+	// JSON round-trips a path holding a ':' exactly — the reason we do not join the
+	// list PATH-style (which would split such a path).
+	const p = "/run/out/o:1"
+	setFilePolicyEnv(t, hookFilePolicy{WriteRoots: []string{p}, ReadRoots: []string{p}})
+	pol := envFilePolicy()
+	if d, _ := decidePreToolUse(fileInput("Write", p+"/draft.md"), pol); d != "allow" {
+		t.Errorf("write under colon-path => %q, want allow (path must round-trip intact)", d)
+	}
+}
+
 func TestEnvFilePolicyTranscriptScope(t *testing.T) {
-	t.Setenv(projectEnv, "/proj")
-	t.Setenv(outboxEnv, "/run/out/o1")
-	t.Setenv(transcriptEnv, "/s/transcripts/42")
-	pol := envFilePolicy(nil)
+	setFilePolicyEnv(t, hookFilePolicy{
+		WriteRoots: []string{"/run/out/o1"},
+		ReadRoots:  []string{"/proj", "/run/out/o1", "/s/transcripts/42"},
+	})
+	pol := envFilePolicy()
 
 	// Read is allowed under this chat's own transcript scope...
 	if d, _ := decidePreToolUse(fileInput("Read", "/s/transcripts/42/2026-07-04.jsonl"), pol); d != "allow" {

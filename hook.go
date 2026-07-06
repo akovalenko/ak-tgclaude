@@ -67,22 +67,31 @@ type filePolicy struct {
 	bangBug    bool     // deny sandboxed Bash whose command contains `\!` (bug #64301)
 }
 
-// envFilePolicy resolves the policy from the responder's env at hook time:
-// writeRoots = $AK_TGCLAUDE_OUTBOX; readRoots = $AK_TGCLAUDE_PROJECT + writeRoots
-// (read what you can write, plus the project). The responder runs with
-// TMPDIR=$AK_TGCLAUDE_OUTBOX, so temp lands under the outbox too — /tmp/claude-<uid>
-// is no longer a scratch root.
-func envFilePolicy(deny []string) filePolicy {
-	writeRoots := envRoots(outboxEnv)
-	readRoots := append(envRoots(projectEnv), writeRoots...)
-	// The transcript read scope (a chat's own subdir, or the whole root for the
-	// owner) is readable by the Read tool too; an unset env adds nothing.
-	readRoots = append(readRoots, envRoots(transcriptEnv)...)
-	// The usage-log file is readable by the Read tool too, but ONLY when the env is
-	// set — which the dispatcher does solely for the owner's invocation. A non-owner
-	// has no such env (adds nothing) AND a sandbox denyRead, so it stays closed.
-	readRoots = append(readRoots, envRoots(usageLogEnv)...)
-	return filePolicy{deny: deny, readRoots: readRoots, writeRoots: writeRoots}
+// hookFilePolicy is the file-tool access policy the dispatcher computes and hands
+// the hook as JSON in filePolicyEnv. It is the SINGLE definition of what the
+// responder may read / write / never touch: the dispatcher derives it once (see
+// (*claudeResponder).filePolicy) and projects it both here (the file tools) and
+// into the sandbox settings (Bash, via allowWrite), so the two cannot drift — a
+// future writable location added to writeRoots flows to both. JSON, not a
+// separator-joined list, so a path holding any byte (including the ':' that would
+// break a PATH-style list) round-trips exactly.
+type hookFilePolicy struct {
+	WriteRoots []string `json:"writeRoots"` // Edit/Write/NotebookEdit allowed under these
+	ReadRoots  []string `json:"readRoots"`  // Read allowed under these (a superset of writeRoots)
+	Deny       []string `json:"deny"`       // protected paths; highest priority, wins over the roots
+}
+
+// envFilePolicy decodes the hook's policy from filePolicyEnv. A missing or
+// malformed value yields the empty policy — fail-safe, since empty read/write
+// roots deny every file tool (Bash is governed by the sandbox, not this hook).
+func envFilePolicy() filePolicy {
+	var w hookFilePolicy
+	if v := os.Getenv(filePolicyEnv); v != "" {
+		// A decode error is swallowed on purpose: w stays zero, so every file tool is
+		// denied rather than let through on a corrupt policy.
+		_ = json.Unmarshal([]byte(v), &w)
+	}
+	return filePolicy{deny: w.Deny, readRoots: w.ReadRoots, writeRoots: w.WriteRoots}
 }
 
 // runHookPreToolUse gates the responder's tool calls: it path-scopes the file
@@ -93,8 +102,9 @@ func envFilePolicy(deny []string) filePolicy {
 // by this hook.
 func runHookPreToolUse(args []string) {
 	fs := flag.NewFlagSet("hook pretooluse", flag.ContinueOnError)
-	var deny stringList
-	fs.Var(&deny, "deny-read", "path the responder must not read (repeatable)")
+	// The file-tool policy (read/write/deny roots) arrives via filePolicyEnv, not a
+	// flag — a single dispatcher-computed source, see (*claudeResponder).filePolicy.
+	// Only the behavioral knobs are flags.
 	bangBug := fs.Bool("bang-bug", false, `deny sandboxed Bash whose command contains \! (bug #64301: the sandbox corrupts the bang char)`)
 	logFile := fs.String("log-file", "", "append every PreToolUse call (tool, decision, full input) to this file")
 
@@ -116,7 +126,7 @@ func runHookPreToolUse(args []string) {
 		return
 	}
 
-	pol := envFilePolicy(deny)
+	pol := envFilePolicy()
 	pol.bangBug = *bangBug
 	decision, reason := decidePreToolUse(&in, pol)
 	if *logFile != "" {
@@ -216,15 +226,6 @@ func absClean(p string) string {
 		p = a
 	}
 	return filepath.Clean(p)
-}
-
-// envRoots returns the value of env var name as a one-element root list, or nil
-// if it is unset/empty.
-func envRoots(name string) []string {
-	if v := os.Getenv(name); v != "" {
-		return []string{v}
-	}
-	return nil
 }
 
 // fmtRoots renders roots for a deny reason.

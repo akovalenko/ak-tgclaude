@@ -59,10 +59,11 @@ func TestBuildSettingsShape(t *testing.T) {
 		t.Errorf("credentials.envVars = %+v", s.Sandbox.Credentials.EnvVars)
 	}
 
-	// Hook command references the deny-read path (quoted). The binary is quoted
-	// too (bare name here, since HookBinary is unset => the default).
+	// Hook command carries only behavioral flags — the file-tool policy (read/write/
+	// deny roots) rides AK_TGCLAUDE_FILE_POLICY at spawn, not the command. The binary
+	// is quoted (bare name here, since HookBinary is unset => the default).
 	cmd := s.Hooks.PreToolUse[0].Hooks[0].Command
-	if !strings.HasPrefix(cmd, "'ak-tgclaude' hook pretooluse") || !strings.Contains(cmd, "--deny-read '/cfg/bot.toml'") {
+	if !strings.HasPrefix(cmd, "'ak-tgclaude' hook pretooluse") || strings.Contains(cmd, "--deny-read") {
 		t.Errorf("hook command = %q", cmd)
 	}
 }
@@ -187,8 +188,9 @@ func TestBuildSettingsDeniesTranscriptRoot(t *testing.T) {
 }
 
 func TestBuildSettingsDenyRead(t *testing.T) {
-	// Operator --deny-read paths land at BOTH layers: sandbox.filesystem.denyRead
-	// (the Bash `cat`/`grep` path) and the hook's --deny-read (the Read tool).
+	// Operator deny_reads land in the sandbox's Bash-layer denyRead. The Read-TOOL
+	// layer gets the same paths (plus the token) via the dispatcher's file-policy env
+	// — no longer baked into the hook command (see the responder denyPaths tests).
 	s := buildSettings(scaffoldParams{
 		CacheDir:   "/c",
 		OutboxRoot: "/run/out",
@@ -208,13 +210,9 @@ func TestBuildSettingsDenyRead(t *testing.T) {
 		}
 	}
 
-	// Read-tool layer: the hook command carries each operator path (quoted) plus
-	// the token file.
-	cmd := s.Hooks.PreToolUse[0].Hooks[0].Command
-	for _, p := range []string{"--deny-read '/secret/a'", "--deny-read '~/b'", "--deny-read '/cfg/bot.toml'"} {
-		if !strings.Contains(cmd, p) {
-			t.Errorf("hook command missing %q: %q", p, cmd)
-		}
+	// The hook command no longer bakes deny paths — they ride the file-policy env.
+	if cmd := s.Hooks.PreToolUse[0].Hooks[0].Command; strings.Contains(cmd, "--deny-read") {
+		t.Errorf("deny paths must not remain in the hook command: %q", cmd)
 	}
 }
 
@@ -350,9 +348,6 @@ func TestBuildSettingsNoTokenFile(t *testing.T) {
 	files := s.Sandbox.Credentials.Files
 	if len(files) != 2 || files[0].Path != "~/.ssh" || files[1].Path != "~/.claude/.credentials.json" {
 		t.Errorf("host secrets should always be denied (no token), got %+v", files)
-	}
-	if cmd := s.Hooks.PreToolUse[0].Hooks[0].Command; strings.Contains(cmd, "--deny-read") {
-		t.Errorf("no token file => hook has no --deny-read, got %q", cmd)
 	}
 }
 

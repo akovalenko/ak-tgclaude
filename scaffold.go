@@ -352,18 +352,12 @@ func buildSettings(p scaffoldParams) *claudeSettings {
 		},
 	}
 
-	// The hook's --deny-read scopes the Read TOOL (checked before the project-read
-	// allow); the same paths also went into filesystem.denyRead above (the Bash
-	// path). Operator paths first, then the token file when it lives in a config.
+	// The hook's file-tool policy (read/write/deny roots) is NOT baked here — the
+	// dispatcher hands it over per-invocation via AK_TGCLAUDE_FILE_POLICY (env, JSON),
+	// the single source the sandbox also mirrors. Only the behavioral knobs are CLI.
 	// HookBinary is quoted: pinned to an absolute path it may contain spaces, and
 	// quoting the bare name is harmless (still PATH-resolved).
 	hookCmd := shellQuote(p.HookBinary) + " hook pretooluse"
-	for _, d := range p.DenyRead {
-		hookCmd += " --deny-read " + shellQuote(d)
-	}
-	if p.TokenFile != "" {
-		hookCmd += " --deny-read " + shellQuote(p.TokenFile)
-	}
 	if p.BangBug {
 		hookCmd += " --bang-bug"
 	}
@@ -1090,8 +1084,10 @@ func appendAgentSkills(data []byte, add []string) []byte {
 // buildInvocationSettings returns the per-invocation --settings JSON that scopes
 // SANDBOXED-BASH access for exactly this invocation, merged on top of the static
 // project settings:
-//   - allowWrite — so `send`/`cp` can write only this outbox, not a sibling's;
-//   - allowRead — carving this outbox back out of the static denyRead so
+//   - allowWrite — the writable roots (the outbox, and any future config-added
+//     writable dir), so `send`/`cp` write only there, not a sibling's. This is the
+//     SAME set the hook grants the Write tool (see (*claudeResponder).filePolicy).
+//   - allowRead — carving those roots back out of the static denyRead so
 //     `send --file` can read its own body, while sibling outboxes stay masked;
 //     also the transcript scope, and — for the OWNER — the usage-log file.
 //   - denyRead — for NON-owners, the usage-log file (see below).
@@ -1106,8 +1102,8 @@ func appendAgentSkills(data []byte, add []string) []byte {
 //
 // The Write TOOL to the outbox is granted by the PreToolUse hook (path-scoped),
 // not here. All inputs empty => "".
-func buildInvocationSettings(outbox, transcriptScope, usageLog string, usageLogOwner bool) string {
-	if outbox == "" && transcriptScope == "" && usageLog == "" {
+func buildInvocationSettings(writeRoots []string, transcriptScope, usageLog string, usageLogOwner bool) string {
+	if len(writeRoots) == 0 && transcriptScope == "" && usageLog == "" {
 		return ""
 	}
 	var s struct {
@@ -1119,9 +1115,12 @@ func buildInvocationSettings(outbox, transcriptScope, usageLog string, usageLogO
 			} `json:"filesystem"`
 		} `json:"sandbox"`
 	}
-	if outbox != "" {
-		s.Sandbox.Filesystem.AllowWrite = []string{outbox}
-		s.Sandbox.Filesystem.AllowRead = []string{outbox}
+	if len(writeRoots) > 0 {
+		// The writable roots (the outbox, and any future config-added writable dir):
+		// the SAME set the hook grants Edit/Write, so Bash and the file tools agree on
+		// what is writable. Readable too, so the responder can read back what it wrote.
+		s.Sandbox.Filesystem.AllowWrite = append([]string(nil), writeRoots...)
+		s.Sandbox.Filesystem.AllowRead = append([]string(nil), writeRoots...)
 	}
 	if transcriptScope != "" {
 		// Read-only: carve the chat's own transcript subdir (or, for the owner, the
@@ -1215,6 +1214,6 @@ func runScaffold(args []string) error {
 	fmt.Printf("the MCP send tools are NOT wired here — they need the running dispatcher):\n")
 	fmt.Printf("  cd %s\n", shellQuote(project))
 	fmt.Printf("  AK_TGCLAUDE_OUTBOX=%s claude -p --setting-sources project --permission-mode dontAsk \\\n", shellQuote(outboxRoot))
-	fmt.Printf("    --settings %s%s 'hello'\n", shellQuote(buildInvocationSettings(outboxRoot, "", "", false)), agentFlag)
+	fmt.Printf("    --settings %s%s 'hello'\n", shellQuote(buildInvocationSettings([]string{outboxRoot}, "", "", false)), agentFlag)
 	return nil
 }

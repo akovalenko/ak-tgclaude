@@ -2,10 +2,53 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"strings"
 	"testing"
 	"time"
 )
+
+func TestFilePolicy(t *testing.T) {
+	// The single-source policy: writeRoots is the outbox; readRoots adds project +
+	// the read-only scopes; deny is the responder's denyPaths (token + operator
+	// deny_reads). A future writable dir would be one more entry in writeRoots here.
+	c := &claudeResponder{project: "/proj", denyPaths: []string{"/cfg/bot.toml", "/secret/a"}}
+	pol := c.filePolicy(RespondRequest{DocDir: "/run/out/o1", TranscriptScope: "/s/transcripts/42"})
+	if j := strings.Join(pol.WriteRoots, ","); j != "/run/out/o1" {
+		t.Errorf("writeRoots = %v, want [/run/out/o1]", pol.WriteRoots)
+	}
+	if j := strings.Join(pol.ReadRoots, ","); j != "/proj,/run/out/o1,/s/transcripts/42" {
+		t.Errorf("readRoots = %v, want [/proj /run/out/o1 /s/transcripts/42]", pol.ReadRoots)
+	}
+	if j := strings.Join(pol.Deny, ","); j != "/cfg/bot.toml,/secret/a" {
+		t.Errorf("deny = %v, want the denyPaths", pol.Deny)
+	}
+	// Non-owner (no usage-log env value) gets no usage-log read carve.
+	if strings.Contains(strings.Join(pol.ReadRoots, ","), "usage") {
+		t.Errorf("non-owner readRoots must not carry the usage log: %v", pol.ReadRoots)
+	}
+}
+
+func TestEnvCarriesFilePolicy(t *testing.T) {
+	// The dispatcher hands the whole policy to the hook as JSON in one env var.
+	c := &claudeResponder{project: "/proj", denyPaths: []string{"/cfg/bot.toml"}}
+	var got string
+	for _, kv := range c.env(RespondRequest{DocDir: "/run/out/o1"}) {
+		if strings.HasPrefix(kv, filePolicyEnv+"=") {
+			got = strings.TrimPrefix(kv, filePolicyEnv+"=")
+		}
+	}
+	if got == "" {
+		t.Fatal("filePolicyEnv not set in the responder env")
+	}
+	var p hookFilePolicy
+	if err := json.Unmarshal([]byte(got), &p); err != nil {
+		t.Fatalf("policy env is not valid JSON: %v (%q)", err, got)
+	}
+	if strings.Join(p.WriteRoots, ",") != "/run/out/o1" || strings.Join(p.Deny, ",") != "/cfg/bot.toml" {
+		t.Errorf("policy env round-trip wrong: %+v", p)
+	}
+}
 
 func TestBuildArgs(t *testing.T) {
 	base := "-p --output-format json --setting-sources project --permission-mode dontAsk"
@@ -96,10 +139,10 @@ func TestBuildArgsScopedToolKeepsScope(t *testing.T) {
 }
 
 func TestBuildInvocationSettings(t *testing.T) {
-	if buildInvocationSettings("", "", "", false) != "" {
-		t.Errorf("empty outbox + empty scope => empty overlay")
+	if buildInvocationSettings(nil, "", "", false) != "" {
+		t.Errorf("empty write roots + empty scope => empty overlay")
 	}
-	s := buildInvocationSettings("/o/x", "", "", false)
+	s := buildInvocationSettings([]string{"/o/x"},"", "", false)
 	if !strings.Contains(s, `"allowWrite":["/o/x"]`) || !strings.Contains(s, `"allowRead":["/o/x"]`) {
 		t.Errorf("overlay JSON wrong: %s", s)
 	}
@@ -114,7 +157,7 @@ func TestBuildInvocationSettings(t *testing.T) {
 }
 
 func TestBuildInvocationSettingsTranscriptScope(t *testing.T) {
-	s := buildInvocationSettings("/o/x", "/s/transcripts/42", "", false)
+	s := buildInvocationSettings([]string{"/o/x"},"/s/transcripts/42", "", false)
 	if !strings.Contains(s, `"allowWrite":["/o/x"]`) {
 		t.Errorf("allowWrite should be the outbox only: %s", s)
 	}
@@ -122,7 +165,7 @@ func TestBuildInvocationSettingsTranscriptScope(t *testing.T) {
 		t.Errorf("allowRead should include outbox + transcript scope: %s", s)
 	}
 	// Scope-only (no outbox) still grants read, and carries no allowWrite.
-	s2 := buildInvocationSettings("", "/s/transcripts", "", false)
+	s2 := buildInvocationSettings(nil, "/s/transcripts", "", false)
 	if !strings.Contains(s2, `"allowRead":["/s/transcripts"]`) || strings.Contains(s2, "allowWrite") {
 		t.Errorf("scope-only overlay wrong: %s", s2)
 	}
@@ -138,7 +181,7 @@ func TestBuildArgsThreadsScope(t *testing.T) {
 func TestBuildInvocationSettingsUsageLog(t *testing.T) {
 	// Owner: the usage-log file is carved into allowRead (alongside the outbox), never
 	// denyRead — the owner may grep/awk it.
-	owner := buildInvocationSettings("/o/x", "", "/v/usage.jsonl", true)
+	owner := buildInvocationSettings([]string{"/o/x"},"", "/v/usage.jsonl", true)
 	if !strings.Contains(owner, `"allowRead":["/o/x","/v/usage.jsonl"]`) {
 		t.Errorf("owner overlay should allowRead the usage log: %s", owner)
 	}
@@ -147,7 +190,7 @@ func TestBuildInvocationSettingsUsageLog(t *testing.T) {
 	}
 	// Non-owner: the usage-log file is denied — the whole point (read is otherwise
 	// default-open). It never appears in allowRead.
-	other := buildInvocationSettings("/o/x", "", "/v/usage.jsonl", false)
+	other := buildInvocationSettings([]string{"/o/x"},"", "/v/usage.jsonl", false)
 	if !strings.Contains(other, `"denyRead":["/v/usage.jsonl"]`) {
 		t.Errorf("non-owner overlay should denyRead the usage log: %s", other)
 	}
@@ -155,7 +198,7 @@ func TestBuildInvocationSettingsUsageLog(t *testing.T) {
 		t.Errorf("non-owner overlay must not allowRead the usage log: %s", other)
 	}
 	// Feature off (empty usage path): neither allow nor deny of any usage file.
-	off := buildInvocationSettings("/o/x", "", "", false)
+	off := buildInvocationSettings([]string{"/o/x"},"", "", false)
 	if strings.Contains(off, "denyRead") || strings.Contains(off, "usage") {
 		t.Errorf("no usage path => no allow/deny for it: %s", off)
 	}
