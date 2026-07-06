@@ -403,6 +403,56 @@ func resetDirContents(dir string) error {
 	return nil
 }
 
+// sandboxMaskFiles / sandboxMaskDirs are the paths Claude Code's sandbox (bwrap)
+// bind-mounts into the sandboxed Bash as read-only masks — so a sandboxed shell
+// sees neutral dotfiles, not the host's real ones. A bind-mount needs its target
+// to EXIST: when it is missing bwrap tries to CREATE it, but the responder cwd is
+// write-denied (denyWrite), so that create fails with "read-only file system" and
+// every sandboxed Bash dies. So we pre-create the mount targets here, while the
+// scaffold is still writable; the bind-mount then lands on an existing stub even
+// under the deny (mounting onto an existing path is not a filesystem write). The
+// mask files are 0-byte; .cc-writes is a directory (Claude Code's per-session
+// write log). This mirrors Claude Code's internal mask set as observed — if a
+// future version masks a new path, a sandboxed Bash fails with EROFS naming it,
+// and it goes here. Types matter: a file stub where bwrap wants a dir (or vice
+// versa) fails the mount, so each entry matches the observed kind.
+var (
+	sandboxMaskFiles = []string{
+		".bash_profile", ".bashrc", ".gitconfig", ".gitmodules", ".idea",
+		".mcp.json", ".profile", ".ripgreprc", ".vscode", ".zprofile", ".zshrc",
+		filepath.Join(".claude", "commands"),
+	}
+	sandboxMaskDirs = []string{
+		filepath.Join(".claude", ".cc-writes"),
+	}
+)
+
+// materializeSandboxMaskStubs pre-creates the bwrap bind-mount targets under cwd
+// (see sandboxMaskFiles/sandboxMaskDirs) so a denyWrite'd cwd does not EROFS the
+// sandboxed Bash. Idempotent and create-only (never truncates), so it is safe to
+// re-run each start after resetDirContents.
+func materializeSandboxMaskStubs(cwd string) error {
+	for _, d := range sandboxMaskDirs {
+		if err := os.MkdirAll(filepath.Join(cwd, d), 0o700); err != nil {
+			return fmt.Errorf("sandbox mask-stub dir %s: %w", d, err)
+		}
+	}
+	for _, f := range sandboxMaskFiles {
+		p := filepath.Join(cwd, f)
+		if err := os.MkdirAll(filepath.Dir(p), 0o700); err != nil {
+			return fmt.Errorf("sandbox mask-stub parent of %s: %w", f, err)
+		}
+		fh, err := os.OpenFile(p, os.O_CREATE|os.O_WRONLY, 0o600)
+		if err != nil {
+			return fmt.Errorf("sandbox mask-stub file %s: %w", f, err)
+		}
+		if err := fh.Close(); err != nil {
+			return fmt.Errorf("sandbox mask-stub file %s: %w", f, err)
+		}
+	}
+	return nil
+}
+
 // materializeScaffold writes the generated settings.json into <cwd>/.claude.
 // The cwd is the responder's launch dir (used with `claude -p --setting-sources
 // project`); the binary embeds no finished settings — it is generated here with
@@ -424,6 +474,11 @@ func materializeScaffold(cwd string, p scaffoldParams) error {
 	path := filepath.Join(claudeDir, "settings.json")
 	if err := os.WriteFile(path, b, 0o600); err != nil {
 		return fmt.Errorf("writing %s: %w", path, err)
+	}
+	// Pre-create the sandbox bind-mount targets while cwd is still writable, so the
+	// denyWrite on cwd does not EROFS every sandboxed Bash (see the helper).
+	if err := materializeSandboxMaskStubs(cwd); err != nil {
+		return err
 	}
 	transcriptsOn := p.TranscriptRoot != ""
 	if err := materializeSkills(claudeDir, p.Project, p.UploadNote, transcriptsOn, p.UsageLogOn); err != nil {

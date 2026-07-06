@@ -751,6 +751,17 @@ deployment, the generated file:
   bare name): the security-critical hook must run the exact binary that wrote the
   settings, never whatever `ak-tgclaude` PATH resolves at hook-fire time.
 
+Because the responder cwd is **write-denied** (`sandbox.filesystem.denyWrite`, so a
+sandboxed Bash cannot rewrite the scaffold or `.claude`), the scaffold also
+**pre-creates the mount-target stubs** Claude Code bind-mounts as read-only masks —
+the empty root dotfiles (`.bashrc`, `.gitconfig`, `.mcp.json`, `.idea`, …), `.claude/commands`,
+and the `.claude/.cc-writes` dir. A bind-mount needs its target to exist; on a
+writable cwd bwrap creates a missing one, but under the deny that create hits
+"read-only file system" and kills every sandboxed Bash — so they are laid down
+while the scaffold is still writable. Types match the masks (files vs the one dir);
+the list tracks Claude Code's internal mask set, and a future version masking a new
+path fails a sandboxed Bash with EROFS naming it — the signal to add it.
+
 The **PreToolUse hook** is the single authority for the **file tools**,
 path-scoped from the responder's env:
 

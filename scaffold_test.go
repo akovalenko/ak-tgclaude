@@ -105,6 +105,42 @@ func TestMaterializeScaffoldDeniesCwd(t *testing.T) {
 	}
 }
 
+func TestMaterializeScaffoldSandboxMaskStubs(t *testing.T) {
+	// The bwrap bind-mount targets must pre-exist (as the right kind) because cwd is
+	// denyWrite'd — otherwise a sandboxed Bash EROFSes trying to create them.
+	cwd := t.TempDir()
+	if err := materializeScaffold(cwd, scaffoldParams{CacheDir: filepath.Join(t.TempDir(), "cache")}); err != nil {
+		t.Fatal(err)
+	}
+	for _, f := range sandboxMaskFiles {
+		fi, err := os.Stat(filepath.Join(cwd, f))
+		if err != nil {
+			t.Errorf("mask stub %s missing: %v", f, err)
+		} else if fi.IsDir() {
+			t.Errorf("mask stub %s should be a file, got a dir", f)
+		}
+	}
+	for _, d := range sandboxMaskDirs {
+		fi, err := os.Stat(filepath.Join(cwd, d))
+		if err != nil {
+			t.Errorf("mask stub %s missing: %v", d, err)
+		} else if !fi.IsDir() {
+			t.Errorf("mask stub %s should be a dir, got a file", d)
+		}
+	}
+	// Create-only: a re-run (as after resetDirContents on the next start) must not
+	// error, and must not truncate a stub that gained content.
+	if err := os.WriteFile(filepath.Join(cwd, ".bashrc"), []byte("keep"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := materializeSandboxMaskStubs(cwd); err != nil {
+		t.Fatalf("re-run should be idempotent: %v", err)
+	}
+	if b, err := os.ReadFile(filepath.Join(cwd, ".bashrc")); err != nil || string(b) != "keep" {
+		t.Errorf("mask-stub re-run truncated an existing file: %q err=%v", b, err)
+	}
+}
+
 func TestBuildSettingsPinsHookBinary(t *testing.T) {
 	// When HookBinary is set (the dispatcher pins it to os.Executable()), the hook
 	// command runs that exact absolute path, shell-quoted so a space is safe.
