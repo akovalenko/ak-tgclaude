@@ -92,3 +92,49 @@ func TestFitsAndSpill(t *testing.T) {
 		t.Errorf("spillPayload html->md = %q", p)
 	}
 }
+
+func TestSpillCodeChunking(t *testing.T) {
+	// Code within the budget stays a single fenced block (unchanged behavior).
+	if got := spillCodePayload("go", "a\nb\n"); got != "```go\na\nb\n```" {
+		t.Fatalf("small code = %q", got)
+	}
+
+	// splitCodeForPreview: chunks reconstruct the input and respect the budget.
+	line := strings.Repeat("x", 40) + "\n" // 41 bytes/line, no blank lines
+	code := strings.Repeat(line, 400)      // ~16.4 KB, forces multiple chunks
+	chunks := splitCodeForPreview(code, previewChunkBytes)
+	if len(chunks) < 2 {
+		t.Fatalf("expected multiple chunks, got %d", len(chunks))
+	}
+	if strings.Join(chunks, "") != code {
+		t.Fatalf("chunks do not reconstruct the code")
+	}
+	for i, c := range chunks {
+		if len(c) > previewChunkBytes {
+			t.Fatalf("chunk %d over budget: %d bytes", i, len(c))
+		}
+	}
+
+	// Prefers to break just after a blank line when one is within reach: fill almost
+	// a budget of non-blank lines, drop a blank line, then push past the budget — the
+	// first chunk must end at the blank line (its body ends "\n\n").
+	var b strings.Builder
+	for b.Len() < previewChunkBytes-500 {
+		b.WriteString("aaaaaaaa\n")
+	}
+	b.WriteString("\n") // the blank line the seam should follow
+	for i := 0; i < 200; i++ {
+		b.WriteString("bbbbbbbb\n")
+	}
+	pref := splitCodeForPreview(b.String(), previewChunkBytes)
+	if !strings.HasSuffix(pref[0], "\n\n") {
+		t.Fatalf("first chunk should end just past the blank line, tail = %q",
+			pref[0][max(0, len(pref[0])-4):])
+	}
+
+	// spillCodePayload joins the blocks with a bare blank-line seam (close fence,
+	// empty line, reopen fence) — the form that renders in full on mobile.
+	if out := spillCodePayload("py", code); !strings.Contains(out, "```\n\n```py\n") {
+		t.Fatal("blocks not joined by a blank-line seam")
+	}
+}
