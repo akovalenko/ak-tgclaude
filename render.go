@@ -127,13 +127,16 @@ func spillPayload(d *Descriptor) string {
 }
 
 // spillCodePayload renders code as the Markdown body of a spilled .md. Code that
-// fits a preview-sized block stays a single fenced block (unchanged); larger code is
-// split into consecutive fenced blocks — each re-tagged with the language — joined
-// by a blank line. That blank line is what makes Telegram's mobile previewer render
-// every block in full: it resets the per-block ~8 KiB budget (see previewChunkBytes).
-// A heading or a --- rule resets it too, but a bare blank line keeps the downloaded
-// file clean and copy/paste across the seam intact. Splits fall on line boundaries,
-// so concatenating the blocks' bodies reproduces the code verbatim.
+// fits a preview-sized block stays a single fenced block WITH its language, so the
+// common small answer is syntax-highlighted as before. Larger code is split into
+// consecutive fenced blocks joined by a blank line — and those blocks carry NO
+// language: Telegram's mobile previewer highlights only the last few blocks of a
+// multi-block document, so a language tag would color the tail unevenly (and would
+// mangle a diff), while a bare fence renders every block uniformly plain. The blank
+// line is what lets the previewer render each block in full: it resets the per-block
+// ~8 KiB budget (see previewChunkBytes) and keeps the downloaded file clean with
+// copy/paste across the seam intact. Splits fall on line boundaries, so concatenating
+// the blocks' bodies reproduces the code verbatim.
 func spillCodePayload(lang, code string) string {
 	if len(code) <= previewChunkBytes {
 		return fencedCodeBlock(lang, code)
@@ -141,7 +144,7 @@ func spillCodePayload(lang, code string) string {
 	chunks := splitCodeForPreview(code, previewChunkBytes)
 	blocks := make([]string, len(chunks))
 	for i, c := range chunks {
-		blocks[i] = fencedCodeBlock(lang, c)
+		blocks[i] = fencedCodeBlock("", c) // no language: uniform plain across blocks
 	}
 	return strings.Join(blocks, "\n\n")
 }

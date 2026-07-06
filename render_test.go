@@ -132,9 +132,17 @@ func TestSpillCodeChunking(t *testing.T) {
 			pref[0][max(0, len(pref[0])-4):])
 	}
 
-	// spillCodePayload joins the blocks with a bare blank-line seam (close fence,
-	// empty line, reopen fence) — the form that renders in full on mobile.
-	if out := spillCodePayload("py", code); !strings.Contains(out, "```\n\n```py\n") {
-		t.Fatal("blocks not joined by a blank-line seam")
+	// A split drops the language (Telegram colors only the tail blocks otherwise, and
+	// a language would mangle a diff), joining bare fences with a blank-line seam.
+	out := spillCodePayload("py", code)
+	if strings.Contains(out, "```py") {
+		t.Fatal("split blocks must not carry a language tag")
+	}
+	if !strings.Contains(out, "```\n\n```\n") {
+		t.Fatal("blocks not joined by a bare blank-line seam")
+	}
+	// A single block that fits keeps its language (highlighting preserved).
+	if got := spillCodePayload("py", "print(1)\n"); got != "```py\nprint(1)\n```" {
+		t.Fatalf("small code should keep its language: %q", got)
 	}
 }
