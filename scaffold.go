@@ -53,6 +53,7 @@ type networkCfg struct {
 
 type filesystemCfg struct {
 	AllowWrite []string `json:"allowWrite,omitempty"`
+	DenyWrite  []string `json:"denyWrite,omitempty"`
 	DenyRead   []string `json:"denyRead,omitempty"`
 	AllowRead  []string `json:"allowRead,omitempty"`
 }
@@ -96,6 +97,7 @@ type hookEntry struct {
 // read of just its own outbox back via the same overlay.
 type scaffoldParams struct {
 	CacheDir       string   // isolated Go caches root
+	ProjectDir     string   // responder cwd; sandboxed-Bash writes here are DENIED (denyWrite) so the responder cannot mutate its own scaffold or .claude. Set by materializeScaffold from its cwd arg; the outbox lives OUTSIDE this dir so a plain allowWrite grants it (no allow-inside-deny nesting). Empty => no denyWrite (buildSettings called without a cwd, e.g. a unit test)
 	OutboxRoot     string   // parent of per-invocation outboxes (deny-read as a group)
 	TranscriptRoot string   // transcript store root: deny-read the whole root; per-invocation allowRead carves the scope back
 	UsageLogOn     bool     // usage-log feature on: materialize the tg-usage skill (available, NOT preloaded). The PATH stays out of static settings — access is a per-invocation allow/deny, see buildInvocationSettings
@@ -262,6 +264,16 @@ func selfExePath() string {
 	return ""
 }
 
+// denyWriteFS is the sandbox write-deny list: the responder cwd (project + its
+// .claude), so sandboxed Bash cannot mutate its own scaffold. Empty projectDir
+// (buildSettings called without a cwd, e.g. a unit test) => nil, no denyWrite.
+func denyWriteFS(projectDir string) []string {
+	if projectDir == "" {
+		return nil
+	}
+	return []string{projectDir}
+}
+
 // buildSettings assembles the responder's .claude/settings.json.
 func buildSettings(p scaffoldParams) *claudeSettings {
 	if p.HookBinary == "" {
@@ -326,7 +338,15 @@ func buildSettings(p scaffoldParams) *claudeSettings {
 			Network:                  &networkCfg{AllowedDomains: p.NetworkDomains},
 			Filesystem: &filesystemCfg{
 				AllowWrite: []string{p.CacheDir},
-				DenyRead:   denyReadFS,
+				// Deny sandboxed-Bash writes to the responder's own cwd (the project +
+				// its .claude): the responder answers from the project, it must not
+				// rewrite its scaffold, settings, hooks, skills or agents. cwd is
+				// writable by DEFAULT (the sandbox always grants its cwd), so only an
+				// explicit denyWrite carves it out; reads stay intact. The outbox lives
+				// OUTSIDE cwd, so its per-invocation allowWrite is a plain grant — never
+				// an allow nested inside this deny (a precedence the docs don't promise).
+				DenyWrite: denyWriteFS(p.ProjectDir),
+				DenyRead:  denyReadFS,
 			},
 			Credentials: &credentialsCfg{EnvVars: envVars, Files: credFiles},
 		},
@@ -388,6 +408,10 @@ func resetDirContents(dir string) error {
 // project`); the binary embeds no finished settings — it is generated here with
 // the literal runtime paths.
 func materializeScaffold(cwd string, p scaffoldParams) error {
+	// The responder cwd is write-denied in the generated sandbox (denyWrite): set
+	// it here, the one spot that authoritatively knows the launch dir, so both call
+	// sites (dispatcher startup + the scaffold subcommand) get it uniformly.
+	p.ProjectDir = cwd
 	claudeDir := filepath.Join(cwd, ".claude")
 	if err := os.MkdirAll(claudeDir, 0o700); err != nil {
 		return fmt.Errorf("creating %s: %w", claudeDir, err)
@@ -1085,8 +1109,11 @@ func runScaffold(args []string) error {
 	if err := os.MkdirAll(project, 0o700); err != nil {
 		return err
 	}
-	outboxRoot := filepath.Join(project, "outbox")
-	if err := os.MkdirAll(outboxRoot, 0o700); err != nil {
+	// The outbox lives OUTSIDE the project cwd (which the scaffold write-denies):
+	// same resolver the dispatcher uses, so inspection matches production. With
+	// --workdir always set here it lands at $workdir/outbox, a sibling of project.
+	outboxRoot, _, err := resolveOutboxRoot(cfg, project)
+	if err != nil {
 		return err
 	}
 	if err := materializeScaffold(project, cfg.scaffoldParams(filepath.Join(cfg.StateDir, "cache"), outboxRoot)); err != nil {

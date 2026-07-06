@@ -67,6 +67,44 @@ func TestBuildSettingsShape(t *testing.T) {
 	}
 }
 
+func TestBuildSettingsDenyWrite(t *testing.T) {
+	// No ProjectDir (a bare buildSettings, e.g. a unit test) => no denyWrite, so the
+	// existing shape tests keep their expectations.
+	if got := buildSettings(scaffoldParams{CacheDir: "/c"}).Sandbox.Filesystem.DenyWrite; got != nil {
+		t.Errorf("no ProjectDir should yield no denyWrite, got %v", got)
+	}
+	// With a ProjectDir the cwd is write-denied (covers its .claude subdir); allowWrite
+	// stays just the cache. The outbox is granted per invocation and lives OUTSIDE cwd,
+	// so it is never an allow nested inside this deny.
+	s := buildSettings(scaffoldParams{CacheDir: "/c", ProjectDir: "/wd/project"})
+	if got := s.Sandbox.Filesystem.DenyWrite; len(got) != 1 || got[0] != "/wd/project" {
+		t.Errorf("denyWrite = %v, want [/wd/project]", got)
+	}
+	if got := s.Sandbox.Filesystem.AllowWrite; len(got) != 1 || got[0] != "/c" {
+		t.Errorf("allowWrite should stay just the cache, got %v", got)
+	}
+}
+
+func TestMaterializeScaffoldDeniesCwd(t *testing.T) {
+	// materializeScaffold stamps the cwd into denyWrite from its own arg, so the
+	// written settings.json write-denies the responder's launch dir.
+	cwd := t.TempDir()
+	if err := materializeScaffold(cwd, scaffoldParams{CacheDir: filepath.Join(t.TempDir(), "cache")}); err != nil {
+		t.Fatal(err)
+	}
+	b, err := os.ReadFile(filepath.Join(cwd, ".claude", "settings.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var s claudeSettings
+	if err := json.Unmarshal(b, &s); err != nil {
+		t.Fatal(err)
+	}
+	if got := s.Sandbox.Filesystem.DenyWrite; len(got) != 1 || got[0] != cwd {
+		t.Errorf("materialized denyWrite = %v, want [%s] (the cwd)", got, cwd)
+	}
+}
+
 func TestBuildSettingsPinsHookBinary(t *testing.T) {
 	// When HookBinary is set (the dispatcher pins it to os.Executable()), the hook
 	// command runs that exact absolute path, shell-quoted so a space is safe.

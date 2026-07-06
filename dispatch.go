@@ -1002,8 +1002,12 @@ func runDispatch(args []string) error {
 			log.Printf("ak-tgclaude: dispatch: marking %s trusted in ~/.claude.json: %v (responder runs untrusted)", cwd, err)
 		}
 	}
-	outboxRoot := filepath.Join(cwd, "outbox")
-	if err := os.MkdirAll(outboxRoot, 0o700); err != nil {
+	// The outbox root lives OUTSIDE cwd (which the scaffold write-denies): a sibling
+	// $workdir/outbox, an operator-set outbox_root (e.g. a tmpfs), or a disposable
+	// temp beside an ephemeral cwd. Resolved AFTER cwd so it can be validated
+	// against it.
+	outboxRoot, outboxEphemeral, err := resolveOutboxRoot(cfg, cwd)
+	if err != nil {
 		return err
 	}
 
@@ -1157,11 +1161,19 @@ func runDispatch(args []string) error {
 		}
 	}
 
-	// An ephemeral cwd is disposable: remove it (and its outbox) on shutdown. A
-	// fixed cwd is kept for inspection.
+	// An ephemeral cwd is disposable: remove it on shutdown. A fixed cwd is kept for
+	// inspection.
 	if ephemeral {
 		if err := os.RemoveAll(cwd); err != nil {
 			log.Printf("ak-tgclaude: dispatch: removing ephemeral cwd %s: %v", cwd, err)
+		}
+	}
+	// The outbox root is now a sibling of cwd, not under it, so removing cwd no
+	// longer takes it: dispose of a disposable outbox root explicitly (the ephemeral
+	// case; a $workdir/outbox or an operator outbox_root is kept across restarts).
+	if outboxEphemeral {
+		if err := os.RemoveAll(outboxRoot); err != nil {
+			log.Printf("ak-tgclaude: dispatch: removing ephemeral outbox root %s: %v", outboxRoot, err)
 		}
 	}
 	if runErr != nil && !errors.Is(runErr, context.Canceled) {
@@ -1196,6 +1208,52 @@ func resolveResponderCwd(cfg *Config) (dir string, ephemeral bool, err error) {
 		return "", false, fmt.Errorf("creating ephemeral cwd: %w", err)
 	}
 	return dir, true, nil
+}
+
+// resolveOutboxRoot returns the root under which per-chat outboxes live, and
+// whether it is disposable (removed on shutdown). It MUST sit OUTSIDE the
+// responder cwd: the scaffold write-denies cwd (denyWrite), so an outbox there
+// would be unwritable — the whole point of keeping the outbox a sibling is that
+// its allowWrite is a plain grant, never an allow nested inside cwd's deny.
+//
+//   - outbox_root configured  -> that path (operator-owned, e.g. a size-capped
+//     tmpfs mount); kept across restarts. Rejected if under cwd.
+//   - workdir set             -> $workdir/outbox, a sibling of $workdir/project;
+//     kept across restarts (persistent outboxes reattach).
+//   - otherwise (ephemeral)   -> a fresh temp dir beside the ephemeral cwd, under
+//     the same validated base; disposable.
+func resolveOutboxRoot(cfg *Config, cwd string) (root string, ephemeral bool, err error) {
+	switch {
+	case cfg.OutboxRoot != "":
+		root = cfg.OutboxRoot
+		if err := ensureOutsideCwd("outbox_root", root, cwd); err != nil {
+			return "", false, err
+		}
+	case cfg.Workdir != "":
+		root = filepath.Join(cfg.Workdir, "outbox")
+	default:
+		// The ephemeral cwd was made with os.MkdirTemp under a validatePath'd base;
+		// its parent is that base, so a sibling temp there is validated too and never
+		// lands inside cwd.
+		root, err = os.MkdirTemp(filepath.Dir(cwd), "ak-tgclaude-outbox-")
+		if err != nil {
+			return "", false, fmt.Errorf("creating ephemeral outbox root: %w", err)
+		}
+		return root, true, nil
+	}
+	if err := os.MkdirAll(root, 0o700); err != nil {
+		return "", false, fmt.Errorf("creating outbox root %s: %w", root, err)
+	}
+	return root, false, nil
+}
+
+// ensureOutsideCwd rejects a path equal to or nested under cwd. Both are absolute
+// (resolvePath'd config / MkdirTemp results), so a lexical prefix test is exact.
+func ensureOutsideCwd(field, path, cwd string) error {
+	if path == cwd || strings.HasPrefix(path, cwd+string(os.PathSeparator)) {
+		return fmt.Errorf("%s %q is under the responder cwd %q, which is write-denied in the sandbox; put the outbox in a sibling dir or a separate mount (e.g. a tmpfs)", field, path, cwd)
+	}
+	return nil
 }
 
 // resolveOutbox returns the chat's persistent working dir: its recorded outbox if

@@ -47,6 +47,7 @@ project   = "~/code/myproject"  # the codebase consulted on (read-only under qa)
 # upload_command = "~/uploaders/rsync-upload.sh"  # large-file fallback: docs over ~40 MB uploaded and sent as a link (below; see examples/)
 # tools = ["Agent", "WebFetch(domain:*.github.com)"]  # grant EXTRA tools: bare name→frontmatter, full spec→--allowedTools; sharp knob — see below
 # runtime_base = ""             # base for the ephemeral cwd (default: $XDG_RUNTIME_DIR)
+# outbox_root  = ""             # where per-chat outboxes live; MUST be outside the responder cwd (default $workdir/outbox, sibling of project). Point at a size-capped tmpfs to bound disk
 # state_dir    = ""             # durable state (default: $XDG_STATE_HOME/ak-tgclaude)
 # transcripts = false           # per-chat transcript store + tg-recall (default OFF; records users' text to disk — see below)
 # transcript_dir = ""           # override the store root (default <state>/transcripts; must be outside the responder outbox)
@@ -73,8 +74,8 @@ ak-tgclaude dispatch --bot-token 123:ABC --profile qa --project ~/code/myproject
   are single for now; they may grow into a `[[project]]` array (per-project profile)
   later.
 - **Paths.** Every path field (`project`, `workdir`, `wire_skills`, `add_skills`,
-  `add_agents`, `deny_reads`, `state_dir`, `runtime_base`, `--config`) takes a
-  leading `~` and is made
+  `add_agents`, `deny_reads`, `state_dir`, `runtime_base`, `outbox_root`,
+  `--config`) takes a leading `~` and is made
   **absolute against the dispatcher's launch cwd**. The responder consumes them
   from a different cwd (the scaffold dir), so they are resolved once, up front —
   a relative path means "relative to where I launched the bot", never the
@@ -139,17 +140,25 @@ ak-tgclaude dispatch --bot-token 123:ABC --profile qa --project ~/code/myproject
 
 ## Runtime layout (directories)
 
-Three distinct locations, following the XDG split:
+Distinct locations, following the XDG split:
 
 - **Ephemeral responder cwd** — a pseudo-random subdir created under
   `$XDG_RUNTIME_DIR` (private `0700` tmpfs), falling back to a temp dir. It holds
   only a **generated** `settings.json` (the responder's sandbox/hook config) and
   the responder skills, so it is disposable. The dispatcher **materializes** this
   scaffold at startup (the binary embeds the templates), then launches the
-  responder there.
+  responder there. The cwd is **write-denied** in the sandbox (`denyWrite`), so the
+  responder cannot mutate its own scaffold — see [Responder isolation](#responder-isolation).
   - The pseudo-random subdir is created with `O_EXCL` (`os.MkdirTemp`), which
     defeats path-squatting even on a shared base: nobody can pre-create our dir as
     another user to block or hijack writes.
+- **Outbox root** — where per-chat outboxes (the responder's writable scratch:
+  attachments, downloaded incoming media, build outputs) live. Deliberately kept
+  **outside** the responder cwd, since the cwd is write-denied: a sibling
+  `$workdir/outbox` with a workdir, a disposable temp beside the ephemeral cwd
+  otherwise, or an explicit `outbox_root` (e.g. a size-capped tmpfs mount to bound a
+  chat's disk use). Never a subdir of cwd — startup rejects an `outbox_root` under
+  it, because the project `denyWrite` would make it unwritable.
 - **Config** — `$XDG_CONFIG_HOME/ak-tgclaude` (`~/.config/ak-tgclaude`).
 - **Durable state** — the `chat→session` and `message→session` maps (in
   `sessions.json`, alongside the getUpdates offset), which must survive restarts.
@@ -784,7 +793,11 @@ The responder writes document attachments and scratch files to its outbox. The
 not the tools) is scoped by a per-invocation `--settings` overlay:
 
 - `sandbox.filesystem.allowWrite: [<outbox>]` — so Bash (`cp`, a build that emits
-  a file) can write only this outbox, not a sibling's;
+  a file) can write only this outbox, not a sibling's. The outbox lives **outside**
+  the responder cwd, so this is a **plain** grant on an otherwise-unwritable tree —
+  never an `allowWrite` nested inside the project `denyWrite`, a precedence the docs
+  do not promise (the read carve below is the documented direction; the write side
+  is sidestepped by keeping the outbox a sibling);
 - `sandbox.filesystem.allowRead: [<outbox>]` — carving this outbox back out of the
   static `denyRead: [<outboxRoot>]` so the responder can read files it authored
   while sibling outboxes stay masked.

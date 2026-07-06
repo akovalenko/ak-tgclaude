@@ -1048,3 +1048,73 @@ func TestHandleEmptyMessageIgnored(t *testing.T) {
 		t.Errorf("an empty message must not be recorded (chat dir stat err = %v)", err)
 	}
 }
+
+func TestResolveOutboxRootWorkdirSibling(t *testing.T) {
+	// With a workdir the outbox is $workdir/outbox — a sibling of $workdir/project,
+	// created, persistent (not disposable), and NOT under the write-denied cwd.
+	wd := t.TempDir()
+	cwd := filepath.Join(wd, "project")
+	root, ephemeral, err := resolveOutboxRoot(&Config{Workdir: wd}, cwd)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := filepath.Join(wd, "outbox"); root != want {
+		t.Errorf("outbox root = %q, want %q (sibling of project)", root, want)
+	}
+	if ephemeral {
+		t.Error("a workdir outbox root is persistent, not disposable")
+	}
+	if root == cwd || strings.HasPrefix(root, cwd+string(os.PathSeparator)) {
+		t.Errorf("outbox root %q must not be under the write-denied cwd %q", root, cwd)
+	}
+	if fi, err := os.Stat(root); err != nil || !fi.IsDir() {
+		t.Errorf("outbox root not created as a dir: %v", err)
+	}
+}
+
+func TestResolveOutboxRootRejectsUnderCwd(t *testing.T) {
+	// An operator outbox_root inside cwd would be unwritable under the project
+	// denyWrite: reject at startup, not at the first reply. A sibling is fine.
+	wd := t.TempDir()
+	cwd := filepath.Join(wd, "project")
+	if err := os.MkdirAll(cwd, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := resolveOutboxRoot(&Config{OutboxRoot: filepath.Join(cwd, "outbox")}, cwd); err == nil {
+		t.Error("outbox_root under cwd should be rejected")
+	}
+	if _, _, err := resolveOutboxRoot(&Config{OutboxRoot: cwd}, cwd); err == nil {
+		t.Error("outbox_root == cwd should be rejected")
+	}
+	sib := filepath.Join(wd, "tmpfs-outbox")
+	root, ephemeral, err := resolveOutboxRoot(&Config{OutboxRoot: sib}, cwd)
+	if err != nil || root != sib {
+		t.Errorf("sibling outbox_root: root=%q err=%v, want %q", root, err, sib)
+	}
+	if ephemeral {
+		t.Error("an operator-set outbox_root is persistent, not disposable")
+	}
+}
+
+func TestResolveOutboxRootEphemeralSibling(t *testing.T) {
+	// No workdir, no outbox_root: a disposable temp beside the ephemeral cwd, under
+	// the same base, never inside cwd.
+	base := t.TempDir()
+	cwd := filepath.Join(base, "ak-tgclaude-cwd-xxxx")
+	if err := os.MkdirAll(cwd, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	root, ephemeral, err := resolveOutboxRoot(&Config{}, cwd)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ephemeral {
+		t.Error("an ephemeral cwd yields a disposable outbox root")
+	}
+	if filepath.Dir(root) != base {
+		t.Errorf("ephemeral outbox root %q should sit under base %q", root, base)
+	}
+	if root == cwd || strings.HasPrefix(root, cwd+string(os.PathSeparator)) {
+		t.Errorf("ephemeral outbox root %q must not be under cwd %q", root, cwd)
+	}
+}

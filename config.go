@@ -402,6 +402,14 @@ type Config struct {
 	// pseudo-random subdir) is created. Empty => $XDG_RUNTIME_DIR, else a temp dir.
 	RuntimeBase string `toml:"runtime_base"`
 
+	// OutboxRoot overrides where per-chat outboxes live. It MUST be OUTSIDE the
+	// responder cwd: the project cwd is write-denied in the sandbox (denyWrite), so
+	// an outbox under it would be unwritable — validate/startup rejects a path under
+	// cwd. Empty => $Workdir/outbox (a sibling of $Workdir/project) with a workdir,
+	// or a disposable temp dir beside the ephemeral cwd otherwise. Point it at e.g.
+	// a size-capped tmpfs mount to bound a chat's disk use. Also --outbox-root.
+	OutboxRoot string `toml:"outbox_root"`
+
 	// StateDir holds durable dispatcher state (chat->session, message->session),
 	// which must survive restarts. Empty => $XDG_STATE_HOME/ak-tgclaude.
 	StateDir string `toml:"state_dir"`
@@ -492,6 +500,7 @@ func decodeConfig(args []string) (*Config, error) {
 	claudeArgsStr := fs.String("claude-args", "", "same as --claude-arg but as ONE whitespace-split string (e.g. --claude-args \"--model opus --effort high\"); merged with claude_args and --claude-arg (a flag value with a space needs --claude-arg instead)")
 	responder := fs.String("responder", "", "responder implementation: claude|stub (default claude; stub replies a fixed line for Telegram I/O tests)")
 	workdir := fs.String("workdir", "", "static canon-only workspace root: $workdir/project is the responder cwd (regenerated from canon each start, trusted once) and $workdir/state holds the session store (default: an ephemeral cwd, removed on exit)")
+	outboxRoot := fs.String("outbox-root", "", "override where per-chat outboxes live; MUST be OUTSIDE the responder cwd (which is write-denied in the sandbox). Default $workdir/outbox (a sibling of project) or a disposable temp beside an ephemeral cwd. Point at a size-capped tmpfs mount to bound disk use")
 	maxConcurrent := fs.Int("max-concurrent", 0, "max responders running at once (per-chat is always serialized; default 4)")
 	outboxTTL := fs.String("outbox-ttl", "", `how long an idle chat's persistent outbox is kept before eviction (Go duration, e.g. "2h"; "0" disables; default 2h)`)
 	var policyFlags stringList
@@ -592,6 +601,9 @@ func decodeConfig(args []string) (*Config, error) {
 	}
 	if *workdir != "" {
 		c.Workdir = *workdir
+	}
+	if *outboxRoot != "" {
+		c.OutboxRoot = *outboxRoot
 	}
 	if *maxConcurrent != 0 {
 		c.MaxConcurrent = *maxConcurrent
@@ -708,6 +720,7 @@ func (c *Config) resolvePaths() {
 	c.StateDir = resolvePath(c.StateDir)
 	c.TranscriptDir = resolvePath(c.TranscriptDir)
 	c.RuntimeBase = resolvePath(c.RuntimeBase)
+	c.OutboxRoot = resolvePath(c.OutboxRoot)
 	c.ConfigPath = resolvePath(c.ConfigPath)
 	// UploadCommand is a path (exec'd by the dispatcher, not sandbox-glob-matched, so
 	// no validatePath); resolve ~ and make it absolute like every other path.
@@ -749,6 +762,7 @@ func (c *Config) validatePaths() error {
 		{"transcript_dir", c.TranscriptDir},
 		{"usage_log", c.UsageLog},
 		{"runtime_base", c.RuntimeBase},
+		{"outbox_root", c.OutboxRoot},
 		{"config", c.ConfigPath},
 	} {
 		if err := validatePath(pv.field, pv.path); err != nil {
