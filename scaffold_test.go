@@ -27,14 +27,15 @@ func TestBuildSettingsShape(t *testing.T) {
 		t.Errorf("allowWrite should be just the cache, got %v", got)
 	}
 	// File tools are governed by the PreToolUse hook, so the static permissions
-	// grant only the deferred tools (no Read/Write) and deny nothing.
+	// grant only the deferred tools (no Read/Write); permissions.deny carries the
+	// non-timeout-able secret backstop (tested in full below).
 	for _, a := range s.Permissions.Allow {
 		if strings.HasPrefix(a, "Write(") || a == "Read" {
 			t.Errorf("static settings must not grant Read/Write (the hook does), got %v", s.Permissions.Allow)
 		}
 	}
-	if len(s.Permissions.Deny) != 0 {
-		t.Errorf("static settings should carry no permissions.deny, got %v", s.Permissions.Deny)
+	if !contains(s.Permissions.Deny, "Read(//cfg/bot.toml)") || !contains(s.Permissions.Deny, "Read(//cfg/bot.toml/**)") {
+		t.Errorf("permissions.deny should back-stop the token file, got %v", s.Permissions.Deny)
 	}
 	// denyRead masks host history + other sessions' transcripts, plus the
 	// sibling-outbox root (Bash isn't hook-scoped); own outbox is carved back per
@@ -65,6 +66,53 @@ func TestBuildSettingsShape(t *testing.T) {
 	cmd := s.Hooks.PreToolUse[0].Hooks[0].Command
 	if !strings.HasPrefix(cmd, "'ak-tgclaude' hook pretooluse") || strings.Contains(cmd, "--deny-read") {
 		t.Errorf("hook command = %q", cmd)
+	}
+}
+
+func contains(xs []string, want string) bool {
+	for _, x := range xs {
+		if x == want {
+			return true
+		}
+	}
+	return false
+}
+
+func TestBuildSettingsPermissionDenyBackstop(t *testing.T) {
+	// The permissions.deny backstop mirrors the hook's secret set — host secrets,
+	// the token file, AND operator deny_reads (an operator's ~/.aws must be guarded
+	// exactly like a built-in) — as //-anchored Read rules that also cover Grep/Glob.
+	s := buildSettings(scaffoldParams{
+		CacheDir:  "/c",
+		TokenFile: "/cfg/bot.toml",
+		DenyRead:  []string{"/home/op/.aws", "/mnt/secrets/prod.env"},
+	})
+	deny := s.Permissions.Deny
+	for _, want := range []string{
+		"Read(//cfg/bot.toml)", "Read(//cfg/bot.toml/**)", // token
+		"Read(//home/op/.aws)", "Read(//home/op/.aws/**)", // operator secret — equal to built-ins
+		"Read(//mnt/secrets/prod.env)", "Read(//mnt/secrets/prod.env/**)",
+	} {
+		if !contains(deny, want) {
+			t.Errorf("permissions.deny missing %q, got %v", want, deny)
+		}
+	}
+	// A host secret is backstopped too (path is home-relative, so match by suffix).
+	sshBackstopped := false
+	for _, d := range deny {
+		if strings.HasSuffix(d, ".ssh/**)") {
+			sshBackstopped = true
+		}
+	}
+	if !sshBackstopped {
+		t.Errorf("permissions.deny should back-stop the host ssh key, got %v", deny)
+	}
+	// Every rule is //-anchored (absolute) — a single-/ rule would resolve relative
+	// to the settings file and protect the wrong path.
+	for _, d := range deny {
+		if !strings.HasPrefix(d, "Read(//") {
+			t.Errorf("deny rule not //-anchored (absolute): %q", d)
+		}
 	}
 }
 

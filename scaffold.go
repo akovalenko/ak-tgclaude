@@ -252,6 +252,26 @@ func hostSecretHookDeny() []string {
 	return out
 }
 
+// permissionDenyRules turns absolute secret paths into `Read(...)` deny rules for
+// the static permissions.deny backstop. Unlike the PreToolUse hook (which fails
+// open on timeout/crash), a deny rule is evaluated by Claude Code's core and WINS
+// over any hook decision, so it guards the secrets even if the guard binary is
+// starved out — and a Read rule also covers the Grep and Glob tools (they read file
+// content/names), closing that leak the hook does not gate. Absolute paths take the
+// `//` anchor: a single leading `/` would resolve relative to the settings file,
+// silently protecting the wrong path. Each path gets an exact-node rule and a
+// subtree rule, so it covers whether it is a file or a directory.
+func permissionDenyRules(absPaths []string) []string {
+	var out []string
+	for _, p := range absPaths {
+		if !filepath.IsAbs(p) {
+			continue // a `//`-anchored rule needs an absolute path; skip anything else
+		}
+		out = append(out, "Read(/"+p+")", "Read(/"+p+"/**)")
+	}
+	return dedupStrings(out)
+}
+
 // goCacheEnv is the isolated Go cache environment for the responder. It is both
 // written into settings.json and injected into the `claude -p` process env — the
 // latter is what actually reaches the sandboxed `go` (a project settings-file
@@ -336,6 +356,19 @@ func buildSettings(p scaffoldParams) *claudeSettings {
 		credFiles = append(credFiles, credFile{Path: p.TokenFile, Mode: "deny"})
 	}
 
+	// The permissions.deny backstop for the crown-jewel SECRETS — the SAME set the
+	// hook denies (host secrets + token + operator deny_reads, so an operator's
+	// ~/.aws is guarded exactly like the built-ins) and the sandbox denies for Bash.
+	// A deny rule wins over the hook and never times out, so the secrets stay closed
+	// to Read/Grep/Glob even if the (fail-open) hook is starved out. NOT the
+	// per-invocation masks (sibling outboxes/transcripts): those are cross-chat
+	// isolation, not host secrets, and vary per run — the hook/sandbox cover them.
+	secretDenies := append([]string{}, hostSecretHookDeny()...)
+	secretDenies = append(secretDenies, p.DenyRead...)
+	if p.TokenFile != "" {
+		secretDenies = append(secretDenies, p.TokenFile)
+	}
+
 	s := &claudeSettings{
 		Env: goCacheEnv(p.CacheDir),
 		Permissions: &permissionsCfg{
@@ -344,6 +377,8 @@ func buildSettings(p scaffoldParams) *claudeSettings {
 			// so they are NOT listed here. Only the tools the hook defers are
 			// allowed — the search/skill tools; Bash is auto-allowed when sandboxed.
 			Allow: []string{"Grep", "Glob", "Skill"},
+			// The non-timeout-able secret backstop (see secretDenies above).
+			Deny: permissionDenyRules(secretDenies),
 		},
 		Sandbox: &sandboxCfg{
 			Enabled:                  true,
