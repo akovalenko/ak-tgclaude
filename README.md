@@ -38,7 +38,7 @@ profile   = "qa"                # qa (read-only, default) | dev | ops (reserved)
 project   = "~/code/myproject"  # the codebase consulted on (read-only under qa)
 # wire_skills = ["~/lib/eputs-qa-knowledge"]  # domain skill(s) preloaded into the responder
 # deny_reads = ["~/code/myproject/secrets.env"]  # extra paths the responder must never read
-# deny_envs  = ["MY_SECRET"]     # extra env-var names to scrub (ANTHROPIC keys are always scrubbed)
+# deny_envs  = ["MY_SECRET"]     # extra env-var names to scrub (ANTHROPIC keys + CLAUDE_CODE_OAUTH_TOKEN always scrubbed)
 # allow_domains = ["api.github.com"]  # extra sandbox egress domains, on top of the Go-build defaults
 # claude_args = ["--model", "opus", "--effort", "high"]  # extra raw `claude -p` flags (ak-tgclaude-owned flags rejected)
 # allow_silent = false          # true DISABLES the delivery guard (below); default false = guard on
@@ -500,9 +500,9 @@ file policy for the hook, the generated settings for the sandbox. Paths take `~`
 and, like every config path, resolve relative entries against the dispatcher's
 **launch cwd** (see [Configuration](#configuration)).
 
-**Extra env vars — `deny_envs` / `--deny-env`.** `ANTHROPIC_API_KEY` and
-`ANTHROPIC_AUTH_TOKEN` are **always** scrubbed from the responder's sandboxed
-shell. To scrub more host secrets that leak through the environment, list their
+**Extra env vars — `deny_envs` / `--deny-env`.** `ANTHROPIC_API_KEY`,
+`ANTHROPIC_AUTH_TOKEN`, and `CLAUDE_CODE_OAUTH_TOKEN` are **always** scrubbed from
+the responder's sandboxed shell. To scrub more host secrets that leak through the environment, list their
 **names** in `deny_envs` (or repeat `--deny-env <NAME>`; additive). They are
 variable names, not paths — no `~`/relative resolution — and are added on top of
 the defaults (never replacing them; duplicates are ignored). Each becomes a
@@ -519,6 +519,60 @@ the apex (list the apex too if you need it). This is the **egress** layer, disti
 from a `WebFetch(domain:X)` grant in `tools`: that scopes the WebFetch **tool** and,
 under `claude -p`, does **not** open sandbox egress — so a responder `curl`/`go get`
 to a host needs *this* knob, not a WebFetch grant.
+
+### Sandbox masking is a start-of-command snapshot — two leak windows
+
+The `credentials.files` and `filesystem.denyRead` masks above are installed by
+bwrap **once, when each sandboxed command starts**, over the paths that exist at
+that instant, and each mask is pinned to the target's **inode/dentry**, not to its
+name. Because the sandbox is **per command** (every Bash tool call gets a fresh
+namespace), a *short* command is indistinguishable from a durably-guarded one. A
+**long-running** command (a build, a `go test`, a watch loop) opens two gaps —
+both verified empirically:
+
+1. **A secret absent at command start is never masked.** With nothing to bind
+   over, bwrap skips the deny path and the parent directory stays a live bind of
+   the host. A file created there *during* the command (a token written mid-run, a
+   secret an earlier step generated) is then read in the clear by the
+   already-running command.
+2. **A rename over a masked path defeats the mask.** A path that *did* exist and
+   *was* masked (reads blocked with `EACCES`) is still bypassed when the host
+   replaces it via `rename(2)` — the standard atomic `write-temp + rename`. The
+   mount stays pinned to the original, now-orphaned dentry, so a lookup of the name
+   reaches the fresh inode unmasked. This is the sharper window: `write-temp +
+   rename` is exactly how `~/.claude/.credentials.json` is rewritten on **token
+   refresh**, so a refresh during a long sandboxed command would hand it the new
+   token.
+
+**Both windows are closed the same way: deny a directory, not individual files,
+and make sure it exists before the responder starts.** A directory that exists at
+namespace setup is masked as an **empty overlay** (a fresh tmpfs — `ino=1`, a
+listing shows only `.`/`..`) that shadows the **whole subtree** for the life of the
+command: every path inside reads `ENOENT`, whether it was present at start, created
+later, or renamed in. (Verified: a running command with `~/.demo` denied never saw
+a `secret.txt` that the host created and then renamed inside it.) Concretely:
+
+- **Keep operator secrets in a dedicated directory and deny that directory** — via
+  a `credentials.files` entry for a home credential store (this is exactly how the
+  built-in `~/.ssh` is handled) or a `deny_reads` path for a project/sibling
+  location — instead of enumerating individual files.
+- **Pre-create the directory** before launching the bot. A deny on a
+  not-yet-existing path is silently a no-op (window 1), so the guard only bites if
+  the directory is already there for bwrap to overlay.
+- **Prefer `CLAUDE_CODE_OAUTH_TOKEN` (in the dispatcher's environment) over an
+  on-disk `~/.claude/.credentials.json`** for the responder's Claude auth. An env
+  var is scrubbed fresh for *every* sandboxed command
+  (`sandbox.credentials.envVars`, `mode: "deny"`) and so is immune to both
+  filesystem windows, whereas the credentials file is rewritten by rename on
+  refresh (window 2). `CLAUDE_CODE_OAUTH_TOKEN` is in the always-scrubbed default
+  set beside the `ANTHROPIC_*` keys, so it never reaches the responder's shell; the
+  parent `claude -p` still authenticates normally, reading the token before it
+  spawns any sandboxed tool.
+
+> A directory overlay is itself dentry-pinned, so renaming **the denied directory**
+> and dropping a new one under the same name would re-open window 2 at the
+> directory level — a far rarer event than rotating a file inside the directory,
+> which the overlay fully covers.
 
 ## Responder (agent + emission skill)
 
