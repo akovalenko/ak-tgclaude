@@ -484,6 +484,14 @@ func parseConfig(args []string) (*Config, error) {
 	if err != nil {
 		return nil, err
 	}
+	// bot_token and bot_token_env are mutually exclusive — checked HERE, not only in
+	// the dispatcher's validate(), so the audit and scaffold subcommands (which stop
+	// at parseConfig) reject a config that sets both. Otherwise scaffoldParams takes
+	// the bot_token_env branch and zeroes TokenFile, and `audit` would falsely report a
+	// config carrying an on-disk bot_token as "clean".
+	if c.BotToken != "" && c.BotTokenEnv != "" {
+		return nil, fmt.Errorf("set only one of bot_token / bot_token_env (got both)")
+	}
 	c.applyDefaults()
 	c.resolvePaths()
 	if err := c.validatePaths(); err != nil {
@@ -1070,6 +1078,8 @@ func (c *Config) validate() error {
 	if c.BotToken == "" && c.BotTokenEnv == "" {
 		return fmt.Errorf("bot token is required (bot_token or bot_token_env in config, or --bot-token)")
 	}
+	// Also enforced earlier in parseConfig (so audit/scaffold, which stop there, catch
+	// it too); kept here so validate() stands alone as the dispatcher's config contract.
 	if c.BotToken != "" && c.BotTokenEnv != "" {
 		return fmt.Errorf("set only one of bot_token / bot_token_env (got both)")
 	}

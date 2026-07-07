@@ -8,6 +8,20 @@ import (
 	"testing"
 )
 
+// TestParseConfigRejectsBothTokenSources is the M4 regression: bot_token and
+// bot_token_env are mutually exclusive, and the check lives in parseConfig (not only
+// the dispatcher's validate) so the audit/scaffold subcommands — which stop at
+// parseConfig — reject a config carrying an on-disk token instead of reporting "clean".
+func TestParseConfigRejectsBothTokenSources(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "bot.toml")
+	if err := os.WriteFile(path, []byte("bot_token = \"x\"\nbot_token_env = \"VAR\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := parseConfig([]string{"--config", path}); err == nil {
+		t.Error("parseConfig must reject a config that sets both bot_token and bot_token_env")
+	}
+}
+
 func TestParseConfigAccessFlags(t *testing.T) {
 	c, err := parseConfig([]string{"--allow-user", "1", "--allow-user", "2", "--open"})
 	if err != nil {
