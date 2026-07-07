@@ -8,9 +8,42 @@ codebase and its notes — then sends the reply back to Telegram.
 > Status: **implemented, under active development**. The dispatcher, the
 > project-bound responder (`claude -p`, plus a `stub` for Telegram-I/O smoke
 > tests), the MCP-over-HTTP outbound transport with synchronous delivery feedback,
-> and the supporting subcommands (`scaffold` / `clear` / `recall` / `deploy` / `hook`) are
-> built and unit-tested. This README remains the design of record; the non-QA
-> profiles are reserved but not wired yet.
+> and the supporting subcommands (`scaffold` / `audit` / `clear` / `recall` /
+> `deploy` / `hook`) are built and unit-tested. This README remains the design of
+> record; the non-QA profiles are reserved but not wired yet.
+
+## Contents
+
+- [Why one binary (multitool)](#why-one-binary-multitool)
+- [Configuration](#configuration)
+- [Runtime layout (directories)](#runtime-layout-directories)
+- [Dispatch loop & sessions](#dispatch-loop--sessions)
+  - [Smoke-testing the Telegram path (`--responder stub`)](#smoke-testing-the-telegram-path---responder-stub)
+- [Transcripts & recall](#transcripts--recall)
+- [Access control](#access-control)
+- [Groups](#groups)
+- [Token isolation](#token-isolation) — **security**
+  - [Why the CLI token is safe from the sandbox](#why-the-cli-token-is-safe-from-the-sandbox)
+  - [Keeping ambient secrets out of the responder's shell](#keeping-ambient-secrets-out-of-the-responders-shell)
+  - [Host secrets beyond the bot token](#host-secrets-beyond-the-bot-token)
+  - [Deployment: a shared host with live secrets](#deployment-a-shared-host-with-live-secrets)
+  - [Sandbox masking is a start-of-command snapshot — two leak windows](#sandbox-masking-is-a-start-of-command-snapshot--two-leak-windows)
+- [Responder (agent + emission skill)](#responder-agent--emission-skill)
+  - [Policy (persona)](#policy-persona)
+  - [Wiring domain skills](#wiring-domain-skills)
+  - [Generic skills & agents (on-demand, not preloaded)](#generic-skills--agents-on-demand-not-preloaded)
+- [Responder scaffold (generated settings.json)](#responder-scaffold-generated-settingsjson)
+  - [Per-invocation isolation (write and read)](#per-invocation-isolation-write-and-read)
+  - [Static workdir vs ephemeral cwd, and `scaffold`](#static-workdir-vs-ephemeral-cwd-and-scaffold)
+- [Responder isolation](#responder-isolation)
+- [Outbound transport: an MCP server](#outbound-transport-an-mcp-server)
+  - [The route capability is the token, not a directory](#the-route-capability-is-the-token-not-a-directory)
+  - [The tools](#the-tools)
+  - [Document path confinement](#document-path-confinement)
+  - [Delivery and errors](#delivery-and-errors)
+- [Install & deploy](#install--deploy)
+- [Approval UX](#approval-ux)
+- [Repo layout](#repo-layout)
 
 ## Why one binary (multitool)
 
@@ -22,6 +55,7 @@ sprawl, one thing to put on `PATH`:
 | `dispatch` | host (trusted) | holds the bot token in memory, polls Telegram `getUpdates`, routes each update to a responder, and runs the MCP server that delivers the responder's replies to Telegram |
 | `hook pretooluse` | as the responder's PreToolUse hook | gates the responder's tool calls (e.g. denies reads of the token file) |
 | `scaffold` | host | materializes a responder `workdir/project` (generated settings.json) without running the dispatcher, to inspect it and run `claude` by hand |
+| `audit` | host | classifies the configured sandbox deny-secrets by on-disk shape and reports mask-leak windows (a missing path, a rename-replaceable bare file) plus whether the token should move to `bot_token_env`; read-only, never starts the bot |
 | `clear` | host | drops every persisted chat→session binding (keeps the getUpdates offset); reads the state dir from `--config` or the default |
 | `recall` | responder (sandboxed) | reads the transcript store as groomed blocks (`--dir SCOPE`, then `--msg N` or `--day`/`--since`/`--until`); backs the `tg-recall` skill, read-only |
 | `deploy` | host, once | writes an example config and (with `--workdir`) provisions the static workdir + marks it trusted |
@@ -33,7 +67,8 @@ the file, the file overrides defaults (`flags > file > defaults`). A minimal
 config (`bot.toml`, see `bot.toml.example`):
 
 ```toml
-bot_token = "123456789:AA..."   # secret; kept in dispatcher memory, never in env
+bot_token = "123456789:AA..."   # secret; kept in dispatcher memory, never in env. Inline = secret AT REST — prefer bot_token_env below
+# bot_token_env = "TG_BOT_TOKEN" # PREFERRED: read the token from this env var at startup, then unset it (nothing on disk). Or --bot-token (off disk; ps-visible)
 profile   = "qa"                # qa (read-only, default) | dev | ops (reserved)
 project   = "~/code/myproject"  # the codebase consulted on (read-only under qa)
 # wire_skills = ["~/lib/eputs-qa-knowledge"]  # domain skill(s) preloaded into the responder
@@ -61,11 +96,15 @@ The same fields are CLI flags, so you can skip the file entirely for a quick
 ak-tgclaude dispatch --bot-token 123:ABC --profile qa --project ~/code/myproject
 ```
 
-- **Try-it vs production.** Prefer the **file** in production: a token in a file
-  is protected by `sandbox.credentials.files` (deny-read in the responder's
-  sandbox). A token on the **command line** is visible in the host's process list
-  (`ps`) to other local processes — fine for a single-user "try it" run, not for
-  a shared host. (It can **not** leak *into* the responder's sandbox; see
+- **Try-it vs production.** In production prefer **`bot_token_env`** — an env var the
+  dispatcher reads then unsets at startup, so the token never touches disk (see
+  [Token isolation](#token-isolation)). An inline **`bot_token`** in the file is a
+  secret *at rest* whose sandbox deny a rename can bypass
+  ([window 2](#sandbox-masking-is-a-start-of-command-snapshot--two-leak-windows)),
+  and `--bot-token` on the **command line** is visible in the host process list
+  (`ps`) to other local processes — fine for a single-user "try it" run, not for a
+  shared host. (Neither the flag nor the file token can leak *into* the responder's
+  sandbox; see
   [Why the CLI token is safe from the sandbox](#why-the-cli-token-is-safe-from-the-sandbox).)
 - **Profiles** (`qa`/`dev`/`ops`) are a forward-looking dial: only `qa` (read-only)
   is implemented; `dev`/`ops` are reserved for a possible remote-development pivot,
@@ -430,18 +469,36 @@ bot. The responder is a Claude Code instance executing model-chosen tool calls o
 untrusted input (arbitrary Telegram messages), so it must never be able to read
 the token.
 
-- The token is held **only in the dispatcher's memory** (parsed from the TOML
-  config, or read from `--bot-token` at startup). It is never placed in an
-  environment variable and never written to a path the responder can read.
+- The token is held **only in the dispatcher's memory**. It comes from one of three
+  sources, in **descending order of safety**: **`bot_token_env`** (the dispatcher
+  reads the named environment variable at startup and immediately `unset`s it —
+  nothing on disk, and no exec'd child inherits it); **`--bot-token`** (a flag — on
+  the host's `argv`, so invisible to the sandboxed responder but visible to other
+  local processes via `ps`); or an inline **`bot_token`** in the config file (a
+  secret **at rest on disk** — the weakest; see below). However it is sourced, the
+  token is never exported to the responder's environment and never written to a path
+  the responder can read.
 - The responder reaches Telegram only **indirectly**, by calling the dispatcher's
   MCP send tools; the dispatcher is the only component that talks to the Telegram
   API. The per-invocation MCP token is a route capability, not the bot token: it
   only authorizes sending to the already-pinned chat, and Claude Code keeps it in
   the request header, out of the model's context.
-- When the token comes from a **config file**, the binary registers that file in
-  the responder's `sandbox.credentials.files` (`mode: "deny"`) so the sandbox
-  denies any read of it — a backstop to the PreToolUse hook. (Requires Claude
-  Code ≥ 2.1.187.)
+
+**Sourcing the token — prefer `bot_token_env`.** When the token is inline in a
+**config file**, the binary registers that file in the responder's
+`sandbox.credentials.files` (`mode: "deny"`) so the sandbox denies any read of it — a
+backstop to the PreToolUse hook (requires Claude Code ≥ 2.1.187). But that deny is a
+**start-of-command snapshot** pinned to the file's inode, and the atomic `write-temp
++ rename` used to rewrite a secret slips past it
+([window 2](#sandbox-masking-is-a-start-of-command-snapshot--two-leak-windows)
+below) — so an inline token is a secret at rest behind a bypassable guard.
+**`bot_token_env` avoids all of it:** point it at an environment variable holding the
+token; the dispatcher reads it once at startup and `unset`s it before spawning
+anything, so the token never touches disk and no child — above all the sandboxed
+responder — can inherit it. `--bot-token` likewise keeps the token off disk (at the
+cost of host `ps` visibility). Reserve inline `bot_token` for quick local runs, and
+run [`ak-tgclaude audit`](#deployment-a-shared-host-with-live-secrets) to be warned
+whenever a config still carries one.
 
 ### Why the CLI token is safe from the sandbox
 
@@ -473,21 +530,26 @@ model calls keep working while the shell never sees the secret.
 
 The responder runs as the host user, so a prompt-injected `cat` in its sandboxed
 shell could otherwise read the operator's own secrets. The generated
-`settings.json` denies these unconditionally (independent of `--config`):
+`settings.json` denies these unconditionally (independent of `--config`), each as a
+**whole directory** via `sandbox.credentials.files` (`mode: "deny"`):
 
-- **`~/.ssh`** and **`~/.claude/.credentials.json`** (the user's SSH keys and
-  Claude Code's own auth token) via `sandbox.credentials.files` (`mode: "deny"`);
-- **`~/.claude/history.jsonl`** (cross-session prompt/command history) and
-  **`~/.claude/projects`** (transcripts of the operator's other sessions, which
-  may quote secrets from that work) via `sandbox.filesystem.denyRead`.
+- **`~/.ssh`** — the user's SSH keys.
+- **`~/.claude`** — Claude Code's entire home: its auth token
+  (`.credentials.json`), the cross-session prompt/command history
+  (`history.jsonl`), and the transcripts of the operator's other sessions
+  (`projects/`, which may quote secrets from that work). Denying the **directory**
+  (rather than enumerating those files) folds them into one entry and — crucially —
+  survives the credentials file being **rewritten by rename** on token refresh,
+  which a bare-file deny would not
+  ([window 2](#sandbox-masking-is-a-start-of-command-snapshot--two-leak-windows)
+  below).
 
 This is the **Bash layer**; the **Read tool** is unsandboxed (only the hook gates
 it), and since Read is default-open (it mirrors the sandbox) the hook carries these
 same host secrets in its **absolute-deny** set — so neither Bash nor Read reaches
-them. Denying `~/.claude/.credentials.json` does
-**not** break the responder's own `claude -p` auth: the parent process reads its
-credentials **unsandboxed**; only the Bash tools it spawns are confined. (`~/` is
-expanded by the sandbox to the responder's home.)
+them. Denying `~/.claude` does **not** break the responder's own `claude -p` auth:
+the parent process reads its credentials **unsandboxed**; only the Bash tools it
+spawns are confined. (`~/` is expanded by the sandbox to the responder's home.)
 
 **Extra paths — `deny_reads` / `--deny-read`.** To hide more paths (a secrets
 file inside the project, a sibling repo, a mounted volume), list them in
@@ -519,6 +581,28 @@ the apex (list the apex too if you need it). This is the **egress** layer, disti
 from a `WebFetch(domain:X)` grant in `tools`: that scopes the WebFetch **tool** and,
 under `claude -p`, does **not** open sandbox egress — so a responder `curl`/`go get`
 to a host needs *this* knob, not a WebFetch grant.
+
+### Deployment: a shared host with live secrets
+
+This bot is built to run **on a host where a person is also actively developing** —
+the responder executes as that user, and the user's own secrets are **live and
+changing while the bot runs**. That is the specific threat the masking below defends
+against, and it is why the two leak windows are not academic here:
+
+- **Credentials get rewritten under the running bot.** A `claude` token refresh, a
+  `gh`/`aws` re-auth, an editor saving a dotfile — all land via the atomic
+  `write-temp + rename` dance, which is exactly **window 2**: a file that *was*
+  masked becomes readable the instant it is replaced.
+- **New secrets appear mid-run.** The developer creates a `.env`, exports a key, or a
+  build drops a credential into a directory the bot did not deny at startup — that is
+  **window 1**: a path absent when the sandboxed command started is never masked.
+
+So this deployment cannot rely on a one-time snapshot of *which secret files exist*
+taken at launch. The hardening that follows — **deny whole directories, pre-created
+before start, and source the responder's Claude auth from an env var rather than an
+on-disk credentials file** — is chosen precisely because it survives a developer
+mutating their secrets in parallel. The [`ak-tgclaude audit`](#sandbox-masking-is-a-start-of-command-snapshot--two-leak-windows)
+subcommand (below) checks a given config against both windows.
 
 ### Sandbox masking is a start-of-command snapshot — two leak windows
 
@@ -573,6 +657,29 @@ a `secret.txt` that the host created and then renamed inside it.) Concretely:
 > and dropping a new one under the same name would re-open window 2 at the
 > directory level — a far rarer event than rotating a file inside the directory,
 > which the overlay fully covers.
+
+**Check your setup — `ak-tgclaude audit`.** The `audit` subcommand classifies every
+configured deny-secret by its on-disk shape and reports the window it is exposed to:
+a path that **does not exist** (window 1), a **bare file** a rename can unmask
+(window 2), or a **clean bill** when every secret is an existing directory. It also
+flags a token stored literally in the config file, steering to `bot_token_env`. It
+reads config exactly as the dispatcher does — the same TOML file **and** CLI flags,
+overlaid (`flags > file`) — so `audit --config bot.toml [flags…]` reflects precisely
+what that `dispatch` would mask, but it **never starts the bot**, so it is safe to
+run against a live `bot.toml`. The dispatcher logs the same findings at startup, and
+`scaffold` prints them in its inspection output.
+
+```console
+$ ak-tgclaude audit --config bot.toml
+ak-tgclaude: auditing sandbox deny-secrets for mask-leak windows
+  audited: /home/me/.ssh
+  audited: /home/me/.claude
+  audited: /home/me/.aws/credentials
+  token source: config file /home/me/bot.toml (inline bot_token)
+2 issue(s):
+  - /home/me/.aws/credentials is a bare file: a file-level mask is bypassed when the file is replaced by rename … — keep the secret inside a whole-directory deny instead
+  - the bot token is stored literally in /home/me/bot.toml: prefer bot_token_env …
+```
 
 ## Responder (agent + emission skill)
 

@@ -5,13 +5,26 @@
 #
 #   ak-tgclaude dispatch --bot-token 123:ABC --profile qa --project ~/code
 #
-# In production prefer this file over --bot-token: a token in a file is
-# protected by sandbox.credentials.files (deny-read inside the responder's
-# sandbox), whereas a token on the command line is visible in the host's
-# process list (ps) to other local processes.
+# Token sourcing, safest first:
+#   bot_token_env  — name an env var; the dispatcher reads it at startup and
+#                    immediately UNSETS it. Nothing on disk, no child inherits it.
+#                    PREFERRED in production.
+#   --bot-token    — a flag; kept off disk, but visible to other local processes
+#                    in the host process list (ps).
+#   bot_token      — inline below; simplest, but a SECRET AT REST on disk. Its
+#                    sandbox deny is a bare-file mask a rename can bypass (see the
+#                    README, "two leak windows"). Fine for a quick local run.
+# Run `ak-tgclaude audit --config bot.toml` to be warned about a weak setup.
 
-# Telegram bot token (secret). Kept only in the dispatcher's memory; never
-# exported to the environment. Required.
+# Telegram bot token (secret). Provide it exactly ONE way; kept only in the
+# dispatcher's memory, never exported to the environment. Required (here, via
+# bot_token_env, or via --bot-token).
+#
+# PREFERRED — read the token from this env var at startup, then unset it (nothing
+# on disk):
+# bot_token_env = "TG_BOT_TOKEN"
+#
+# Or inline it here — simplest, but a secret at rest on disk (see the note above):
 bot_token = "123456789:AA...replace-me..."
 
 # Responder agent name (claude -p --agent). Default: the shipped "faq-responder"
