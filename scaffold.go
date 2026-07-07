@@ -143,9 +143,14 @@ func (c *Config) scaffoldParams(cacheDir, outboxRoot string) scaffoldParams {
 	}
 }
 
-// defaultDenyEnvVars are the ambient secrets scrubbed from the responder's
-// sandboxed shell (its own model calls resolve the key before this bites).
-var defaultDenyEnvVars = []string{"ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"}
+// defaultDenyEnvVars are the ambient auth secrets scrubbed from the responder's
+// sandboxed shell (the parent's own `claude -p` resolves them before this bites).
+// CLAUDE_CODE_OAUTH_TOKEN is included because passing the OAuth token via env is
+// the recommended alternative to an on-disk ~/.claude/.credentials.json (see the
+// Sandbox security section in the README): once the token is in the process env
+// it must be hidden from the sandboxed shell too, or a prompt-injected `env`
+// could exfiltrate it.
+var defaultDenyEnvVars = []string{"ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN"}
 
 // defaultNetworkDomains is the egress the responder needs to build Go code.
 var defaultNetworkDomains = []string{"proxy.golang.org", "sum.golang.org", "storage.googleapis.com"}
