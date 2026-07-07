@@ -100,7 +100,7 @@ type Dispatcher struct {
 // cancelled. Different chats are handled concurrently (bounded by
 // maxConcurrent); updates within one chat are serialized.
 func (d *Dispatcher) Run(ctx context.Context) error {
-	workers := newChatWorkers(ctx, d.handleUpdate, d.maxConcurrent)
+	workers := newChatWorkers(ctx, d.handleUpdate, d.maxConcurrent, chatWorkerIdleTTL)
 	offset := d.store.Offset()
 	for ctx.Err() == nil {
 		updates, err := d.client.GetUpdates(ctx, offset, d.pollTimeout)
@@ -129,24 +129,37 @@ func (d *Dispatcher) Run(ctx context.Context) error {
 // chatWorkers serializes updates per chat while running different chats
 // concurrently, bounded by a global responder cap. A worker goroutine per chat
 // drains that chat's queue in order; the semaphore caps how many run at once.
+// chatWorkerIdleTTL bounds how long an idle per-chat worker (a goroutine + a 128-slot
+// queue) is kept before it evicts itself. Without eviction, every distinct chat.ID
+// that ever reached the dispatcher — including a stranger's DM or a group the bot was
+// added to, created BEFORE the per-user access gate in handleUpdate — leaks a
+// goroutine + channel for the whole process lifetime, an unauthenticated slow drain.
+// A later update simply recreates the worker.
+const chatWorkerIdleTTL = 10 * time.Minute
+
 type chatWorkers struct {
-	ctx    context.Context
-	handle func(context.Context, Update)
-	sem    chan struct{}
+	ctx     context.Context
+	handle  func(context.Context, Update)
+	sem     chan struct{}
+	idleTTL time.Duration
 
 	mu      sync.Mutex
 	workers map[int64]chan Update
 	wg      sync.WaitGroup
 }
 
-func newChatWorkers(ctx context.Context, handle func(context.Context, Update), maxConcurrent int) *chatWorkers {
+func newChatWorkers(ctx context.Context, handle func(context.Context, Update), maxConcurrent int, idleTTL time.Duration) *chatWorkers {
 	if maxConcurrent < 1 {
 		maxConcurrent = 1
+	}
+	if idleTTL <= 0 {
+		idleTTL = chatWorkerIdleTTL
 	}
 	return &chatWorkers{
 		ctx:     ctx,
 		handle:  handle,
 		sem:     make(chan struct{}, maxConcurrent),
+		idleTTL: idleTTL,
 		workers: make(map[int64]chan Update),
 	}
 }
@@ -163,24 +176,45 @@ func (w *chatWorkers) dispatch(u Update) {
 		ch = make(chan Update, 128)
 		w.workers[chat] = ch
 		w.wg.Add(1)
-		go w.serve(ch)
+		go w.serve(chat, ch)
 	}
-	w.mu.Unlock()
-
+	// Enqueue UNDER the lock so an idle worker cannot evict itself between our lookup
+	// and our send (it evicts only with the lock held and only when its queue is
+	// empty). The buffer is deep (128), so this non-blocking send almost always
+	// succeeds; a full buffer means the worker is actively backlogged — not idle-
+	// evicting — so the fallback blocking send outside the lock is race-free.
 	select {
 	case ch <- u:
-	case <-w.ctx.Done():
+		w.mu.Unlock()
+	default:
+		w.mu.Unlock()
+		select {
+		case ch <- u:
+		case <-w.ctx.Done():
+		}
 	}
 }
 
-// serve drains one chat's queue sequentially, each update taking a global slot.
-func (w *chatWorkers) serve(ch chan Update) {
+// serve drains one chat's queue sequentially, each update taking a global slot, and
+// evicts itself after idleTTL of inactivity so an unauthorized / one-off chat does
+// not leak a goroutine + channel for the process lifetime.
+func (w *chatWorkers) serve(chat int64, ch chan Update) {
 	defer w.wg.Done()
+	idle := time.NewTimer(w.idleTTL)
+	defer idle.Stop()
 	for {
 		select {
 		case <-w.ctx.Done():
 			return
 		case u := <-ch:
+			// Pause the idle clock across handling (which can be slow); drain a fire that
+			// landed since the last reset so the next Reset starts clean.
+			if !idle.Stop() {
+				select {
+				case <-idle.C:
+				default:
+				}
+			}
 			select {
 			case w.sem <- struct{}{}:
 			case <-w.ctx.Done():
@@ -188,6 +222,19 @@ func (w *chatWorkers) serve(ch chan Update) {
 			}
 			w.handle(w.ctx, u)
 			<-w.sem
+			idle.Reset(w.idleTTL)
+		case <-idle.C:
+			// Idle too long: evict. Only with the queue empty and under the lock, so a
+			// concurrent dispatch either enqueued before us (queue non-empty → keep
+			// serving) or will recreate the worker after we delete (no update lost).
+			w.mu.Lock()
+			if len(ch) == 0 {
+				delete(w.workers, chat)
+				w.mu.Unlock()
+				return
+			}
+			w.mu.Unlock()
+			idle.Reset(w.idleTTL)
 		}
 	}
 }

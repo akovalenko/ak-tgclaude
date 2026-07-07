@@ -52,7 +52,7 @@ func TestChatWorkersSerializePerChatParallelAcrossChats(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	w := newChatWorkers(ctx, handle, 8)
+	w := newChatWorkers(ctx, handle, 8, time.Minute)
 
 	// 3 chats, 3 messages each; message_id encodes intra-chat order (0,1,2).
 	for i := 0; i < 3; i++ {
@@ -106,7 +106,7 @@ func TestChatWorkersRespectConcurrencyCap(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	w := newChatWorkers(ctx, handle, 2) // cap = 2
+	w := newChatWorkers(ctx, handle, 2, time.Minute) // cap = 2
 
 	for chat := int64(1); chat <= 6; chat++ {
 		w.dispatch(Update{UpdateID: chat, Message: &Message{MessageID: 1, Chat: Chat{ID: chat}}})
@@ -128,11 +128,36 @@ func TestChatWorkersRespectConcurrencyCap(t *testing.T) {
 	}
 }
 
+// TestChatWorkersEvictIdle is the M1 regression: an idle per-chat worker evicts
+// itself so a stranger's DM / a one-off group (a worker created BEFORE the access
+// gate) cannot leak a goroutine + channel for the process lifetime — and a later
+// update recreates it, losing nothing.
+func TestChatWorkersEvictIdle(t *testing.T) {
+	done := make(chan struct{}, 2)
+	handle := func(context.Context, Update) { done <- struct{}{} }
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	w := newChatWorkers(ctx, handle, 4, 20*time.Millisecond)
+
+	w.dispatch(Update{UpdateID: 1, Message: &Message{MessageID: 1, Chat: Chat{ID: 7}}})
+	<-done // handled
+	if !waitFor(func() bool { w.mu.Lock(); defer w.mu.Unlock(); return len(w.workers) == 0 }, time.Second) {
+		t.Fatalf("idle worker was not evicted")
+	}
+	// A later update recreates the worker and is handled — no update lost to eviction.
+	w.dispatch(Update{UpdateID: 2, Message: &Message{MessageID: 2, Chat: Chat{ID: 7}}})
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatalf("update after eviction not handled (worker not recreated)")
+	}
+}
+
 func TestChatWorkersIgnoresNonMessage(t *testing.T) {
 	called := false
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	w := newChatWorkers(ctx, func(context.Context, Update) { called = true }, 4)
+	w := newChatWorkers(ctx, func(context.Context, Update) { called = true }, 4, time.Minute)
 	w.dispatch(Update{UpdateID: 1}) // Message == nil
 	time.Sleep(30 * time.Millisecond)
 	if called {
