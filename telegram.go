@@ -27,7 +27,7 @@ type Route struct {
 // reply-resurrection track); SendChatAction is best-effort UX with no id.
 type Sender interface {
 	SendMessage(ctx context.Context, r Route, text, parseMode string, silent bool) (messageID int64, err error)
-	SendDocument(ctx context.Context, r Route, path, filename, caption, parseMode string, silent bool) (messageID int64, err error)
+	SendDocument(ctx context.Context, r Route, file *os.File, filename, caption, parseMode string, silent bool) (messageID int64, err error)
 	SendChatAction(ctx context.Context, chatID int64, action string) error
 }
 
@@ -299,15 +299,13 @@ func (c *Client) SendChatAction(ctx context.Context, chatID int64, action string
 	return checkOK(status, body)
 }
 
-// SendDocument uploads a file as an attachment (sendDocument, multipart).
-func (c *Client) SendDocument(ctx context.Context, r Route, path, filename, caption, parseMode string, silent bool) (int64, error) {
-	f, err := os.Open(path)
-	if err != nil {
-		return 0, fmt.Errorf("opening attachment: %w", err)
-	}
-	defer f.Close()
+// SendDocument uploads a file as an attachment (sendDocument, multipart). The
+// caller passes an already-open file — the single symlink-vetted handle from
+// openNoFollow (or a dispatcher-owned spill temp) — so this sink never re-opens a
+// path a responder could have swapped for a symlink to a host secret.
+func (c *Client) SendDocument(ctx context.Context, r Route, f *os.File, filename, caption, parseMode string, silent bool) (int64, error) {
 	if filename == "" {
-		filename = filepath.Base(path)
+		filename = filepath.Base(f.Name())
 	}
 
 	var buf bytes.Buffer

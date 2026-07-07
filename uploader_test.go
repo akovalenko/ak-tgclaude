@@ -10,6 +10,27 @@ import (
 	"testing"
 )
 
+// writeTemp writes content to a fresh temp file and returns its path.
+func writeTemp(t *testing.T, content string) string {
+	t.Helper()
+	p := filepath.Join(t.TempDir(), "doc.bin")
+	if err := os.WriteFile(p, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return p
+}
+
+// openForTest opens path for reading (the vetted handle the delivery core would
+// pass a uploader/SendDocument), failing the test on error.
+func openForTest(t *testing.T, path string) *os.File {
+	t.Helper()
+	f, err := os.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return f
+}
+
 // writeScript writes an executable /bin/sh script (body appended after the
 // shebang) into a temp dir and returns its path — a stand-in uploader for tests.
 func writeScript(t *testing.T, body string) string {
@@ -57,7 +78,9 @@ func TestUploaderDeliverSuccess(t *testing.T) {
 	u := &uploader{command: cmd, thresholdBytes: 0}
 	f := &fakeSender{}
 	d := &Descriptor{Kind: KindDocument, Path: file, Filename: "dist.tar.gz", Caption: "here"}
-	if _, err := u.deliver(context.Background(), d, Route{ChatID: 7}, f, 100); err != nil {
+	fh := openForTest(t, file)
+	defer fh.Close()
+	if _, err := u.deliver(context.Background(), d, Route{ChatID: 7}, f, fh, 100); err != nil {
 		t.Fatalf("deliver: %v", err)
 	}
 	calls := f.snapshot()
@@ -81,7 +104,8 @@ func TestUploaderDeliverTooBig(t *testing.T) {
 	u := &uploader{command: "/definitely/not/run", hardCapBytes: 100 << 20}
 	f := &fakeSender{}
 	d := &Descriptor{Kind: KindDocument, Path: "x", Filename: "big.bin"}
-	_, err := u.deliver(context.Background(), d, Route{ChatID: 1}, f, 200<<20)
+	// Rejected on size before the uploader runs, so the file handle is never touched.
+	_, err := u.deliver(context.Background(), d, Route{ChatID: 1}, f, nil, 200<<20)
 	var ue *uploadError
 	if !errors.As(err, &ue) {
 		t.Fatalf("want *uploadError, got %v", err)
@@ -109,7 +133,8 @@ func TestUploaderDeliverRejectsUnsafeName(t *testing.T) {
 			u := &uploader{command: "/definitely/not/run"}
 			f := &fakeSender{}
 			d := &Descriptor{Kind: KindDocument, Path: tc.path, Filename: tc.filename}
-			_, err := u.deliver(context.Background(), d, Route{ChatID: 1}, f, 10)
+			// Rejected on the name before the uploader runs → file handle unused.
+			_, err := u.deliver(context.Background(), d, Route{ChatID: 1}, f, nil, 10)
 			var ue *uploadError
 			if !errors.As(err, &ue) || !strings.Contains(ue.Error(), "sane file name") {
 				t.Fatalf("want a sane-name rejection, got %v", err)
@@ -133,7 +158,9 @@ func TestUploaderRunFailure(t *testing.T) {
 	u := &uploader{command: cmd, thresholdBytes: 0}
 	f := &fakeSender{}
 	d := &Descriptor{Kind: KindDocument, Path: "f", Filename: "f"}
-	_, err := u.deliver(context.Background(), d, Route{ChatID: 1}, f, 10)
+	fh := openForTest(t, writeTemp(t, "payload"))
+	defer fh.Close()
+	_, err := u.deliver(context.Background(), d, Route{ChatID: 1}, f, fh, 10)
 	var ue *uploadError
 	if !errors.As(err, &ue) || !strings.Contains(ue.Error(), "boom") {
 		t.Fatalf("want upload failed with stderr tail, got %v", err)
@@ -148,10 +175,33 @@ func TestUploaderNoURL(t *testing.T) {
 	u := &uploader{command: cmd, thresholdBytes: 0}
 	f := &fakeSender{}
 	d := &Descriptor{Kind: KindDocument, Path: "f", Filename: "f"}
-	_, err := u.deliver(context.Background(), d, Route{ChatID: 1}, f, 10)
+	fh := openForTest(t, writeTemp(t, "payload"))
+	defer fh.Close()
+	_, err := u.deliver(context.Background(), d, Route{ChatID: 1}, f, fh, 10)
 	var ue *uploadError
 	if !errors.As(err, &ue) || !strings.Contains(ue.Error(), "no URL") {
 		t.Fatalf("want no-URL error, got %v", err)
+	}
+}
+
+func TestUploaderReadsInheritedFd(t *testing.T) {
+	// The operator command is handed the source as /proc/self/fd/3 (an inherited fd),
+	// NOT a path it re-opens (which would follow a swapped symlink). A script that cats
+	// arg1 must see the exact bytes of the file we opened — proving the fd is inherited,
+	// readable, and points at the vetted file.
+	cmd := writeScript(t, `printf 'https://h/%s' "$(cat "$1")"`)
+	file := writeTemp(t, "VETTEDBYTES")
+	fh := openForTest(t, file)
+	defer fh.Close()
+	u := &uploader{command: cmd, thresholdBytes: 0}
+	f := &fakeSender{}
+	d := &Descriptor{Kind: KindDocument, Path: file, Filename: "doc.bin"}
+	if _, err := u.deliver(context.Background(), d, Route{ChatID: 1}, f, fh, 100); err != nil {
+		t.Fatalf("deliver: %v", err)
+	}
+	calls := f.snapshot()
+	if len(calls) != 1 || !strings.Contains(calls[0].text, "https://h/VETTEDBYTES") {
+		t.Errorf("uploader did not read the inherited fd (/proc/self/fd/3); got %+v", calls)
 	}
 }
 

@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"sync"
 )
 
@@ -11,6 +13,7 @@ type fakeCall struct {
 	text     string
 	mode     string
 	filename string
+	docName  string // for a document: the delivered file's name (base of *os.File.Name())
 	route    Route
 }
 
@@ -33,13 +36,17 @@ func (f *fakeSender) SendMessage(_ context.Context, r Route, text, mode string, 
 	return int64(len(f.calls)), nil
 }
 
-func (f *fakeSender) SendDocument(_ context.Context, r Route, _, filename, _, _ string, _ bool) (int64, error) {
+func (f *fakeSender) SendDocument(_ context.Context, r Route, file *os.File, filename, _, _ string, _ bool) (int64, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.err != nil {
 		return 0, f.err
 	}
-	f.calls = append(f.calls, fakeCall{kind: "document", filename: filename, route: r})
+	var docName string
+	if file != nil {
+		docName = filepath.Base(file.Name())
+	}
+	f.calls = append(f.calls, fakeCall{kind: "document", filename: filename, docName: docName, route: r})
 	return int64(len(f.calls)), nil
 }
 

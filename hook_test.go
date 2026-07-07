@@ -33,10 +33,10 @@ func bashInput(cmd string, disableSandbox bool) *preToolUseInput {
 }
 
 var testPolicy = filePolicy{
-	deny:       []string{"/host/.ssh", "/cfg/bot.toml"},      // host secret + token: never
-	readAllow:  []string{"/run/out/outbox-A1", "/s/tr/42"},   // own outbox + own transcript
-	readDeny:   []string{"/run/out", "/s/tr"},                // sibling outboxes + transcript roots
-	writeRoots: []string{"/run/out/outbox-A1"},               // writes: the outbox only
+	deny:       []string{"/host/.ssh", "/cfg/bot.toml"},    // host secret + token: never
+	readAllow:  []string{"/run/out/outbox-A1", "/s/tr/42"}, // own outbox + own transcript
+	readDeny:   []string{"/run/out", "/s/tr"},              // sibling outboxes + transcript roots
+	writeRoots: []string{"/run/out/outbox-A1"},             // writes: the outbox only
 }
 
 func TestDecideReadMirrorsSandbox(t *testing.T) {
@@ -65,6 +65,75 @@ func TestDecideReadMirrorsSandbox(t *testing.T) {
 		if d, _ := decidePreToolUse(fileInput("Read", p), testPolicy); d != "deny" {
 			t.Errorf("read secret %q => %q, want deny", p, d)
 		}
+	}
+}
+
+// TestDecideSymlinkEscapeDenied covers the hook's symlink defense with REAL on-disk
+// links (resolution touches the filesystem). A link a responder plants in its own
+// outbox has an own-scope LEXICAL path, but its resolved target escapes — so a read
+// of a host secret / sibling outbox and a write to a host file are all denied, while
+// an ordinary regular file in the own outbox stays allowed.
+func TestDecideSymlinkEscapeDenied(t *testing.T) {
+	base := t.TempDir()
+	outbox := filepath.Join(base, "outbox-A1")
+	secretDir := filepath.Join(base, "secret")
+	sibling := filepath.Join(base, "outbox-B2")
+	for _, d := range []string{outbox, secretDir, sibling} {
+		if err := os.MkdirAll(d, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	mustWrite := func(p, s string) {
+		if err := os.WriteFile(p, []byte(s), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	mustLink := func(target, link string) {
+		if err := os.Symlink(target, link); err != nil {
+			t.Fatal(err)
+		}
+	}
+	mustWrite(filepath.Join(secretDir, "id_rsa"), "KEY")
+	mustWrite(filepath.Join(sibling, "steal.md"), "theirs")
+
+	// readDeny masks the whole parent (siblings); readAllow carves the own outbox back;
+	// deny is the absolute host-secret set — mirrors the real dispatcher-computed policy.
+	pol := filePolicy{
+		deny:       []string{secretDir},
+		readAllow:  []string{outbox},
+		readDeny:   []string{base},
+		writeRoots: []string{outbox},
+	}
+
+	// An ordinary regular file in the own outbox: read + write allowed (the carve).
+	reg := filepath.Join(outbox, "reply.md")
+	mustWrite(reg, "mine")
+	if d, _ := decidePreToolUse(fileInput("Read", reg), pol); d != "allow" {
+		t.Errorf("read own regular file => %q, want allow", d)
+	}
+	if d, _ := decidePreToolUse(fileInput("Write", reg), pol); d != "allow" {
+		t.Errorf("write own regular file => %q, want allow", d)
+	}
+	// A fresh (not-yet-created) write target in the own outbox is still allowed.
+	if d, _ := decidePreToolUse(fileInput("Write", filepath.Join(outbox, "new.md")), pol); d != "allow" {
+		t.Errorf("write fresh own file => %q, want allow", d)
+	}
+
+	// Own-scope symlink → host secret: absolute deny wins.
+	mustLink(filepath.Join(secretDir, "id_rsa"), filepath.Join(outbox, "toSecret"))
+	if d, _ := decidePreToolUse(fileInput("Read", filepath.Join(outbox, "toSecret")), pol); d != "deny" {
+		t.Errorf("read own-scope symlink to a host secret => %q, want deny", d)
+	}
+	// Own-scope symlink → sibling outbox: masked (resolved target under readDeny).
+	mustLink(filepath.Join(sibling, "steal.md"), filepath.Join(outbox, "toSibling"))
+	if d, _ := decidePreToolUse(fileInput("Read", filepath.Join(outbox, "toSibling")), pol); d != "deny" {
+		t.Errorf("read own-scope symlink to a sibling outbox => %q, want deny", d)
+	}
+	// Own-scope symlink → host file: the write must not escape the outbox.
+	mustWrite(filepath.Join(base, "bashrc"), "orig")
+	mustLink(filepath.Join(base, "bashrc"), filepath.Join(outbox, "toBashrc"))
+	if d, _ := decidePreToolUse(fileInput("Write", filepath.Join(outbox, "toBashrc")), pol); d != "deny" {
+		t.Errorf("write through an own-scope symlink to a host file => %q, want deny", d)
 	}
 }
 
@@ -149,7 +218,7 @@ func TestEnvFilePolicy(t *testing.T) {
 	pol := envFilePolicy()
 
 	for _, c := range []struct{ tool, path, want string }{
-		{"Read", "/run/out/o1/draft.md", "allow"}, // own outbox: carve
+		{"Read", "/run/out/o1/draft.md", "allow"},  // own outbox: carve
 		{"Write", "/run/out/o1/draft.md", "allow"}, // own outbox: writable
 		{"Read", "/proj/main.go", "allow"},         // project: default-open
 		{"Read", "/etc/hostname", "allow"},         // external: default-open (no dance)

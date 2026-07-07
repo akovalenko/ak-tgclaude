@@ -3,6 +3,8 @@ package main
 import (
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -10,11 +12,17 @@ import (
 func TestSendDescriptorRenders(t *testing.T) {
 	f := &fakeSender{}
 	route := Route{ChatID: 9, ReplyTo: 3}
+	// A document descriptor now has its file opened (O_NOFOLLOW) by the delivery core,
+	// so it must point at a real file rather than a made-up path.
+	docPath := filepath.Join(t.TempDir(), "x.pdf")
+	if err := os.WriteFile(docPath, []byte("PDF"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	for _, d := range []*Descriptor{
 		{Kind: KindText, Text: "hi"},
 		{Kind: KindText, Text: "<b>x</b>", Format: FormatHTML},
 		{Kind: KindCode, Code: "package main", Language: "go"},
-		{Kind: KindDocument, Path: "/abs/x.pdf", Filename: "x.pdf"},
+		{Kind: KindDocument, Path: docPath, Filename: "x.pdf"},
 	} {
 		if _, err := sendDescriptor(context.Background(), d, route, f, nil, overflowSpill); err != nil {
 			t.Fatalf("sendDescriptor(%+v): %v", d, err)

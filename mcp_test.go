@@ -372,9 +372,89 @@ func TestMCPSendDocumentConfined(t *testing.T) {
 	if resp := callDoc("../../secret.txt"); !isToolError(resp) {
 		t.Errorf("traversal document path must be rejected: %v", resp)
 	}
+	// A symlink PLANTED IN the outbox (basename is legit, but the name is a link to a
+	// host secret) must be refused: the dispatcher runs unsandboxed and would follow it
+	// and read the secret in the clear. Basename-confinement alone does not catch this.
+	secret := filepath.Join(t.TempDir(), "id_rsa")
+	if err := os.WriteFile(secret, []byte("PRIVATE KEY"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(secret, filepath.Join(docDir, "evil-link")); err != nil {
+		t.Fatal(err)
+	}
+	if resp := callDoc("evil-link"); !isToolError(resp) {
+		t.Errorf("a symlink in the outbox must be rejected: %v", resp)
+	}
 	calls := f.snapshot()
 	if len(calls) != 1 || calls[0].kind != "document" {
 		t.Errorf("only the in-outbox document should have been delivered: %+v", calls)
+	}
+}
+
+// TestConfineDocAndOpenNoFollowRejectSymlink covers the two-layer symlink defense on
+// an outbox document directly: confineDoc refuses a planted symlink at build time (a
+// clear error), and openNoFollow refuses it at open time — the race-free enforcement
+// that holds even if a regular file is swapped for a symlink after the build check.
+func TestConfineDocAndOpenNoFollowRejectSymlink(t *testing.T) {
+	docDir := t.TempDir()
+	secret := filepath.Join(t.TempDir(), "secret")
+	if err := os.WriteFile(secret, []byte("BURN BEFORE READING"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(docDir, "link")
+	if err := os.Symlink(secret, link); err != nil {
+		t.Fatal(err)
+	}
+
+	// confineDoc: Lstat sees the symlink and refuses with a clear message.
+	if _, err := confineDoc(docDir, "link"); err == nil || !strings.Contains(err.Error(), "symlink") {
+		t.Errorf("confineDoc should reject a symlink with a clear error, got %v", err)
+	}
+
+	// openNoFollow: O_NOFOLLOW refuses to traverse the final-component symlink, so the
+	// secret is never opened even when the path is handed straight to the open.
+	if f, err := openNoFollow(link); err == nil {
+		f.Close()
+		t.Errorf("openNoFollow must refuse a symlink, but it opened %q", link)
+	}
+
+	// A regular file in the same outbox opens fine and yields its own bytes.
+	reg := filepath.Join(docDir, "reg")
+	if err := os.WriteFile(reg, []byte("hello"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	f, err := openNoFollow(reg)
+	if err != nil {
+		t.Fatalf("openNoFollow on a regular file: %v", err)
+	}
+	defer f.Close()
+	b, _ := io.ReadAll(f)
+	if string(b) != "hello" {
+		t.Errorf("openNoFollow read %q, want hello", b)
+	}
+}
+
+// TestReadOutboxBodyRefusesSymlink covers the text_file / code_file body sink: a body
+// path is confined and opened the same way as a document, so a symlink planted in the
+// outbox cannot launder a host secret into a message body.
+func TestReadOutboxBodyRefusesSymlink(t *testing.T) {
+	docDir := t.TempDir()
+	secret := filepath.Join(t.TempDir(), "secret")
+	if err := os.WriteFile(secret, []byte("secret body"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(secret, filepath.Join(docDir, "body")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := readOutboxBody(docDir, "body"); err == nil {
+		t.Error("readOutboxBody must refuse a symlink body file")
+	}
+	// A regular body file reads back verbatim.
+	if err := os.WriteFile(filepath.Join(docDir, "ok"), []byte("hi"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if s, err := readOutboxBody(docDir, "ok"); err != nil || s != "hi" {
+		t.Errorf("readOutboxBody regular file = %q, %v; want \"hi\", nil", s, err)
 	}
 }
 

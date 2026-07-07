@@ -6,6 +6,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -54,7 +55,7 @@ func (e *uploadError) Error() string { return e.msg }
 // deliver uploads the document and sends its URL on route r. size is the file size
 // the caller already stat'd (and found over the threshold). A file over the hard
 // cap is rejected before the uploader runs.
-func (u *uploader) deliver(ctx context.Context, d *Descriptor, r Route, s Sender, size int64) (int64, error) {
+func (u *uploader) deliver(ctx context.Context, d *Descriptor, r Route, s Sender, f *os.File, size int64) (int64, error) {
 	// The uploader is an operator script run UNSANDBOXED, and both the source path
 	// (arg1) and the destination name (arg2) carry a model-chosen basename — a
 	// naive script that splices them into a shell command or an ssh/scp/rsync remote
@@ -77,7 +78,7 @@ func (u *uploader) deliver(ctx context.Context, d *Descriptor, r Route, s Sender
 	if name == "" {
 		name = filepath.Base(d.Path)
 	}
-	url, err := u.run(ctx, d.Path, suggestName(name))
+	url, err := u.run(ctx, f, suggestName(name))
 	if err != nil {
 		return 0, err
 	}
@@ -114,11 +115,24 @@ func uploadNameOK(name string) bool {
 	return true
 }
 
-// run executes the uploader on file (passing the suggested destination name as
-// arg2) and returns the URL — the first non-blank line of stdout. A non-zero exit
-// or empty output is an *uploadError carrying the stderr tail.
-func (u *uploader) run(ctx context.Context, file, name string) (string, error) {
-	cmd := exec.CommandContext(ctx, u.command, file, name)
+// run executes the uploader on the already-open, symlink-vetted file (passing the
+// suggested destination name as arg2) and returns the URL — the first non-blank
+// line of stdout. A non-zero exit or empty output is an *uploadError carrying the
+// stderr tail.
+//
+// The operator command is an external program run UNSANDBOXED that would re-open a
+// path argument itself — and follow a symlink a responder planted in its writable
+// outbox straight to a host secret. So instead of a path we hand it the fd we
+// already opened with O_NOFOLLOW: ExtraFiles[0] becomes the child's fd 3 (0,1,2 are
+// stdio) with close-on-exec cleared, and arg1 is /proc/self/fd/3 — a re-open of THAT
+// resolves the exact inode we vetted, race-free, whatever the path now points to.
+// The uploader contract already separates the source (arg1) from the destination
+// name (arg2), so arg1 being a read handle rather than a real filename is fine.
+const uploaderSourceFd = "/proc/self/fd/3"
+
+func (u *uploader) run(ctx context.Context, file *os.File, name string) (string, error) {
+	cmd := exec.CommandContext(ctx, u.command, uploaderSourceFd, name)
+	cmd.ExtraFiles = []*os.File{file}
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr

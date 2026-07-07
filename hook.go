@@ -174,10 +174,24 @@ func appendHookLog(path, line string) {
 
 // decidePreToolUse returns "deny", "allow", or "" (defer).
 func decidePreToolUse(in *preToolUseInput, pol filePolicy) (decision, reason string) {
+	fp := in.ToolInput.FilePath
+	// The file tools FOLLOW symlinks, and an "allow" from this hook SHORT-CIRCUITS
+	// Claude Code's own (symlink-resolving) permission check — so a link a responder
+	// plants in its writable outbox would redirect a read/write to a denied target
+	// unless we resolve it here too. Match the symlink-resolved path against
+	// symlink-resolved roots: resolving the roots as well keeps the own-scope carve
+	// intact when a path PREFIX (e.g. /run -> /var/run, /tmp -> /private/tmp) is itself
+	// a symlink, while a link that resolves OUT of the own scope is caught by the mask.
+	resolved := resolveForPolicy(fp)
+
 	// Absolute deny first: host secrets, the token, operator deny_reads — never read
-	// or written by any file tool, wins over every allow below.
-	if p, ok := underAny(in.ToolInput.FilePath, pol.deny); ok {
+	// or written by any file tool, wins over every allow below. Checked on the lexical
+	// path AND on the resolved path (a symlink that lands on a denied target).
+	if p, ok := underAny(fp, pol.deny); ok {
 		return "deny", "ak-tgclaude hook: access to a protected path is denied: " + p
+	}
+	if p, ok := underAny(resolved, resolveRoots(pol.deny)); ok {
+		return "deny", "ak-tgclaude hook: access to a protected path is denied (via symlink): " + p
 	}
 
 	switch in.ToolName {
@@ -199,17 +213,24 @@ func decidePreToolUse(in *preToolUseInput, pol filePolicy) (decision, reason str
 		}
 		// Mirror the sandbox: an own-scope carve wins, then a masked root denies, else
 		// read is open — exactly what sandboxed Bash can read, so no project confinement
-		// and no Bash-cat detour for an ordinary external file.
-		if _, ok := underAny(in.ToolInput.FilePath, pol.readAllow); ok {
+		// and no Bash-cat detour for an ordinary external file. Match the RESOLVED path
+		// so a symlink planted in the own outbox cannot launder a read of a sibling
+		// outbox / another chat's transcript: the own-scope carve (more specific) still
+		// wins over the mask, but a link that resolves OUT of it falls through to it.
+		if _, ok := underAny(resolved, resolveRoots(pol.readAllow)); ok {
 			return "allow", "ak-tgclaude hook: read allowed (own scope)"
 		}
-		if r, ok := underAny(in.ToolInput.FilePath, pol.readDeny); ok {
+		if r, ok := underAny(resolved, resolveRoots(pol.readDeny)); ok {
 			return "deny", "ak-tgclaude hook: read of a masked location is denied: " + r
 		}
 		return "allow", "ak-tgclaude hook: read allowed"
 
 	case "Edit", "MultiEdit", "Write", "NotebookEdit":
-		if _, ok := underAny(in.ToolInput.FilePath, pol.writeRoots); ok {
+		// Write is a strict allowlist AND the bytes must land physically in the outbox:
+		// match the resolved path so a symlink already sitting in the outbox cannot
+		// redirect the write to a host file (e.g. ~/.bashrc). A fresh (not-yet-created)
+		// target resolves through its outbox parent and still matches.
+		if _, ok := underAny(resolved, resolveRoots(pol.writeRoots)); ok {
 			return "allow", "ak-tgclaude hook: write within the outbox"
 		}
 		return "deny", "ak-tgclaude hook: write is limited to the outbox " + fmtRoots(pol.writeRoots)
@@ -243,6 +264,40 @@ func absClean(p string) string {
 		p = a
 	}
 	return filepath.Clean(p)
+}
+
+// resolveForPolicy returns file's symlink-resolved absolute path for policy
+// matching. The file tools follow symlinks, so the deny/mask/allow roots must be
+// matched against the path the kernel will actually reach, not the lexical one. A
+// path that does not exist yet (a fresh Write target) has its existing parent
+// resolved and the final element re-attached, so a symlinked directory prefix is
+// still caught while a legitimate new outbox file still resolves under the outbox.
+func resolveForPolicy(file string) string {
+	if file == "" {
+		return ""
+	}
+	abs := absClean(file)
+	if r, err := filepath.EvalSymlinks(abs); err == nil {
+		return r
+	}
+	dir, base := filepath.Split(abs)
+	if rd, err := filepath.EvalSymlinks(filepath.Clean(dir)); err == nil {
+		return filepath.Join(rd, base)
+	}
+	return abs
+}
+
+// resolveRoots returns roots with each entry symlink-resolved (best-effort), so a
+// resolved file path is matched against resolved roots — consistent even when a
+// path prefix (e.g. /run -> /var/run, /tmp -> /private/tmp) is itself a symlink. A
+// root that does not resolve (nonexistent in a test, say) falls back to its lexical
+// clean form, so the match degrades to the original lexical behavior.
+func resolveRoots(roots []string) []string {
+	out := make([]string, len(roots))
+	for i, r := range roots {
+		out[i] = resolveForPolicy(r)
+	}
+	return out
 }
 
 // fmtRoots renders roots for a deny reason.

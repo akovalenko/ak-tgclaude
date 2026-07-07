@@ -201,7 +201,12 @@ func TestClientSendDocument(t *testing.T) {
 		t.Fatal(err)
 	}
 	c := &Client{Token: "T", BaseURL: srv.URL, HTTP: srv.Client()}
-	id, err := c.SendDocument(context.Background(), Route{ChatID: 55}, p, "report.pdf", "cap", "", false)
+	fh, err := os.Open(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer fh.Close()
+	id, err := c.SendDocument(context.Background(), Route{ChatID: 55}, fh, "report.pdf", "cap", "", false)
 	if err != nil {
 		t.Fatalf("SendDocument: %v", err)
 	}

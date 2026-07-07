@@ -16,6 +16,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 )
 
@@ -487,7 +488,7 @@ func botAttach(d *Descriptor) []TranscriptAttach {
 		name = filepath.Base(d.Path)
 	}
 	var size int64
-	if fi, err := os.Stat(d.Path); err == nil {
+	if fi, err := os.Lstat(d.Path); err == nil {
 		size = fi.Size()
 	}
 	return []TranscriptAttach{{Kind: "document", Name: name, Size: size}}
@@ -571,14 +572,45 @@ func confineDoc(docDir, p string) (string, error) {
 		return "", fmt.Errorf("invalid document path %q", p)
 	}
 	full := filepath.Join(docDir, base)
-	info, err := os.Stat(full)
+	info, err := os.Lstat(full)
 	if err != nil {
 		return "", fmt.Errorf("attachment %q not found in your outbox directory (write it there first)", base)
 	}
 	if info.IsDir() {
 		return "", fmt.Errorf("attachment %q is a directory", base)
 	}
+	// A symlink is never a legitimate outbox attachment, and the dispatcher that
+	// opens it runs UNSANDBOXED — a link to a host secret (bot.toml, ~/.ssh/id_rsa)
+	// would be read in the clear, past the responder's inode-pinned sandbox masks
+	// (a symlink's target is not read at creation, so those masks never fire on it).
+	// Refuse it here for a clear early error; the O_NOFOLLOW open at send time (see
+	// openNoFollow) is the race-free enforcement that a symlink swap cannot slip.
+	if info.Mode()&os.ModeSymlink != 0 {
+		return "", fmt.Errorf("attachment %q is a symlink; outbox files must be regular files", base)
+	}
 	return full, nil
+}
+
+// openNoFollow opens full for reading, refusing to traverse a final-component
+// symlink (O_NOFOLLOW). It is the single vetted open for an outbox file: the caller
+// hands the returned *os.File downstream (the multipart body, the uploader's
+// inherited fd) instead of re-opening the path, so there is no check-then-open
+// window a symlink swap could exploit — the fd is pinned to the inode we vetted.
+func openNoFollow(full string) (*os.File, error) {
+	f, err := os.OpenFile(full, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
+	if err != nil {
+		return nil, err
+	}
+	fi, err := f.Stat()
+	if err != nil {
+		f.Close()
+		return nil, err
+	}
+	if fi.IsDir() {
+		f.Close()
+		return nil, fmt.Errorf("%q is a directory", filepath.Base(full))
+	}
+	return f, nil
 }
 
 // maxBodyFileBytes caps a text_file / code_file body so a stray huge file cannot
@@ -597,10 +629,15 @@ func readOutboxBody(docDir, name string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if info, err := os.Stat(full); err == nil && info.Size() > maxBodyFileBytes {
+	f, err := openNoFollow(full)
+	if err != nil {
+		return "", fmt.Errorf("reading body file %q: %w", filepath.Base(name), err)
+	}
+	defer f.Close()
+	if info, err := f.Stat(); err == nil && info.Size() > maxBodyFileBytes {
 		return "", fmt.Errorf("body file %q too large (%d bytes, max %d)", filepath.Base(name), info.Size(), maxBodyFileBytes)
 	}
-	b, err := os.ReadFile(full)
+	b, err := io.ReadAll(f)
 	if err != nil {
 		return "", fmt.Errorf("reading body file %q: %w", filepath.Base(name), err)
 	}

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"strings"
 )
@@ -17,12 +18,23 @@ import (
 // as a URL instead of a Telegram attachment (which caps near 50 MB).
 func sendDescriptor(ctx context.Context, d *Descriptor, r Route, s Sender, up *uploader, overflow string) ([]int64, error) {
 	if d.Kind == KindDocument {
-		if up != nil {
-			if info, err := os.Stat(d.Path); err == nil && info.Size() > up.thresholdBytes {
-				return oneID(up.deliver(ctx, d, r, s, info.Size()))
-			}
+		// Open the confined path ONCE, refusing a final-component symlink (O_NOFOLLOW),
+		// and hand that single vetted fd to whichever sink delivers it — the multipart
+		// body or the uploader's inherited fd. Re-opening d.Path in each sink would let
+		// a responder swap the file for a symlink to a host secret between check and use.
+		f, err := openNoFollow(d.Path)
+		if err != nil {
+			return nil, err
 		}
-		return oneID(s.SendDocument(ctx, r, d.Path, d.Filename, d.Caption, "", d.Silent))
+		defer f.Close()
+		info, err := f.Stat()
+		if err != nil {
+			return nil, err
+		}
+		if up != nil && info.Size() > up.thresholdBytes {
+			return oneID(up.deliver(ctx, d, r, s, f, info.Size()))
+		}
+		return oneID(s.SendDocument(ctx, r, f, d.Filename, d.Caption, "", d.Silent))
 	}
 	text, mode := renderMessage(d)
 	// Guard: validate Telegram HTML before sending, so the model gets ALL unsupported
@@ -76,16 +88,20 @@ func spillDocument(ctx context.Context, d *Descriptor, r Route, s Sender) ([]int
 		return nil, err
 	}
 	defer os.Remove(tmp.Name())
+	defer tmp.Close()
 	if _, err := tmp.WriteString(spillPayload(d)); err != nil {
-		tmp.Close()
 		return nil, err
 	}
-	tmp.Close()
+	// Rewind: SendDocument now reads from the open file (dispatcher-owned, so no
+	// symlink concern), and we just wrote to the end of it.
+	if _, err := tmp.Seek(0, io.SeekStart); err != nil {
+		return nil, err
+	}
 	caption := d.Caption
 	if caption == "" {
 		caption = spillCaption
 	}
-	return oneID(s.SendDocument(ctx, r, tmp.Name(), spillName(d), caption, "", d.Silent))
+	return oneID(s.SendDocument(ctx, r, tmp, spillName(d), caption, "", d.Silent))
 }
 
 // oneID lifts a single-message send result into the []int64 return shape.
