@@ -937,6 +937,11 @@ func runDispatch(args []string) error {
 	if err != nil {
 		return usageError{err}
 	}
+	// Resolve a bot_token_env source now (reads + unsets the env var) so the token is
+	// in memory and no child inherits it. Dispatcher-only; the scaffold path skips it.
+	if err := cfg.resolveBotToken(); err != nil {
+		return usageError{err}
+	}
 
 	store, err := LoadSessionStore(cfg.SessionDir(), cfg.EphemeralSessions)
 	if err != nil {

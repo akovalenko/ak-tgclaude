@@ -122,19 +122,28 @@ type scaffoldParams struct {
 // knob added to one but not the other). cacheDir and outboxRoot are the
 // caller's runtime dirs, the only inputs that differ between the two.
 func (c *Config) scaffoldParams(cacheDir, outboxRoot string) scaffoldParams {
+	// When the token rides an env var (bot_token_env) instead of the config file:
+	// scrub the var name from the responder's sandbox, and deny NO token file (there
+	// is none — a bare-file token deny is exactly what we are avoiding).
+	tokenFile := c.ConfigPath
+	denyEnvs := c.DenyEnvs
+	if c.BotTokenEnv != "" {
+		tokenFile = ""
+		denyEnvs = append(append([]string{}, c.DenyEnvs...), c.BotTokenEnv)
+	}
 	return scaffoldParams{
 		CacheDir:       cacheDir,
 		OutboxRoot:     outboxRoot,
 		TranscriptRoot: c.TranscriptRoot(),
 		UsageLogOn:     c.UsageLog != "",
-		TokenFile:      c.ConfigPath,
+		TokenFile:      tokenFile,
 		Project:        c.Project,
 		WireSkills:     c.WireSkills,
 		AddSkills:      c.AddSkills,
 		AddAgents:      c.AddAgents,
 		DenyRead:       c.DenyRead,
 		Tools:          c.Tools,
-		DenyEnvVars:    c.DenyEnvs,
+		DenyEnvVars:    denyEnvs,
 		NetworkDomains: c.AllowDomains,
 		UploadNote:     uploadNote(c.UploadCommand, c.UploadThresholdMB, c.UploadMaxMB),
 		HookBinary:     selfExePath(),

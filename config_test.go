@@ -168,6 +168,100 @@ func TestParseConfigDenyEnvs(t *testing.T) {
 	}
 }
 
+func TestParseConfigBotTokenEnv(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "bot.toml")
+	if err := os.WriteFile(path, []byte("bot_token_env = \"MY_BOT_TOKEN\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	c, err := parseConfig([]string{"--config", path})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.BotTokenEnv != "MY_BOT_TOKEN" {
+		t.Errorf("bot_token_env = %q, want MY_BOT_TOKEN", c.BotTokenEnv)
+	}
+}
+
+func TestBotTokenFlagClearsEnvSource(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "bot.toml")
+	if err := os.WriteFile(path, []byte("bot_token_env = \"MY_BOT_TOKEN\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	c, err := parseConfig([]string{"--config", path, "--bot-token", "flagtok"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.BotToken != "flagtok" || c.BotTokenEnv != "" {
+		t.Errorf("--bot-token should win and clear the env source: BotToken=%q BotTokenEnv=%q", c.BotToken, c.BotTokenEnv)
+	}
+}
+
+func TestResolveBotTokenFromEnv(t *testing.T) {
+	t.Setenv("AK_TEST_BOT_TOKEN", "secret-123")
+	c := &Config{BotTokenEnv: "AK_TEST_BOT_TOKEN"}
+	if err := c.resolveBotToken(); err != nil {
+		t.Fatalf("resolveBotToken: %v", err)
+	}
+	if c.BotToken != "secret-123" {
+		t.Errorf("BotToken = %q, want secret-123", c.BotToken)
+	}
+	// The var must be UNSET after resolve so exec'd children cannot inherit the token.
+	if _, ok := os.LookupEnv("AK_TEST_BOT_TOKEN"); ok {
+		t.Error("bot_token_env must be unset after resolveBotToken")
+	}
+}
+
+func TestResolveBotTokenEnvEmpty(t *testing.T) {
+	// Name set but the variable is absent/empty -> error, not a silent empty token.
+	c := &Config{BotTokenEnv: "AK_TEST_DEFINITELY_ABSENT_VAR"}
+	if err := c.resolveBotToken(); err == nil {
+		t.Fatal("expected error when bot_token_env names an unset var")
+	}
+}
+
+func TestResolveBotTokenInlineNoop(t *testing.T) {
+	// An already-present token (inline or --bot-token) short-circuits: no env read.
+	c := &Config{BotToken: "inline"}
+	if err := c.resolveBotToken(); err != nil {
+		t.Fatalf("resolveBotToken: %v", err)
+	}
+	if c.BotToken != "inline" {
+		t.Errorf("inline token clobbered: %q", c.BotToken)
+	}
+}
+
+func TestValidateBotTokenSources(t *testing.T) {
+	valid := func() *Config {
+		return &Config{
+			Profile: ProfileQA, Responder: ResponderClaude, Project: "/p",
+			MaxConcurrent: 1, MaxIncomingMB: 20, OutboxTTL: "2h", Overflow: overflowSpill,
+		}
+	}
+	// env-var source alone validates (its value is read later, at dispatch startup).
+	c := valid()
+	c.BotTokenEnv = "SOME_VAR"
+	if err := c.validate(); err != nil {
+		t.Errorf("bot_token_env alone should validate: %v", err)
+	}
+	// inline token alone validates.
+	c = valid()
+	c.BotToken = "x"
+	if err := c.validate(); err != nil {
+		t.Errorf("inline token alone should validate: %v", err)
+	}
+	// Neither source -> error.
+	if err := valid().validate(); err == nil {
+		t.Error("expected error with no token source")
+	}
+	// Both sources -> ambiguous, error.
+	c = valid()
+	c.BotToken = "x"
+	c.BotTokenEnv = "SOME_VAR"
+	if err := c.validate(); err == nil {
+		t.Error("expected error when both bot_token and bot_token_env are set")
+	}
+}
+
 func TestParseConfigAllowDomains(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "bot.toml")
 	if err := os.WriteFile(path, []byte("allow_domains = [\"api.github.com\"]\n"), 0o600); err != nil {

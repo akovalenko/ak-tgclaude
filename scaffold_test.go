@@ -406,6 +406,38 @@ func TestBuildSettingsNoTokenFile(t *testing.T) {
 	}
 }
 
+func TestScaffoldParamsBotTokenEnv(t *testing.T) {
+	// Token via env var: scrub the var NAME from the responder, and deny NO token
+	// file (there is none — a bare-file token deny is exactly what we avoid).
+	c := &Config{BotTokenEnv: "MY_BOT_TOKEN", ConfigPath: "/etc/bot.toml", DenyEnvs: []string{"OTHER"}}
+	p := c.scaffoldParams("/c", "/run/out")
+	if p.TokenFile != "" {
+		t.Errorf("env-token config must not deny a token file, TokenFile=%q", p.TokenFile)
+	}
+	if !contains(p.DenyEnvVars, "MY_BOT_TOKEN") {
+		t.Errorf("bot_token_env name must be scrubbed, DenyEnvVars=%v", p.DenyEnvVars)
+	}
+	s := buildSettings(scaffoldParams{CacheDir: "/c", TokenFile: p.TokenFile, DenyEnvVars: p.DenyEnvVars})
+	found := false
+	for _, e := range s.Sandbox.Credentials.EnvVars {
+		if e.Name == "MY_BOT_TOKEN" && e.Mode == "deny" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("MY_BOT_TOKEN not scrubbed in credentials.envVars: %+v", s.Sandbox.Credentials.EnvVars)
+	}
+	for _, f := range s.Sandbox.Credentials.Files {
+		if f.Path == "/etc/bot.toml" {
+			t.Error("env-token config must not deny the config file as a token file")
+		}
+	}
+	// Contrast: an inline token still denies the config file that holds it.
+	if p2 := (&Config{BotToken: "raw", ConfigPath: "/etc/bot.toml"}).scaffoldParams("/c", "/o"); p2.TokenFile != "/etc/bot.toml" {
+		t.Errorf("inline token should still deny the config file, TokenFile=%q", p2.TokenFile)
+	}
+}
+
 func TestMaterializeScaffoldWritesValidJSON(t *testing.T) {
 	cwd := t.TempDir()
 	if err := materializeScaffold(cwd, scaffoldParams{CacheDir: "/c", TokenFile: "/cfg/bot.toml"}); err != nil {

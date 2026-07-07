@@ -104,6 +104,16 @@ type Config struct {
 	// never exported to the environment. Inline in TOML or via --bot-token.
 	BotToken string `toml:"bot_token"`
 
+	// BotTokenEnv, when set, names an environment variable the dispatcher reads the
+	// bot token from at startup — an alternative to an inline bot_token / --bot-token.
+	// The dispatcher UNSETS it immediately after reading, so no child (above all the
+	// sandboxed responder) inherits the token; the name is also scrubbed from the
+	// responder's sandbox (sandbox.credentials.envVars). Mutually exclusive with an
+	// inline bot_token. Preferred over an inline token in a config FILE: there is then
+	// no token file to deny — and a bare-file deny is bypassable by rewrite (see the
+	// README "Sandbox masking is a start-of-command snapshot" section).
+	BotTokenEnv string `toml:"bot_token_env"`
+
 	// Profile is the responder access profile (default "qa", read-only).
 	Profile Profile `toml:"profile"`
 
@@ -573,6 +583,7 @@ func decodeConfig(args []string) (*Config, error) {
 	// Flags override file values when set.
 	if *botToken != "" {
 		c.BotToken = *botToken
+		c.BotTokenEnv = "" // an explicit --bot-token wins; ignore any configured env source
 	}
 	if *profile != "" {
 		c.Profile = Profile(*profile)
@@ -1025,9 +1036,31 @@ func (c *Config) OutboxTTLDur() time.Duration {
 	return d
 }
 
+// resolveBotToken loads the token from the configured env var (bot_token_env) when
+// no inline/flag token is set, then UNSETS that env var so no exec'd child — above
+// all the sandboxed responder and the MCP subprocess — inherits the token. The
+// dispatcher calls this at startup; the scaffold path never does (it needs the env
+// var NAME to scrub, not the value, and the var may be unset at scaffold time).
+// No-op when the token is already present (inline bot_token or --bot-token).
+func (c *Config) resolveBotToken() error {
+	if c.BotToken != "" || c.BotTokenEnv == "" {
+		return nil
+	}
+	v := os.Getenv(c.BotTokenEnv)
+	if v == "" {
+		return fmt.Errorf("bot_token_env %q is unset or empty in the dispatcher environment", c.BotTokenEnv)
+	}
+	c.BotToken = v
+	os.Unsetenv(c.BotTokenEnv)
+	return nil
+}
+
 func (c *Config) validate() error {
-	if c.BotToken == "" {
-		return fmt.Errorf("bot token is required (bot_token in config or --bot-token)")
+	if c.BotToken == "" && c.BotTokenEnv == "" {
+		return fmt.Errorf("bot token is required (bot_token or bot_token_env in config, or --bot-token)")
+	}
+	if c.BotToken != "" && c.BotTokenEnv != "" {
+		return fmt.Errorf("set only one of bot_token / bot_token_env (got both)")
 	}
 	switch c.Profile {
 	case ProfileQA:
