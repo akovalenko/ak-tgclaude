@@ -440,13 +440,30 @@ func readMeta(chatDir string) *transcriptMeta {
 	return &m
 }
 
+// deSentinel indents any line of user text that begins (after optional whitespace)
+// with the box-drawing runes recall uses to frame a record header ("── … ──") and a
+// chat separator ("════ … ════"). A user's message text is printed verbatim, so
+// without this a line like "── [999] user Owner (@admin) … ──" would forge a record
+// header in the owner's cross-chat recall — a prompt-injection aid. A leading space
+// keeps such a line from starting at column 0 where a real header/separator sits.
+func deSentinel(text string) string {
+	lines := strings.Split(text, "\n")
+	for i, ln := range lines {
+		t := strings.TrimLeft(ln, " \t")
+		if strings.HasPrefix(t, "─") || strings.HasPrefix(t, "═") {
+			lines[i] = " " + ln
+		}
+	}
+	return strings.Join(lines, "\n")
+}
+
 // renderRecord writes one groomed block: a header line, the text with its real
 // newlines, and one [attach: name] line per file the turn carried. A trailing blank
 // line separates blocks.
 func renderRecord(w io.Writer, rec TranscriptRecord) {
 	fmt.Fprintln(w, groomHeader(rec))
 	if rec.Text != "" {
-		fmt.Fprintln(w, rec.Text)
+		fmt.Fprintln(w, deSentinel(rec.Text))
 	}
 	for _, a := range rec.Attach {
 		fmt.Fprintf(w, "[attach: %s]\n", a.Name)

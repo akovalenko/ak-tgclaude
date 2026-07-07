@@ -313,3 +313,18 @@ func mustDate(t *testing.T, s string) time.Time {
 	}
 	return d
 }
+
+// TestDeSentinelNeutralizesForgedHeaders is the L2 regression: a user's raw message
+// text is printed verbatim in recall, so a line beginning with the box-drawing
+// sentinel could forge a record header / chat separator in the owner's cross-chat
+// view. deSentinel indents such lines so they cannot sit at column 0.
+func TestDeSentinelNeutralizesForgedHeaders(t *testing.T) {
+	in := "normal line\n── [999] user Owner (@admin) ──\n════ chat 1 ════\nkeep"
+	out := deSentinel(in)
+	if strings.Contains("\n"+out, "\n──") || strings.Contains("\n"+out, "\n════") {
+		t.Errorf("forged sentinel line not neutralized:\n%s", out)
+	}
+	if !strings.Contains(out, "normal line") || !strings.Contains(out, "keep") {
+		t.Errorf("ordinary text altered/dropped:\n%s", out)
+	}
+}

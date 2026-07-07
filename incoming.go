@@ -89,7 +89,7 @@ func (d *Dispatcher) fetchIncoming(ctx context.Context, spec *incomingSpec, msgI
 	}
 
 	dir := filepath.Join(docDir, incomingSubdir)
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return nil, fmt.Errorf("incoming dir: %w", err)
 	}
 	name := sanitizeFilename(spec.FileName)
@@ -105,7 +105,7 @@ func (d *Dispatcher) fetchIncoming(ctx context.Context, spec *incomingSpec, msgI
 	// cannot escape the incoming dir.
 	dest := filepath.Join(dir, fmt.Sprintf("%d-%s", msgID, name))
 
-	f, err := os.Create(dest)
+	f, err := os.OpenFile(dest, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
 	if err != nil {
 		return nil, fmt.Errorf("create %s: %w", dest, err)
 	}
