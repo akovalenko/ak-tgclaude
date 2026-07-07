@@ -36,18 +36,17 @@ func TestBuildSettingsShape(t *testing.T) {
 	if !contains(s.Permissions.Deny, "Read(//cfg/bot.toml)") {
 		t.Errorf("permissions.deny should back-stop the token file, got %v", s.Permissions.Deny)
 	}
-	// denyRead masks host history + other sessions' transcripts, plus the
-	// sibling-outbox root (Bash isn't hook-scoped); own outbox is carved back per
-	// invocation.
-	if got := s.Sandbox.Filesystem.DenyRead; len(got) != 3 ||
-		got[0] != "~/.claude/history.jsonl" || got[1] != "~/.claude/projects" || got[2] != "/run/out" {
-		t.Errorf("sandbox denyRead = %v, want [~/.claude/history.jsonl ~/.claude/projects /run/out]", got)
+	// denyRead now carries only the sibling-outbox root (Bash isn't hook-scoped);
+	// own outbox is carved back per invocation. Host secrets moved to the
+	// whole-directory ~/.claude / ~/.ssh deny in credentials.files.
+	if got := s.Sandbox.Filesystem.DenyRead; len(got) != 1 || got[0] != "/run/out" {
+		t.Errorf("sandbox denyRead = %v, want [/run/out]", got)
 	}
-	// credentials.files: the host secrets (SSH keys, Claude token) always, then
-	// the bot's config file since the token lives there.
+	// credentials.files: the host secret DIRECTORIES (~/.ssh, ~/.claude) always,
+	// then the bot's config file since the token lives there.
 	files := s.Sandbox.Credentials.Files
 	if len(files) != 3 || files[0].Path != "~/.ssh" ||
-		files[1].Path != "~/.claude/.credentials.json" || files[2].Path != "/cfg/bot.toml" {
+		files[1].Path != "~/.claude" || files[2].Path != "/cfg/bot.toml" {
 		t.Errorf("credentials.files = %+v", files)
 	}
 	for _, f := range files {
@@ -253,8 +252,9 @@ func TestBuildSettingsDenyRead(t *testing.T) {
 		DenyRead:   []string{"/secret/a", "~/b"},
 	})
 
-	// Bash layer: host secrets (2), then operator paths, then the outbox root.
-	want := []string{"~/.claude/history.jsonl", "~/.claude/projects", "/secret/a", "~/b", "/run/out"}
+	// Bash layer: operator paths, then the outbox root (host secrets are now the
+	// whole-directory ~/.claude / ~/.ssh deny in credentials.files, not here).
+	want := []string{"/secret/a", "~/b", "/run/out"}
 	got := s.Sandbox.Filesystem.DenyRead
 	if len(got) != len(want) {
 		t.Fatalf("denyRead = %v, want %v", got, want)
@@ -401,7 +401,7 @@ func TestBuildSettingsNoTokenFile(t *testing.T) {
 	// Even without a bot token, the host secrets are always denied; only the bot
 	// config file is absent.
 	files := s.Sandbox.Credentials.Files
-	if len(files) != 2 || files[0].Path != "~/.ssh" || files[1].Path != "~/.claude/.credentials.json" {
+	if len(files) != 2 || files[0].Path != "~/.ssh" || files[1].Path != "~/.claude" {
 		t.Errorf("host secrets should always be denied (no token), got %+v", files)
 	}
 }

@@ -223,25 +223,34 @@ func frontmatterTools(tools []string) []string {
 	return out
 }
 
-// hostSecretCredFiles are host credential paths the sandboxed shell must never
-// read: SSH private keys and Claude Code's own auth token. `~/` is expanded by
-// the sandbox to the responder's home. Denying them does NOT break the
-// responder's own `claude -p` auth — the parent process reads its credentials
-// unsandboxed; only the Bash tools it spawns are confined (so a prompt-injected
-// `cat ~/.ssh/id_rsa` is masked). Unconditional (independent of --config).
+// hostSecretCredFiles are host credential DIRECTORIES the sandboxed shell must
+// never read: the SSH dir and Claude Code's whole home. `~/` is expanded by the
+// sandbox to the responder's home. Denying them does NOT break the responder's
+// own `claude -p` auth — the parent process reads its credentials unsandboxed;
+// only the Bash tools it spawns are confined (so a prompt-injected `cat
+// ~/.ssh/id_rsa` is masked). Unconditional (independent of --config).
+//
+// These are whole DIRECTORIES on purpose. bwrap masks a directory that exists at
+// namespace setup as an empty overlay covering its whole subtree, which is robust
+// against the two mask windows a bare-FILE deny is exposed to: a file created
+// AFTER the command starts, and — the sharp one — a file replaced by rename
+// (atomic write-temp+rename, e.g. how ~/.claude/.credentials.json is rewritten on
+// token refresh, which would otherwise slip past a file-level mask). Denying
+// ~/.claude (not just .credentials.json) also folds in history.jsonl and the
+// other sessions' transcripts under projects/ in one entry. See the README
+// "Sandbox masking is a start-of-command snapshot" section.
 var hostSecretCredFiles = []string{
 	"~/.ssh",
-	"~/.claude/.credentials.json",
+	"~/.claude",
 }
 
 // hostSecretDenyRead are sensitive-but-not-credential host paths hidden from the
-// sandboxed shell (so they go in filesystem.denyRead, not the credentials
-// block): Claude Code's cross-session prompt/command history and the transcripts
-// of the operator's other sessions (which may quote secrets from that work).
-var hostSecretDenyRead = []string{
-	"~/.claude/history.jsonl",
-	"~/.claude/projects",
-}
+// sandboxed shell via filesystem.denyRead (not the credentials block). It is now
+// empty: Claude Code's cross-session history (~/.claude/history.jsonl) and the
+// other sessions' transcripts (~/.claude/projects) are already covered by the
+// whole-directory ~/.claude deny in hostSecretCredFiles above. Kept as a seam for
+// any future non-credential host path a directory deny does not subsume.
+var hostSecretDenyRead = []string{}
 
 // hostSecretHookDeny is the host-secret set as ABSOLUTE paths for the hook's
 // file-tool deny list. The Read tool is unsandboxed (only the hook gates it), so
@@ -356,8 +365,8 @@ func buildSettings(p scaffoldParams) *claudeSettings {
 		denyReadFS = append(denyReadFS, p.TranscriptRoot)
 	}
 
-	// credentials.files: SSH keys + Claude's auth token (always), plus the bot's
-	// own config file when the token lives there.
+	// credentials.files: the host secret dirs (~/.ssh, ~/.claude) always, plus the
+	// bot's own config file when the token lives there.
 	credFiles := make([]credFile, 0, len(hostSecretCredFiles)+1)
 	for _, path := range hostSecretCredFiles {
 		credFiles = append(credFiles, credFile{Path: path, Mode: "deny"})
