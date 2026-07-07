@@ -33,7 +33,7 @@ func TestBuildSettingsShape(t *testing.T) {
 	if len(s.Permissions.Allow) != 0 {
 		t.Errorf("static settings should carry no permissions.allow (granted via --allowedTools), got %v", s.Permissions.Allow)
 	}
-	if !contains(s.Permissions.Deny, "Read(//cfg/bot.toml)") || !contains(s.Permissions.Deny, "Read(//cfg/bot.toml/**)") {
+	if !contains(s.Permissions.Deny, "Read(//cfg/bot.toml)") {
 		t.Errorf("permissions.deny should back-stop the token file, got %v", s.Permissions.Deny)
 	}
 	// denyRead masks host history + other sessions' transcripts, plus the
@@ -88,9 +88,9 @@ func TestBuildSettingsPermissionDenyBackstop(t *testing.T) {
 	})
 	deny := s.Permissions.Deny
 	for _, want := range []string{
-		"Read(//cfg/bot.toml)", "Read(//cfg/bot.toml/**)", // token
-		"Read(//home/op/.aws)", "Read(//home/op/.aws/**)", // operator secret — equal to built-ins
-		"Read(//mnt/secrets/prod.env)", "Read(//mnt/secrets/prod.env/**)",
+		"Read(//cfg/bot.toml)",         // token
+		"Read(//home/op/.aws)",         // operator secret — equal to built-ins
+		"Read(//mnt/secrets/prod.env)", // operator secret
 	} {
 		if !contains(deny, want) {
 			t.Errorf("permissions.deny missing %q, got %v", want, deny)
@@ -99,12 +99,20 @@ func TestBuildSettingsPermissionDenyBackstop(t *testing.T) {
 	// A host secret is backstopped too (path is home-relative, so match by suffix).
 	sshBackstopped := false
 	for _, d := range deny {
-		if strings.HasSuffix(d, ".ssh/**)") {
+		if strings.HasSuffix(d, ".ssh)") {
 			sshBackstopped = true
 		}
 	}
 	if !sshBackstopped {
 		t.Errorf("permissions.deny should back-stop the host ssh key, got %v", deny)
+	}
+	// No rule carries a `/**` subtree suffix: a directory deny already covers its
+	// contents, and `/**` on a file path corrupts the sandbox mask (bwrap aborts and
+	// the responder's sandboxed shell never starts). See permissionDenyRules.
+	for _, d := range deny {
+		if strings.HasSuffix(d, "/**)") {
+			t.Errorf("deny rule must not carry a /** subtree suffix: %q", d)
+		}
 	}
 	// Every rule is //-anchored (absolute) — a single-/ rule would resolve relative
 	// to the settings file and protect the wrong path.

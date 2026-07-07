@@ -259,15 +259,20 @@ func hostSecretHookDeny() []string {
 // starved out — and a Read rule also covers the Grep and Glob tools (they read file
 // content/names), closing that leak the hook does not gate. Absolute paths take the
 // `//` anchor: a single leading `/` would resolve relative to the settings file,
-// silently protecting the wrong path. Each path gets an exact-node rule and a
-// subtree rule, so it covers whether it is a file or a directory.
+// silently protecting the wrong path. Each path gets ONE exact-node rule and no
+// `/**` subtree suffix: a directory deny already covers its contents (Read, Grep
+// and Glob all refuse a path inside a denied directory), so the subtree rule is
+// redundant — and on a FILE path it is actively harmful, corrupting the sandbox
+// read-deny mask (bwrap cannot create a subtree mount under a regular file and
+// aborts, so the responder's sandboxed shell never starts at all). A path may be a
+// file or a directory and can even flip after the project starts, so we never emit `/**`.
 func permissionDenyRules(absPaths []string) []string {
 	var out []string
 	for _, p := range absPaths {
 		if !filepath.IsAbs(p) {
 			continue // a `//`-anchored rule needs an absolute path; skip anything else
 		}
-		out = append(out, "Read(/"+p+")", "Read(/"+p+"/**)")
+		out = append(out, "Read(/"+p+")")
 	}
 	return dedupStrings(out)
 }
