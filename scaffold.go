@@ -289,6 +289,13 @@ func hostSecretHookDeny() []string {
 // read-deny mask (bwrap cannot create a subtree mount under a regular file and
 // aborts, so the responder's sandboxed shell never starts at all). A path may be a
 // file or a directory and can even flip after the project starts, so we never emit `/**`.
+//
+// Each secret is denied under BOTH its lexical spelling AND its symlink-resolved one.
+// The core matches this rule lexically, so if the path (or a parent) is a symlink and
+// the fail-open hook is starved out, a read of the real target would slip past a rule
+// written only for the link. EvalSymlinks needs the whole path to exist; a dangling or
+// not-yet-created link resolves to nothing and is skipped — there is no target to leak
+// yet, and the secret audit flags the symlink so the operator can make it a real dir.
 func permissionDenyRules(absPaths []string) []string {
 	var out []string
 	for _, p := range absPaths {
@@ -296,6 +303,9 @@ func permissionDenyRules(absPaths []string) []string {
 			continue // a `//`-anchored rule needs an absolute path; skip anything else
 		}
 		out = append(out, "Read(/"+p+")")
+		if r, err := filepath.EvalSymlinks(p); err == nil && r != p && filepath.IsAbs(r) {
+			out = append(out, "Read(/"+r+")")
+		}
 	}
 	return dedupStrings(out)
 }

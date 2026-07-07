@@ -122,6 +122,51 @@ func TestBuildSettingsPermissionDenyBackstop(t *testing.T) {
 	}
 }
 
+// permissionDenyRules denies each secret under BOTH its lexical and its
+// symlink-resolved spelling, so a starved fail-open hook cannot be dodged by a
+// symlinked deny path. A dangling link (no target) yields only the lexical rule; a
+// plain real directory yields exactly one rule (no spurious duplicate).
+func TestPermissionDenyRulesDoubleDenySymlink(t *testing.T) {
+	// Resolve the temp base first: if TMPDIR itself has a symlinked component, an
+	// unresolved base would make even a plain dir emit a second (resolved) rule and
+	// break the exact-count assertions below.
+	base, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	realSecret := filepath.Join(base, "real")
+	if err := os.Mkdir(realSecret, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(base, "link")
+	if err := os.Symlink(realSecret, link); err != nil {
+		t.Fatal(err)
+	}
+
+	// A symlinked deny path: both the link and its resolved target are denied.
+	rules := permissionDenyRules([]string{link})
+	if !contains(rules, "Read(/"+link+")") {
+		t.Errorf("want lexical deny for the link %q, got %v", link, rules)
+	}
+	if !contains(rules, "Read(/"+realSecret+")") {
+		t.Errorf("want resolved deny for the target %q, got %v", realSecret, rules)
+	}
+
+	// A dangling link resolves to nothing: only the lexical rule survives.
+	dangling := filepath.Join(base, "dangling")
+	if err := os.Symlink(filepath.Join(base, "nope"), dangling); err != nil {
+		t.Fatal(err)
+	}
+	if got := permissionDenyRules([]string{dangling}); len(got) != 1 || got[0] != "Read(/"+dangling+")" {
+		t.Errorf("dangling link: want only the lexical rule, got %v", got)
+	}
+
+	// A plain real directory (no symlink in the path): exactly one rule, no duplicate.
+	if got := permissionDenyRules([]string{realSecret}); len(got) != 1 || got[0] != "Read(/"+realSecret+")" {
+		t.Errorf("plain dir: want exactly one rule, got %v", got)
+	}
+}
+
 func TestBuildSettingsDenyWrite(t *testing.T) {
 	// No ProjectDir (a bare buildSettings, e.g. a unit test) => no denyWrite, so the
 	// existing shape tests keep their expectations.
