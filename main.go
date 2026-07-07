@@ -24,6 +24,9 @@ commands:
              responder's tool calls (deny reads of the token file, ...)
   scaffold   materialize a responder cwd (generated settings.json) without
              running the dispatcher, to inspect it and run claude by hand
+  audit      classify the configured sandbox deny-secrets by on-disk shape and
+             report mask-leak windows (a missing path, a rename-replaceable bare
+             file) plus whether the token should move to bot_token_env; read-only
   clear      drop every persisted chat->session binding (keeps the getUpdates
              offset). Reads the state dir from --config or the default
   recall     read the transcript store as groomed blocks (--dir SCOPE, then
@@ -56,6 +59,8 @@ func main() {
 		err = runHook(os.Args[2:])
 	case "scaffold":
 		err = runScaffold(os.Args[2:])
+	case "audit":
+		err = runAudit(os.Args[2:])
 	case "clear":
 		err = runClear(os.Args[2:])
 	case "recall":

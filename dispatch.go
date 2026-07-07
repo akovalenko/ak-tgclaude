@@ -942,6 +942,11 @@ func runDispatch(args []string) error {
 	if err := cfg.resolveBotToken(); err != nil {
 		return usageError{err}
 	}
+	// Audit the sandbox deny-secrets for the two mask-leak windows (a missing path
+	// masked as a no-op; a bare file whose mask a rename bypasses) and warn — never
+	// fail — so a live bot flags a weak secret setup in its log without refusing to
+	// start. The `audit` subcommand runs the same check on demand.
+	cfg.logSecretAudit()
 
 	store, err := LoadSessionStore(cfg.SessionDir(), cfg.EphemeralSessions)
 	if err != nil {

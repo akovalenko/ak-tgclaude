@@ -1285,6 +1285,12 @@ func runScaffold(args []string) error {
 	if cfg.ConfigPath == "" {
 		fmt.Printf("  (no --config given: the token guard has no deny-read path)\n")
 	}
+	// Report the same deny-secret audit the dispatcher logs at startup, so an
+	// operator inspecting the scaffold sees any mask-leak window (a missing path, a
+	// rename-replaceable bare file) or a token that should move to bot_token_env.
+	fmt.Println()
+	auditPaths, auditTokenFile := cfg.auditSecretInputs()
+	writeAuditReport(os.Stdout, auditPaths, auditTokenFile, auditSecrets(auditPaths, auditTokenFile))
 	agentFlag := ""
 	if cfg.Agent != "" {
 		// Quoted like the other interpolated values below: the agent name is

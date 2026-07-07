@@ -453,6 +453,12 @@ type Config struct {
 	// (not a config field). When the token lives in this file, it is registered
 	// for sandbox deny-read in the responder's scaffold.
 	ConfigPath string `toml:"-"`
+
+	// tokenInFile records that the loaded TOML defined `bot_token` literally — the
+	// bot token is a secret at rest on disk. Set from the decoder metadata (not a
+	// TOML/CLI knob), it drives the secret audit's bot_token_env recommendation.
+	// Unexported so nothing outside this package can forge it.
+	tokenInFile bool
 }
 
 // loadConfig resolves configuration (parseConfig) and validates it for the
@@ -579,6 +585,11 @@ func decodeConfig(args []string) (*Config, error) {
 			return nil, fmt.Errorf("config %s: key `policy` was renamed to `policies` (an array) — rename it", *configPath)
 		}
 		c.ConfigPath = *configPath
+		// Remember that the token was written literally into the file (a secret at
+		// rest): the audit steers such a setup toward bot_token_env. A later
+		// --bot-token override changes the value used but not the fact that the file
+		// still holds a token on disk, so this stays true regardless.
+		c.tokenInFile = md.IsDefined("bot_token")
 	}
 	// Flags override file values when set.
 	if *botToken != "" {
