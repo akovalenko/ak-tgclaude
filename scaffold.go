@@ -1190,8 +1190,14 @@ func appendAgentSkills(data []byte, add []string) []byte {
 //
 // The Write TOOL to the outbox is granted by the PreToolUse hook (path-scoped),
 // not here. All inputs empty => "".
-func buildInvocationSettings(writeRoots []string, transcriptScope, usageLog string, usageLogOwner bool) string {
-	if len(writeRoots) == 0 && transcriptScope == "" && usageLog == "" {
+func buildInvocationSettings(writeRoots []string, transcriptScope, usageLog string, usageLogOwner bool, denyReads ...string) string {
+	hasDeny := false
+	for _, d := range denyReads {
+		if d != "" {
+			hasDeny = true
+		}
+	}
+	if len(writeRoots) == 0 && transcriptScope == "" && usageLog == "" && !hasDeny {
 		return ""
 	}
 	var s struct {
@@ -1222,6 +1228,13 @@ func buildInvocationSettings(writeRoots []string, transcriptScope, usageLog stri
 			s.Sandbox.Filesystem.AllowRead = append(s.Sandbox.Filesystem.AllowRead, usageLog)
 		} else {
 			s.Sandbox.Filesystem.DenyRead = append(s.Sandbox.Filesystem.DenyRead, usageLog)
+		}
+	}
+	// Extra denyRead paths (e.g. the per-invocation --mcp-config file holding the
+	// capability token): masked from sandboxed Bash, mirroring the hook's Deny.
+	for _, d := range denyReads {
+		if d != "" {
+			s.Sandbox.Filesystem.DenyRead = append(s.Sandbox.Filesystem.DenyRead, d)
 		}
 	}
 	b, _ := json.Marshal(&s)

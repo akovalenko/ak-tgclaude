@@ -3,10 +3,38 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"os"
 	"strings"
 	"testing"
 	"time"
 )
+
+// TestWriteMCPConfigFileAndDeny is the M3 regression: the capability token is written
+// to a 0600 file (not argv), and that file is added to the responder's Deny so the
+// model's Read tool cannot read it (the sandbox denyRead is asserted in TestBuildArgs).
+func TestWriteMCPConfigFileAndDeny(t *testing.T) {
+	path, err := writeMCPConfigFile("http://127.0.0.1:9/mcp", "seekrit")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.Remove(path)
+	fi, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fi.Mode().Perm() != 0o600 {
+		t.Errorf("mcp config file mode = %o, want 600", fi.Mode().Perm())
+	}
+	b, _ := os.ReadFile(path)
+	if !strings.Contains(string(b), "seekrit") || !strings.Contains(string(b), "127.0.0.1:9") {
+		t.Errorf("mcp config file content wrong: %s", b)
+	}
+	c := &claudeResponder{denyPaths: []string{"/cfg/bot.toml"}}
+	pol := c.filePolicy(RespondRequest{DocDir: "/o/x", MCPConfigPath: path})
+	if !strings.Contains(strings.Join(pol.Deny, ","), path) {
+		t.Errorf("mcp config path not in Deny: %v", pol.Deny)
+	}
+}
 
 func TestFilePolicy(t *testing.T) {
 	// The single-source mirror policy: writeRoots is the outbox; ReadAllow carves the
@@ -79,24 +107,30 @@ func TestBuildArgs(t *testing.T) {
 
 	got := (&claudeResponder{agent: "eputs-telegram-guide"}).buildArgs(RespondRequest{
 		SessionID: "sess-7", DocDir: "/run/out/outbox-A1",
-		MCPURL: "http://127.0.0.1:9/mcp", MCPToken: "tok9",
+		MCPURL: "http://127.0.0.1:9/mcp", MCPToken: "tok9", MCPConfigPath: "/tmp/mcp9.json",
 	})
 	joined := strings.Join(got, " ")
-	// MCP wiring: the inline config (url + Authorization token), strict-only, and
-	// the send tools permitted under dontAsk.
-	if !strings.Contains(joined, "--mcp-config ") || !strings.Contains(joined, "--strict-mcp-config") {
-		t.Errorf("expected MCP config args: %q", joined)
+	// MCP wiring: --mcp-config points at the 0600 FILE (the token stays out of argv),
+	// strict-only, and the send tools permitted under dontAsk.
+	if !strings.Contains(joined, "--mcp-config /tmp/mcp9.json") || !strings.Contains(joined, "--strict-mcp-config") {
+		t.Errorf("expected MCP config file arg: %q", joined)
 	}
-	if !strings.Contains(joined, `"url":"http://127.0.0.1:9/mcp"`) || !strings.Contains(joined, "Bearer tok9") {
-		t.Errorf("MCP config should carry url + token: %q", joined)
+	// The capability token / its header must NOT appear in argv (that was the
+	// /proc/<pid>/cmdline leak M3 closes).
+	if strings.Contains(joined, "tok9") || strings.Contains(joined, "Bearer") {
+		t.Errorf("token must not be in argv: %q", joined)
 	}
 	if !strings.Contains(joined, "--allowedTools mcp__tg__send_message,mcp__tg__send_code,mcp__tg__send_document") {
 		t.Errorf("expected --allowedTools with the send tools: %q", joined)
 	}
-	// A --settings overlay scopes sandbox access to that outbox, before --agent/--resume.
+	// A --settings overlay scopes sandbox access to that outbox, before --agent/--resume,
+	// and denyReads the mcp-config file so sandboxed Bash cannot read the token either.
 	if !strings.Contains(joined, `"allowWrite":["/run/out/outbox-A1"]`) ||
 		!strings.Contains(joined, `"allowRead":["/run/out/outbox-A1"]`) {
 		t.Errorf("overlay missing per-invocation sandbox grants: %q", joined)
+	}
+	if !strings.Contains(joined, `"denyRead":["/tmp/mcp9.json"]`) {
+		t.Errorf("overlay should denyRead the mcp-config file: %q", joined)
 	}
 	if !strings.HasSuffix(joined, "--agent eputs-telegram-guide --resume sess-7") {
 		t.Errorf("agent/resume should come last: %q", joined)
@@ -127,7 +161,7 @@ func TestBuildArgsExtraTools(t *testing.T) {
 	// Operator extra tools join --allowedTools after the send tools, deduped; a
 	// duplicate of a send tool is not repeated.
 	got := strings.Join((&claudeResponder{extraTools: []string{"Agent", "WebFetch", "mcp__tg__send_message"}}).
-		buildArgs(RespondRequest{MCPURL: "http://127.0.0.1:9/mcp", MCPToken: "tok"}), " ")
+		buildArgs(RespondRequest{MCPURL: "http://127.0.0.1:9/mcp", MCPToken: "tok", MCPConfigPath: "/tmp/m.json"}), " ")
 	want := "--allowedTools mcp__tg__send_message,mcp__tg__send_code,mcp__tg__send_document,Skill,Agent,WebFetch"
 	if !strings.Contains(got, want) {
 		t.Errorf("extra tools not merged into --allowedTools\nwant substring: %q\ngot: %q", want, got)
@@ -140,7 +174,7 @@ func TestBuildArgsScopedToolKeepsScope(t *testing.T) {
 	// of the same verb are BOTH kept as distinct permission rules — the opposite of
 	// the frontmatter, which collapses them to one bare name.
 	got := strings.Join((&claudeResponder{extraTools: []string{"WebFetch(domain:github.com)", "WebFetch(domain:*.github.com)"}}).
-		buildArgs(RespondRequest{MCPURL: "http://127.0.0.1:9/mcp", MCPToken: "tok"}), " ")
+		buildArgs(RespondRequest{MCPURL: "http://127.0.0.1:9/mcp", MCPToken: "tok", MCPConfigPath: "/tmp/m.json"}), " ")
 	want := "--allowedTools mcp__tg__send_message,mcp__tg__send_code,mcp__tg__send_document,Skill,WebFetch(domain:github.com),WebFetch(domain:*.github.com)"
 	if !strings.Contains(got, want) {
 		t.Errorf("scoped tools not kept verbatim in --allowedTools\nwant substring: %q\ngot: %q", want, got)
@@ -151,7 +185,7 @@ func TestBuildInvocationSettings(t *testing.T) {
 	if buildInvocationSettings(nil, "", "", false) != "" {
 		t.Errorf("empty write roots + empty scope => empty overlay")
 	}
-	s := buildInvocationSettings([]string{"/o/x"},"", "", false)
+	s := buildInvocationSettings([]string{"/o/x"}, "", "", false)
 	if !strings.Contains(s, `"allowWrite":["/o/x"]`) || !strings.Contains(s, `"allowRead":["/o/x"]`) {
 		t.Errorf("overlay JSON wrong: %s", s)
 	}
@@ -166,7 +200,7 @@ func TestBuildInvocationSettings(t *testing.T) {
 }
 
 func TestBuildInvocationSettingsTranscriptScope(t *testing.T) {
-	s := buildInvocationSettings([]string{"/o/x"},"/s/transcripts/42", "", false)
+	s := buildInvocationSettings([]string{"/o/x"}, "/s/transcripts/42", "", false)
 	if !strings.Contains(s, `"allowWrite":["/o/x"]`) {
 		t.Errorf("allowWrite should be the outbox only: %s", s)
 	}
@@ -190,7 +224,7 @@ func TestBuildArgsThreadsScope(t *testing.T) {
 func TestBuildInvocationSettingsUsageLog(t *testing.T) {
 	// Owner: the usage-log file is carved into allowRead (alongside the outbox), never
 	// denyRead — the owner may grep/awk it.
-	owner := buildInvocationSettings([]string{"/o/x"},"", "/v/usage.jsonl", true)
+	owner := buildInvocationSettings([]string{"/o/x"}, "", "/v/usage.jsonl", true)
 	if !strings.Contains(owner, `"allowRead":["/o/x","/v/usage.jsonl"]`) {
 		t.Errorf("owner overlay should allowRead the usage log: %s", owner)
 	}
@@ -199,7 +233,7 @@ func TestBuildInvocationSettingsUsageLog(t *testing.T) {
 	}
 	// Non-owner: the usage-log file is denied — the whole point (read is otherwise
 	// default-open). It never appears in allowRead.
-	other := buildInvocationSettings([]string{"/o/x"},"", "/v/usage.jsonl", false)
+	other := buildInvocationSettings([]string{"/o/x"}, "", "/v/usage.jsonl", false)
 	if !strings.Contains(other, `"denyRead":["/v/usage.jsonl"]`) {
 		t.Errorf("non-owner overlay should denyRead the usage log: %s", other)
 	}
@@ -207,7 +241,7 @@ func TestBuildInvocationSettingsUsageLog(t *testing.T) {
 		t.Errorf("non-owner overlay must not allowRead the usage log: %s", other)
 	}
 	// Feature off (empty usage path): neither allow nor deny of any usage file.
-	off := buildInvocationSettings([]string{"/o/x"},"", "", false)
+	off := buildInvocationSettings([]string{"/o/x"}, "", "", false)
 	if strings.Contains(off, "denyRead") || strings.Contains(off, "usage") {
 		t.Errorf("no usage path => no allow/deny for it: %s", off)
 	}
