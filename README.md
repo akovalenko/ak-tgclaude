@@ -488,8 +488,8 @@ the token.
 **config file**, the binary registers that file in the responder's
 `sandbox.credentials.files` (`mode: "deny"`) so the sandbox denies any read of it — a
 backstop to the PreToolUse hook (requires Claude Code ≥ 2.1.187). But that deny is a
-**start-of-command snapshot** pinned to the file's inode, and the atomic `write-temp
-+ rename` used to rewrite a secret slips past it
+**start-of-command snapshot** pinned to the file's inode, and the atomic `write-temp + rename`
+used to rewrite a secret slips past it
 ([window 2](#sandbox-masking-is-a-start-of-command-snapshot--two-leak-windows)
 below) — so an inline token is a secret at rest behind a bypassable guard.
 **`bot_token_env` avoids all of it:** point it at an environment variable holding the
