@@ -1,6 +1,29 @@
 package main
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
+
+// TestParseHTMLDeepNestingDoesNotOverflow is the M2 regression: render/textContent
+// recurse per tree level, so an adversarial reply of deeply nested tags would once
+// overflow the goroutine stack and take the whole dispatcher (all chats) down with a
+// fatal runtime throw. parseHTML now caps tree depth, so this completes instead.
+func TestParseHTMLDeepNestingDoesNotOverflow(t *testing.T) {
+	const n = 300000
+	var b strings.Builder
+	for i := 0; i < n; i++ {
+		b.WriteString("<b>")
+	}
+	b.WriteString("deep")
+	for i := 0; i < n; i++ {
+		b.WriteString("</b>")
+	}
+	md := htmlToMarkdown(b.String()) // must not overflow the stack / crash
+	if !strings.Contains(md, "deep") {
+		t.Errorf("innermost content lost after depth cap")
+	}
+}
 
 // TestHTMLToMarkdown locks the converter's OUTPUT for each tag mapping and every
 // parasitic-markdown corner. These assertions are deterministic (string in →

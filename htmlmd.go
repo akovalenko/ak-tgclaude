@@ -48,6 +48,11 @@ var attrRe = regexp.MustCompile(`([\w-]+)(?:\s*=\s*("[^"]*"|'[^']*'|[^\s"'<>]+))
 
 // parseHTML builds a lenient tree from a validated Telegram-HTML fragment.
 // Mismatched/unclosed tags are tolerated (the guard already vetted tag names).
+// maxHTMLDepth caps how deep parseHTML nests the tree. render/textContent recurse
+// per level, so an unbounded depth is a stack-overflow DoS; 100 is orders of
+// magnitude above any genuine inline-formatting nesting.
+const maxHTMLDepth = 100
+
 func parseHTML(s string) *htmlNode {
 	root := &htmlNode{}
 	stack := []*htmlNode{root}
@@ -77,7 +82,15 @@ func parseHTML(s string) *htmlNode {
 		el := &htmlNode{name: name, attrs: parseAttrs(attrsStr)}
 		top().children = append(top().children, el)
 		if !strings.HasSuffix(strings.TrimSpace(attrsStr), "/") {
-			stack = append(stack, el) // not self-closed → open a scope
+			// Open a scope — but cap tree depth. render/renderChildren and textContent
+			// walk the tree RECURSIVELY, so an adversarial reply of deeply nested tags
+			// (~300k of "<b>") would overflow the goroutine stack and take the whole
+			// dispatcher (all chats) down with a fatal runtime throw net/http cannot
+			// recover. Beyond the cap the element still keeps its text, it just does not
+			// grow the tree deeper; maxHTMLDepth is far above any real formatting nest.
+			if len(stack) < maxHTMLDepth {
+				stack = append(stack, el)
+			}
 		}
 	}
 	if pos < len(s) {
