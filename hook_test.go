@@ -137,6 +137,68 @@ func TestDecideSymlinkEscapeDenied(t *testing.T) {
 	}
 }
 
+// TestDecideDenyRootSymlink covers Scenario A: the deny ROOT is itself a symlink (or
+// has a symlinked prefix), the complement of TestDecideSymlinkEscapeDenied's Scenario
+// B (a symlinked TOOL path into a real deny dir). Both spellings of the protected
+// target must be denied — the lexical one via the link, and the symlink-resolved real
+// target via resolveRoots — so a resolved deny root cannot be dodged by naming its
+// real location directly.
+func TestDecideDenyRootSymlink(t *testing.T) {
+	base := t.TempDir()
+	mustMkdir := func(p string) {
+		if err := os.MkdirAll(p, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	mustWrite := func(p, s string) {
+		if err := os.WriteFile(p, []byte(s), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	mustLink := func(target, link string) {
+		if err := os.Symlink(target, link); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// Case 1 — the deny root IS a symlink to the real secret dir.
+	realSecret := filepath.Join(base, "realsecret")
+	mustMkdir(realSecret)
+	mustWrite(filepath.Join(realSecret, "id_rsa"), "KEY")
+	denyLink := filepath.Join(base, "denyLink")
+	mustLink(realSecret, denyLink)
+
+	// Case 2 — a symlinked PREFIX of the deny root (the /run -> /var/run shape).
+	realVarRun := filepath.Join(base, "varrun")
+	realRunSecret := filepath.Join(realVarRun, "secret")
+	mustMkdir(realRunSecret)
+	mustWrite(filepath.Join(realRunSecret, "token"), "T")
+	runLink := filepath.Join(base, "run") // run -> varrun
+	mustLink(realVarRun, runLink)
+
+	pol := filePolicy{
+		deny: []string{
+			denyLink,                         // a leaf-symlink deny root (Scenario A)
+			filepath.Join(runLink, "secret"), // deny root with a symlinked prefix
+		},
+		readAllow:  []string{},
+		readDeny:   []string{},
+		writeRoots: []string{},
+	}
+
+	// Every spelling of a protected target must be denied.
+	for _, p := range []string{
+		filepath.Join(denyLink, "id_rsa"),         // via the symlinked deny root (lexical)
+		filepath.Join(realSecret, "id_rsa"),       // the resolved real target (via resolveRoots)
+		filepath.Join(runLink, "secret", "token"), // via the symlinked prefix (lexical)
+		filepath.Join(realRunSecret, "token"),     // the resolved real target
+	} {
+		if d, _ := decidePreToolUse(fileInput("Read", p), pol); d != "deny" {
+			t.Errorf("read protected path %q => %q, want deny", p, d)
+		}
+	}
+}
+
 func TestDecideWriteScopedToOutbox(t *testing.T) {
 	if d, _ := decidePreToolUse(fileInput("Write", "/run/out/outbox-A1/reply.html"), testPolicy); d != "allow" {
 		t.Errorf("write in outbox => %q, want allow", d)
