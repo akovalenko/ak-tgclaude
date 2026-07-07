@@ -1118,8 +1118,12 @@ near 50 MB. Set `upload_command` to an uploader script and a document over
 `send_document`. The dispatcher runs the command **unsandboxed** (it needs the
 network), unlike the responder; the file stays confined to the outbox, and the
 command is operator trust. Contract: invoked as argv `[command, <file>, <name>]` —
-`<file>` is the local path and `<name>` is a **collision-free basename** (a random
-prefix + the original name, e.g. `a3f9c2e1-dist.tar.gz`) a smart uploader uses as
+`<file>` is a **`/proc/self/fd/N` read handle** to the already-opened,
+symlink-vetted source (the dispatcher opens the outbox file itself with
+`O_NOFOLLOW` and passes the inherited fd, so a symlink a responder plants in the
+outbox can never redirect the upload to a host secret — read the handle, don't
+derive the destination name from it), and `<name>` is a **collision-free basename**
+(a random prefix + the original name, e.g. `a3f9c2e1-dist.tar.gz`) a smart uploader uses as
 its destination so two same-named files don't clobber each other on the share host
 (an uploader that doesn't need it may ignore arg2, as long as it does not *reject* a
 second argument); it prints the public URL on stdout (first non-blank line) and
@@ -1129,7 +1133,13 @@ a uploader that builds a URL should percent-encode it. `upload_max_mb` is the
 ceiling advertised to the responder in the tg-emit skill; enforcement sits 10% above
 it, so a file a touch over still uploads while a genuinely oversized one is rejected
 with a clear error. Off by default (no `upload_command`) — big documents then just
-hit Telegram's limit. See [`examples/`](examples/) for a ready rsync uploader.
+hit Telegram's limit. See [`examples/`](examples/) for a ready rsync uploader — it
+passes `-L` to rsync so it follows the `/proc/self/fd/N` handle (rsync otherwise
+`skipping non-regular file`). `-L` is safe **here** only because that handle is a
+procfs magic symlink resolving to the vetted fd's inode, not a re-resolved path
+string — a symlink swapped in at the original path cannot redirect it. Do not
+generalize "`-L` is fine": on a symlink in an ordinary directory `-L` *is* a path
+re-resolve. A `cat "$1" | …` uploader reads the fd just as safely.
 
 Availability vs permission are two gates: the tools must appear in the responder
 agent's `tools:` frontmatter (availability — an agent `tools:` allowlist filters

@@ -6,7 +6,10 @@
 #
 # ── The send_document large-file fallback contract ──────────────────────────────
 # ak-tgclaude invokes the uploader as argv [<this>, <file>, <name>]:
-#   $1  local path to the file to upload
+#   $1  the file to read and upload. ak-tgclaude passes a /proc/self/fd/N handle to an
+#       already-opened, symlink-vetted fd (NOT a plain path) — just read it (rsync -L,
+#       cat, or curl -T all work). Do not derive the destination name from it (it is
+#       "3", not the real name) — that is what arg2 is for.
 #   $2  a COLLISION-FREE destination basename ak-tgclaude generated: a random prefix
 #       joined to the original name, e.g. a3f9c2e1-dist.tar.gz. Use it as the
 #       destination so two files that share a name (two dist.tar.gz) never clobber
@@ -53,9 +56,16 @@ urlencode() {
 	printf '%s' "$out"
 }
 
+# -L (--copy-links): the source is /proc/self/fd/N — a procfs magic symlink to the
+# already-opened, symlink-vetted fd — so without -L rsync says "skipping non-regular
+# file". -L follows it and copies the referent. SAFE *because* the source is a
+# /proc/self/fd handle: following it resolves to the exact open inode ak-tgclaude
+# vetted (O_NOFOLLOW), NOT a re-resolution of a path string, so a symlink swapped in at
+# the original path cannot redirect the copy. Do NOT read this as "-L is always fine":
+# -L on a symlink in an ordinary directory IS a path re-resolve.
 # -s (--protect-args): do not word-split the remote path, so a name with a space
 # (or other shell-special char) reaches the far side intact. Quiet (no -v): silent
 # on success, genuine errors still go to stderr.
-rsync -s -- "$src" "$SHARE_REMOTE:$SHARE_DIR/$name"
+rsync -L -s -- "$src" "$SHARE_REMOTE:$SHARE_DIR/$name"
 
 echo "$SHARE_URLBASE/$(urlencode "$name")"
