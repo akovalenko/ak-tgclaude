@@ -5,6 +5,8 @@ import (
 	"io"
 	"log"
 	"os"
+	"path/filepath"
+	"strings"
 )
 
 // secretIssueKind classifies an auditSecrets finding: which sandbox-mask leak
@@ -31,12 +33,23 @@ const (
 	// (bot_token). That file is a bare file (so also window 2), and env/flag sourcing
 	// keeps the token off disk entirely — prefer bot_token_env.
 	issueTokenInFile
+	// issueSymlink: the protected path IS a symlink, or lies under one (a symlinked
+	// parent component). The permissions.deny backstop matches paths LEXICALLY
+	// (permissionDenyRules; it now also emits the resolved spelling, but a dangling
+	// link resolves to nothing so only the lexical rule survives) and os.Stat here
+	// follows the link, so a symlinked secret can look like a clean directory while
+	// the layers disagree about what the path names. Make the secret a real directory
+	// with no symlinked component so every layer sees the same path.
+	issueSymlink
 )
 
 // secretIssue is one auditSecrets finding: the offending path and its kind.
+// Symlink, set only for issueSymlink, names the first path component that is a
+// symlink (the leaf itself, or a parent) — the concrete thing to fix.
 type secretIssue struct {
-	Path string
-	Kind secretIssueKind
+	Path    string
+	Kind    secretIssueKind
+	Symlink string
 }
 
 // warning renders a one-line operator-facing message for the issue — the same text
@@ -52,9 +65,42 @@ func (i secretIssue) warning() string {
 	case issueTokenInFile:
 		return fmt.Sprintf("the bot token is stored literally in %s: prefer bot_token_env (an env var, read then unset at startup), "+
 			"which keeps the token off disk and needs no bypassable file deny", i.Path)
+	case issueSymlink:
+		return fmt.Sprintf("%s is or lies under a symlink (%s): the permissions.deny backstop matches paths lexically, "+
+			"so if the guard hook is starved out a read of the symlink-resolved target may slip past it (and a dangling link "+
+			"resolves to nothing, defeating the resolved-spelling deny too) — make the secret a real directory with no symlinked component", i.Path, i.Symlink)
 	default:
 		return fmt.Sprintf("%s: unknown issue", i.Path)
 	}
+}
+
+// firstSymlinkComponent walks an absolute path from the root and returns the first
+// component that is itself a symlink (via os.Lstat, which does NOT follow links), or
+// "" if no existing component is a symlink. It stops at the first one: that link
+// already makes the lexical path diverge from what the kernel reaches, which is all
+// the audit needs to flag. A component that does not exist yet ends the walk (nothing
+// there to be a symlink), and a non-absolute path is skipped (audited paths are
+// resolved absolute upstream).
+func firstSymlinkComponent(p string) string {
+	if !filepath.IsAbs(p) {
+		return ""
+	}
+	sep := string(os.PathSeparator)
+	cur := sep
+	for _, part := range strings.Split(strings.Trim(filepath.Clean(p), sep), sep) {
+		if part == "" {
+			continue
+		}
+		cur = filepath.Join(cur, part)
+		info, err := os.Lstat(cur)
+		if err != nil {
+			return "" // component missing — nothing further resolves to a symlink
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			return cur
+		}
+	}
+	return ""
 }
 
 // auditSecrets classifies each configured deny-secret path by its on-disk shape and
@@ -62,14 +108,25 @@ func (i secretIssue) warning() string {
 // paths guarded at both layers (host secret dirs + operator deny_reads). tokenFile,
 // when non-empty, is the config file the bot token lives in literally — it earns an
 // issueTokenInFile note steering to bot_token_env (and is NOT also in paths, so it
-// yields exactly that one finding, not a redundant window-2 note). A directory path
-// is robust (its mask survives rename and covers later-created names) and yields no
-// issue; a missing path is window 1, a bare file is window 2. Statting the
-// filesystem is the only impurity — the classification is otherwise a pure function
-// of its inputs, so a test drives it with temp dirs/files.
+// yields exactly that one finding, not a redundant window-2 note). A path that is (or
+// lies under) a symlink is issueSymlink — checked first, since it undermines the
+// lexical deny match itself. A real directory path is robust (its mask survives
+// rename and covers later-created names) and yields no issue; a missing path is
+// window 1, a bare file is window 2. Statting the filesystem is the only impurity —
+// the classification is otherwise a pure function of its inputs, so a test drives it
+// with temp dirs/files/links.
 func auditSecrets(paths []string, tokenFile string) []secretIssue {
 	var issues []secretIssue
 	for _, p := range paths {
+		// Symlink check first: os.Stat below FOLLOWS links, so a symlinked secret
+		// would otherwise stat as its (clean-looking) target. A symlink in the path
+		// is the more fundamental problem — the deny layers match it lexically — and
+		// its fix ("a real directory") supersedes the shape advice, so we flag it and
+		// move on rather than also emitting a redundant window note.
+		if link := firstSymlinkComponent(p); link != "" {
+			issues = append(issues, secretIssue{Path: p, Kind: issueSymlink, Symlink: link})
+			continue
+		}
 		info, err := os.Stat(p)
 		switch {
 		case err != nil:

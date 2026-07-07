@@ -1223,7 +1223,7 @@ func validatePath(field, p string) error {
 		}
 	}
 	if i := strings.IndexAny(p, pathGlobMeta); i >= 0 {
-		return fmt.Errorf("%s path %q contains %q, a glob metacharacter the sandbox would treat as a pattern — use a literal path (symlink or rename to avoid it)", field, p, p[i:i+1])
+		return fmt.Errorf("%s path %q contains %q, a glob metacharacter the sandbox would treat as a pattern — rename the path so it has no such character (do NOT point a symlink at it: a symlinked secret path weakens the lexical permissions.deny backstop)", field, p, p[i:i+1])
 	}
 	return nil
 }

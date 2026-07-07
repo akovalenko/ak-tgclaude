@@ -69,11 +69,67 @@ func TestAuditSecretsTokenInFile(t *testing.T) {
 // Every kind renders a non-empty, self-naming warning (the message the subcommand
 // prints and the dispatcher logs).
 func TestSecretIssueWarningMentionsPath(t *testing.T) {
-	for _, k := range []secretIssueKind{issueMissing, issueBareFile, issueTokenInFile} {
+	for _, k := range []secretIssueKind{issueMissing, issueBareFile, issueTokenInFile, issueSymlink} {
 		w := secretIssue{Path: "/some/secret/path", Kind: k}.warning()
 		if !strings.Contains(w, "/some/secret/path") {
 			t.Errorf("kind %v: warning should name the path, got %q", k, w)
 		}
+	}
+}
+
+// A protected path that IS a symlink, or lies under one, is flagged issueSymlink —
+// checked before the shape classification, so os.Stat (which follows links) cannot
+// launder a symlinked secret into a clean-looking directory. The offending link
+// component is named. A real directory with no symlinked component stays clean.
+func TestAuditSecretsFlagsSymlink(t *testing.T) {
+	dir := t.TempDir()
+	realDir := filepath.Join(dir, "real")
+	realFile := filepath.Join(dir, "realfile")
+	if err := os.Mkdir(realDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(realFile, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	mustLink := func(target, link string) string {
+		if err := os.Symlink(target, link); err != nil {
+			t.Fatal(err)
+		}
+		return link
+	}
+	linkToDir := mustLink(realDir, filepath.Join(dir, "linkToDir"))    // symlink → directory
+	linkToFile := mustLink(realFile, filepath.Join(dir, "linkToFile")) // symlink → file
+	dangling := mustLink(filepath.Join(dir, "nope"), filepath.Join(dir, "dangling"))
+	// A secret sitting under a symlinked PARENT (the leaf itself is a real dir).
+	underParent := filepath.Join(linkToDir, "sub")
+	if err := os.Mkdir(filepath.Join(realDir, "sub"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	byPath := map[string]secretIssue{}
+	for _, is := range auditSecrets([]string{linkToDir, linkToFile, dangling, underParent, realDir}, "") {
+		byPath[is.Path] = is
+	}
+
+	// A symlink-to-dir would Stat as a clean directory; it must still be flagged.
+	if is, ok := byPath[linkToDir]; !ok || is.Kind != issueSymlink || is.Symlink != linkToDir {
+		t.Errorf("symlink-to-dir: want issueSymlink naming %s, got %+v (present=%v)", linkToDir, is, ok)
+	}
+	// A symlink-to-file is issueSymlink (the more fundamental problem), not issueBareFile.
+	if is := byPath[linkToFile]; is.Kind != issueSymlink || is.Symlink != linkToFile {
+		t.Errorf("symlink-to-file: want issueSymlink naming %s, got %+v", linkToFile, is)
+	}
+	// A dangling symlink is issueSymlink, not issueMissing.
+	if is := byPath[dangling]; is.Kind != issueSymlink || is.Symlink != dangling {
+		t.Errorf("dangling symlink: want issueSymlink naming %s, got %+v", dangling, is)
+	}
+	// A real leaf under a symlinked parent: flagged, naming the PARENT link.
+	if is := byPath[underParent]; is.Kind != issueSymlink || is.Symlink != linkToDir {
+		t.Errorf("symlinked parent: want issueSymlink naming %s, got %+v", linkToDir, is)
+	}
+	// A real directory with no symlinked component: no issue.
+	if is, ok := byPath[realDir]; ok {
+		t.Errorf("real directory should not be flagged, got %+v", is)
 	}
 }
 
