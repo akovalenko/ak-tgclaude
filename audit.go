@@ -87,16 +87,30 @@ func auditSecrets(paths []string, tokenFile string) []secretIssue {
 }
 
 // auditSecretInputs returns the resolved secret paths to audit plus the inline token
-// file (or ""). It mirrors the deny set buildSettings and the dispatcher assemble —
-// host secret dirs (~/.ssh, ~/.claude) + operator deny_reads — but pulls the token
-// file out separately so it earns the bot_token_env recommendation rather than a
-// generic window-2 note. Run after parseConfig, so c.DenyRead is already resolved
-// absolute (hostSecretHookDeny resolves the host set itself).
+// file (or ""). It mirrors the EXACT masked set the scaffold produces — host secret
+// dirs (~/.ssh, ~/.claude) + operator deny_reads + the token config file — so the
+// audit and the running bot can never disagree about what is (and isn't) masked. The
+// token file is derived from scaffoldParams itself (ConfigPath unless the token rides
+// an env var, which puts nothing on disk), not re-implemented here, so a future
+// change to that rule carries into the audit automatically. Run after parseConfig, so
+// c.DenyRead is resolved absolute (hostSecretHookDeny resolves the host set itself).
+//
+// The token config file is split out only when the token is stored literally in it
+// (tokenInFile): it then earns the bot_token_env recommendation (issueTokenInFile),
+// which subsumes the generic window-2 note. When the file is masked defensively
+// though the token came from --bot-token, it is audited like any other bare-file
+// secret (window 2) — no env recommendation, since there is no inline token to move.
 func (c *Config) auditSecretInputs() (paths []string, tokenFile string) {
 	paths = append(paths, hostSecretHookDeny()...)
 	paths = append(paths, c.DenyRead...)
-	if c.tokenInFile && c.ConfigPath != "" {
-		tokenFile = c.ConfigPath
+	// cacheDir/outboxRoot do not affect TokenFile, so pass "" — we only want the
+	// scaffold's masked-token-file decision, the single source of truth.
+	masked := c.scaffoldParams("", "").TokenFile
+	switch {
+	case masked != "" && c.tokenInFile:
+		tokenFile = masked
+	case masked != "":
+		paths = append(paths, masked)
 	}
 	return paths, tokenFile
 }

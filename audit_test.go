@@ -77,17 +77,39 @@ func TestSecretIssueWarningMentionsPath(t *testing.T) {
 	}
 }
 
-// auditSecretInputs surfaces the token file only when the token is literally in the
-// config file (tokenInFile) — env/flag sourcing puts nothing on disk to warn about.
+// auditSecretInputs mirrors the scaffold's masked set. The token config file is
+// surfaced for the bot_token_env recommendation only when the token is literally in
+// it; masked-but-not-inline it is audited as a generic path; env-sourced it is not
+// masked at all.
 func TestAuditSecretInputsTokenSource(t *testing.T) {
-	c := &Config{ConfigPath: "/etc/bot.toml", tokenInFile: true}
-	if _, tf := c.auditSecretInputs(); tf != "/etc/bot.toml" {
-		t.Errorf("token-in-file: want token file surfaced, got %q", tf)
+	contains := func(ss []string, want string) bool {
+		for _, s := range ss {
+			if s == want {
+				return true
+			}
+		}
+		return false
 	}
 
+	// Inline bot_token: surfaced as the token file (→ bot_token_env recommendation),
+	// not double-counted in the generic paths.
+	c := &Config{ConfigPath: "/etc/bot.toml", tokenInFile: true}
+	if paths, tf := c.auditSecretInputs(); tf != "/etc/bot.toml" || contains(paths, "/etc/bot.toml") {
+		t.Errorf("inline token: want token file surfaced (not in paths), got tokenFile=%q paths=%v", tf, paths)
+	}
+
+	// Config file present but the token did NOT come from it (e.g. --bot-token flag):
+	// the scaffold still masks the file defensively, so the audit classifies it as a
+	// generic bare-file path — no bot_token_env recommendation (no inline token).
 	c = &Config{ConfigPath: "/etc/bot.toml", tokenInFile: false}
-	if _, tf := c.auditSecretInputs(); tf != "" {
-		t.Errorf("token from env/flag: want no token file surfaced, got %q", tf)
+	if paths, tf := c.auditSecretInputs(); tf != "" || !contains(paths, "/etc/bot.toml") {
+		t.Errorf("defensively-masked config: want it in paths, no token file, got tokenFile=%q paths=%v", tf, paths)
+	}
+
+	// Token from an env var: nothing on disk, so the config file is not masked at all.
+	c = &Config{ConfigPath: "/etc/bot.toml", BotTokenEnv: "TG_TOKEN"}
+	if paths, tf := c.auditSecretInputs(); tf != "" || contains(paths, "/etc/bot.toml") {
+		t.Errorf("env token: want config file NOT masked, got tokenFile=%q paths=%v", tf, paths)
 	}
 }
 
