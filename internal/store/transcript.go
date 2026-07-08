@@ -1,4 +1,4 @@
-package main
+package store
 
 import (
 	"encoding/json"
@@ -10,7 +10,7 @@ import (
 	"time"
 )
 
-// TranscriptStore is the durable, per-chat record of the FAQ conversation: every
+// Transcripts is the durable, per-chat record of the FAQ conversation: every
 // user message and every model reply, appended as compact JSONL day-files under
 // <root>/<chat_id>/<YYYY-MM-DD>.jsonl, plus a per-chat meta.json. It lives OUTSIDE
 // the responder outbox (so it survives the session-TTL wipe and restarts) and is
@@ -21,7 +21,7 @@ import (
 // server's request goroutine, not the per-chat chatWorkers goroutine that drives
 // the user-side append, so the two race within a chat. The day-file O_APPEND is
 // atomic on its own, but meta.json is a read-modify-write, so a mutex guards both.
-type TranscriptStore struct {
+type Transcripts struct {
 	root string
 	mu   sync.Mutex
 }
@@ -106,17 +106,17 @@ type transcriptMeta struct {
 	BotCount  int64     `json:"bot_count"`
 }
 
-// NewTranscriptStore returns a store rooted at root. It does not create root — the
+// NewTranscripts returns a store rooted at root. It does not create root — the
 // chat directory is made lazily on the first Append, so an idle feature touches no
 // disk.
-func NewTranscriptStore(root string) *TranscriptStore {
-	return &TranscriptStore{root: root}
+func NewTranscripts(root string) *Transcripts {
+	return &Transcripts{root: root}
 }
 
 // Append writes rec to chat's day-file (chosen from rec.TS in host-local time) and
 // updates chat's meta.json. ident, when non-nil (user side), refreshes the recorded
 // username/first_name. A zero rec.TS falls back to now.
-func (s *TranscriptStore) Append(chatID int64, rec TranscriptRecord, ident *ChatIdentity) error {
+func (s *Transcripts) Append(chatID int64, rec TranscriptRecord, ident *ChatIdentity) error {
 	if rec.TS.IsZero() {
 		rec.TS = time.Now()
 	}
@@ -152,7 +152,7 @@ func (s *TranscriptStore) Append(chatID int64, rec TranscriptRecord, ident *Chat
 }
 
 // updateMeta read-modify-writes the chat's meta.json. Caller holds s.mu.
-func (s *TranscriptStore) updateMeta(dir string, rec TranscriptRecord, ident *ChatIdentity) error {
+func (s *Transcripts) updateMeta(dir string, rec TranscriptRecord, ident *ChatIdentity) error {
 	path := filepath.Join(dir, "meta.json")
 	var m transcriptMeta
 	if b, err := os.ReadFile(path); err == nil {
@@ -181,7 +181,7 @@ func (s *TranscriptStore) updateMeta(dir string, rec TranscriptRecord, ident *Ch
 	}
 
 	// Pretty-print (meta is human-read) and write atomically (temp + rename, 0600),
-	// mirroring SessionStore.persist.
+	// mirroring Sessions.persist.
 	b, err := json.MarshalIndent(&m, "", "  ")
 	if err != nil {
 		return err

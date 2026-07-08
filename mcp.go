@@ -18,6 +18,8 @@ import (
 	"sync"
 	"syscall"
 	"time"
+
+	"github.com/akovalenko/ak-tgclaude/internal/store"
 )
 
 // mcpServerName is the MCP server the dispatcher exposes to the responder; the
@@ -78,7 +80,7 @@ type mcpServer struct {
 	ln       net.Listener
 	srv      *http.Server
 
-	transcripts *TranscriptStore // bot-side transcript append (nil => feature off); set after construction
+	transcripts *store.Transcripts // bot-side transcript append (nil => feature off); set after construction
 
 	overflow string // oversized-text policy "spill"|"error" (Config.Overflow); set after construction, "" => spill
 
@@ -446,7 +448,7 @@ func (m *mcpServer) callTool(ctx context.Context, tok string, rt mcpRoute, param
 	anchor := ids[0]
 	if m.transcripts != nil {
 		for i, mid := range ids {
-			brec := TranscriptRecord{MsgID: mid, TS: time.Now(), Role: "bot"}
+			brec := store.TranscriptRecord{MsgID: mid, TS: time.Now(), Role: "bot"}
 			if i == 0 {
 				brec.ReplyTo = rt.route.ReplyTo
 				brec.Text = botText(d)
@@ -479,7 +481,7 @@ func botText(d *Descriptor) string {
 
 // botAttach records a delivered document as transcript metadata (no bytes); other
 // kinds carry none.
-func botAttach(d *Descriptor) []TranscriptAttach {
+func botAttach(d *Descriptor) []store.TranscriptAttach {
 	if d.Kind != KindDocument {
 		return nil
 	}
@@ -491,7 +493,7 @@ func botAttach(d *Descriptor) []TranscriptAttach {
 	if fi, err := os.Lstat(d.Path); err == nil {
 		size = fi.Size()
 	}
-	return []TranscriptAttach{{Kind: "document", Name: name, Size: size}}
+	return []store.TranscriptAttach{{Kind: "document", Name: name, Size: size}}
 }
 
 // descriptorFromCall builds a validated Descriptor from a tool name and its JSON

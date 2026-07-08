@@ -1,4 +1,4 @@
-package main
+package store
 
 import (
 	"bufio"
@@ -15,25 +15,6 @@ import (
 	"time"
 )
 
-// runRecall implements `ak-tgclaude recall --dir SCOPE <selector>`: a read-only,
-// GROOMED view of the transcript store for the responder to consult. It exists so
-// the model does not have to Read + grep the escaped JSONL itself — it asks for a
-// message (and its thread neighbours) or a date range, and gets human-readable
-// blocks back.
-//
-// SCOPE is the responder's own read scope ($AK_TGCLAUDE_TRANSCRIPT_DIR): a single
-// chat directory, or — for the owner — the whole transcripts root. The shape is
-// detected from the directory; the sandbox already confines SCOPE to what this
-// responder may read (root deny-read + a per-invocation allowRead carve), so recall
-// inherits that boundary without re-checking it. Read-only: it never writes.
-func runRecall(args []string) error {
-	req, err := parseRecallArgs(args)
-	if err != nil {
-		return err
-	}
-	return runRecallTo(os.Stdout, req)
-}
-
 // recallMode is the selector kind: a point lookup by message id, or a date-range
 // dump. Exactly one is chosen at parse time.
 type recallMode int
@@ -43,8 +24,8 @@ const (
 	modeRange
 )
 
-// recallReq is a parsed, validated recall invocation.
-type recallReq struct {
+// RecallReq is a parsed, validated recall invocation.
+type RecallReq struct {
 	dir  string
 	mode recallMode
 
@@ -63,9 +44,10 @@ type recallReq struct {
 // special case. Well past any real Telegram timestamp.
 var distantFuture = time.Date(9999, 12, 31, 23, 59, 59, 0, time.Local)
 
-// parseRecallArgs parses and cross-validates the flags. Flag/selector mistakes come
-// back as usageError (exit 2); everything data-dependent is decided later.
-func parseRecallArgs(args []string) (recallReq, error) {
+// ParseRecallArgs parses and cross-validates the recall flags. Every error it
+// returns is a flag/selector mistake (the CLI maps those to its usage exit
+// code); everything data-dependent is decided later, by Recall.
+func ParseRecallArgs(args []string) (RecallReq, error) {
 	fs := flag.NewFlagSet("recall", flag.ContinueOnError)
 	dir := fs.String("dir", "", "transcript scope directory (a single chat, or the whole root)")
 	msg := fs.Int64("msg", 0, "point lookup by message id (single-chat scope only)")
@@ -75,32 +57,32 @@ func parseRecallArgs(args []string) (recallReq, error) {
 	until := fs.String("until", "", "with --since: dump up to this day, inclusive (default: open)")
 	role := fs.String("role", "", "with a range: keep only this role (user|bot)")
 	if err := fs.Parse(args); err != nil {
-		return recallReq{}, usageError{err}
+		return RecallReq{}, err
 	}
 
-	req := recallReq{dir: *dir, msg: *msg, context: *context, role: *role}
+	req := RecallReq{dir: *dir, msg: *msg, context: *context, role: *role}
 	if *dir == "" {
-		return req, usageError{errors.New("--dir is required (the transcript scope)")}
+		return req, errors.New("--dir is required (the transcript scope)")
 	}
 
 	hasMsg := *msg != 0
 	rangeGiven := *day != "" || *since != "" || *until != ""
 	switch {
 	case *msg < 0:
-		return req, usageError{errors.New("--msg must be a positive message id")}
+		return req, errors.New("--msg must be a positive message id")
 	case hasMsg && rangeGiven:
-		return req, usageError{errors.New("choose either --msg or a day/range (--day/--since), not both")}
+		return req, errors.New("choose either --msg or a day/range (--day/--since), not both")
 	case !hasMsg && !rangeGiven:
-		return req, usageError{errors.New("need a selector: --msg N, --day DATE, or --since DATE [--until DATE]")}
+		return req, errors.New("need a selector: --msg N, --day DATE, or --since DATE [--until DATE]")
 	}
 
 	if hasMsg {
 		req.mode = modeMsg
 		if *context < 0 {
-			return req, usageError{errors.New("--context must be >= 0")}
+			return req, errors.New("--context must be >= 0")
 		}
 		if *role != "" {
-			return req, usageError{errors.New("--role applies to a day/range dump, not --msg")}
+			return req, errors.New("--role applies to a day/range dump, not --msg")
 		}
 		return req, nil
 	}
@@ -108,14 +90,14 @@ func parseRecallArgs(args []string) (recallReq, error) {
 	// Range mode.
 	req.mode = modeRange
 	if *context != 0 {
-		return req, usageError{errors.New("--context applies to --msg, not a day/range")}
+		return req, errors.New("--context applies to --msg, not a day/range")
 	}
 	if *role != "" && *role != "user" && *role != "bot" {
-		return req, usageError{fmt.Errorf("--role must be user or bot, got %q", *role)}
+		return req, fmt.Errorf("--role must be user or bot, got %q", *role)
 	}
 	if *day != "" {
 		if *since != "" || *until != "" {
-			return req, usageError{errors.New("--day cannot be combined with --since/--until")}
+			return req, errors.New("--day cannot be combined with --since/--until")
 		}
 		d, err := parseRecallDate("--day", *day)
 		if err != nil {
@@ -125,7 +107,7 @@ func parseRecallArgs(args []string) (recallReq, error) {
 		return req, nil
 	}
 	if *since == "" {
-		return req, usageError{errors.New("--until needs --since")}
+		return req, errors.New("--until needs --since")
 	}
 	s, err := parseRecallDate("--since", *since)
 	if err != nil {
@@ -141,7 +123,7 @@ func parseRecallArgs(args []string) (recallReq, error) {
 		return req, err
 	}
 	if u.Before(s) {
-		return req, usageError{errors.New("--until is before --since")}
+		return req, errors.New("--until is before --since")
 	}
 	req.until = u
 	return req, nil
@@ -152,7 +134,7 @@ func parseRecallArgs(args []string) (recallReq, error) {
 func parseRecallDate(flag, v string) (time.Time, error) {
 	t, err := time.ParseInLocation("2006-01-02", v, time.Local)
 	if err != nil {
-		return time.Time{}, usageError{fmt.Errorf("%s: %q is not a YYYY-MM-DD date", flag, v)}
+		return time.Time{}, fmt.Errorf("%s: %q is not a YYYY-MM-DD date", flag, v)
 	}
 	return t, nil
 }
@@ -173,10 +155,21 @@ type chatRef struct {
 	path string
 }
 
-// runRecallTo dispatches a parsed request against the detected scope shape, writing
-// groomed output to w. Data-dependent errors (an unreadable dir, a point lookup in a
-// multi-chat scope) are returned; an empty result is not an error.
-func runRecallTo(w io.Writer, req recallReq) error {
+// Recall runs a parsed request against the detected scope shape, writing a
+// read-only, GROOMED view of the transcript store to w. It exists so the model
+// does not have to Read + grep the escaped JSONL itself — it asks for a message
+// (and its thread neighbours) or a date range, and gets human-readable blocks
+// back.
+//
+// req's scope dir is the responder's own read scope
+// ($AK_TGCLAUDE_TRANSCRIPT_DIR): a single chat directory, or — for the owner —
+// the whole transcripts root. The shape is detected from the directory; the
+// sandbox already confines the scope to what this responder may read (root
+// deny-read + a per-invocation allowRead carve), so recall inherits that
+// boundary without re-checking it. Read-only: it never writes. Data-dependent
+// errors (an unreadable dir, a point lookup in a multi-chat scope) are
+// returned; an empty result is not an error.
+func Recall(w io.Writer, req RecallReq) error {
 	shape, chats, err := detectShape(req.dir)
 	if err != nil {
 		return fmt.Errorf("reading transcript scope %s: %w", req.dir, err)
@@ -249,7 +242,7 @@ func isChatDir(path string) bool {
 // recallMsg renders a point lookup and its optional context window. A hit that is a
 // split-message piece resolves to its anchor (the record that carries the text),
 // with a note that the lookup arrived via a piece.
-func recallMsg(w io.Writer, chat chatRef, req recallReq) error {
+func recallMsg(w io.Writer, chat chatRef, req RecallReq) error {
 	recs, err := loadChatRecords(chat.path, nil)
 	if err != nil {
 		return err
@@ -286,7 +279,7 @@ func recallMsg(w io.Writer, chat chatRef, req recallReq) error {
 // recallRange dumps every non-piece record in [since,until], optionally filtered to
 // one role. In the root shape it walks each chat, prefixing the block with a header
 // naming the chat from its meta.json; chats with nothing in range are skipped.
-func recallRange(w io.Writer, shape scopeShape, chats []chatRef, req recallReq) error {
+func recallRange(w io.Writer, shape scopeShape, chats []chatRef, req RecallReq) error {
 	filter := func(d time.Time) bool { return !d.Before(req.since) && !d.After(req.until) }
 	any := false
 	for _, chat := range chats {
@@ -539,7 +532,7 @@ func metaWho(m *transcriptMeta) string {
 }
 
 // rangeDesc describes the requested range for an empty-result note.
-func rangeDesc(req recallReq) string {
+func rangeDesc(req RecallReq) string {
 	s := req.since.Format("2006-01-02")
 	switch {
 	case req.untilOpen:

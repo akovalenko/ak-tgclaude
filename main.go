@@ -6,6 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"os"
+
+	"github.com/akovalenko/ak-tgclaude/internal/store"
 )
 
 // version is reported by the `version` subcommand and advertised as the MCP
@@ -44,6 +46,18 @@ type usageError struct{ err error }
 
 func (e usageError) Error() string { return e.err.Error() }
 func (e usageError) Unwrap() error { return e.err }
+
+// runRecall implements `ak-tgclaude recall --dir SCOPE <selector>` on top of
+// the store package's transcript reader. The seam preserves the exit-code
+// contract: everything ParseRecallArgs returns is a flag/selector mistake
+// (usageError, exit 2), everything past parsing is a runtime fault (exit 1).
+func runRecall(args []string) error {
+	req, err := store.ParseRecallArgs(args)
+	if err != nil {
+		return usageError{err}
+	}
+	return store.Recall(os.Stdout, req)
+}
 
 func main() {
 	if len(os.Args) < 2 {

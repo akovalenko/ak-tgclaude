@@ -1,4 +1,4 @@
-package main
+package store
 
 import (
 	"encoding/json"
@@ -8,9 +8,9 @@ import (
 	"time"
 )
 
-func TestSessionStorePersistsAcrossReload(t *testing.T) {
+func TestSessionsPersistsAcrossReload(t *testing.T) {
 	dir := t.TempDir()
-	s, err := LoadSessionStore(dir, false)
+	s, err := LoadSessions(dir, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -25,7 +25,7 @@ func TestSessionStorePersistsAcrossReload(t *testing.T) {
 	}
 
 	// Reload from the same path.
-	s2, err := LoadSessionStore(dir, false)
+	s2, err := LoadSessions(dir, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -39,7 +39,7 @@ func TestSessionStorePersistsAcrossReload(t *testing.T) {
 	if err := s2.Clear(1); err != nil {
 		t.Fatal(err)
 	}
-	s3, _ := LoadSessionStore(dir, false)
+	s3, _ := LoadSessions(dir, false)
 	if _, ok := s3.SessionID(1); ok {
 		t.Errorf("session not cleared after reload")
 	}
@@ -47,7 +47,7 @@ func TestSessionStorePersistsAcrossReload(t *testing.T) {
 
 func TestEphemeralSessionsKeepOffsetButNotBindings(t *testing.T) {
 	dir := t.TempDir()
-	s, err := LoadSessionStore(dir, true)
+	s, err := LoadSessions(dir, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -62,7 +62,7 @@ func TestEphemeralSessionsKeepOffsetButNotBindings(t *testing.T) {
 		t.Errorf("in-memory binding lost: %q ok=%v", sid, ok)
 	}
 	// ...but a reload (ephemeral or not) sees no bindings, while the offset survives.
-	s2, _ := LoadSessionStore(dir, false)
+	s2, _ := LoadSessions(dir, false)
 	if _, ok := s2.SessionID(1); ok {
 		t.Errorf("ephemeral binding should not have been persisted")
 	}
@@ -74,7 +74,7 @@ func TestEphemeralSessionsKeepOffsetButNotBindings(t *testing.T) {
 func TestEphemeralLoadScrubsDiskBindings(t *testing.T) {
 	dir := t.TempDir()
 	// Seed a persistent store with bindings + an offset.
-	s, _ := LoadSessionStore(dir, false)
+	s, _ := LoadSessions(dir, false)
 	if err := s.SetSession(1, "sess-a"); err != nil {
 		t.Fatal(err)
 	}
@@ -84,7 +84,7 @@ func TestEphemeralLoadScrubsDiskBindings(t *testing.T) {
 
 	// Loading ephemeral must scrub the on-disk bindings immediately — before any
 	// SetOffset — while keeping the offset.
-	if _, err := LoadSessionStore(dir, true); err != nil {
+	if _, err := LoadSessions(dir, true); err != nil {
 		t.Fatal(err)
 	}
 	b, err := os.ReadFile(filepath.Join(dir, "sessions.json"))
@@ -105,7 +105,7 @@ func TestEphemeralLoadScrubsDiskBindings(t *testing.T) {
 
 func TestClearAllDropsBindingsKeepsOffset(t *testing.T) {
 	dir := t.TempDir()
-	s, _ := LoadSessionStore(dir, false)
+	s, _ := LoadSessions(dir, false)
 	if err := s.SetSession(1, "a"); err != nil {
 		t.Fatal(err)
 	}
@@ -126,7 +126,7 @@ func TestClearAllDropsBindingsKeepsOffset(t *testing.T) {
 	if n, _ := s.ClearAll(); n != 0 {
 		t.Errorf("second ClearAll should remove 0, got %d", n)
 	}
-	s2, _ := LoadSessionStore(dir, false)
+	s2, _ := LoadSessions(dir, false)
 	if _, ok := s2.SessionID(1); ok {
 		t.Errorf("binding survived ClearAll after reload")
 	}
@@ -135,9 +135,9 @@ func TestClearAllDropsBindingsKeepsOffset(t *testing.T) {
 	}
 }
 
-func TestSessionStoreOutbox(t *testing.T) {
+func TestSessionsOutbox(t *testing.T) {
 	dir := t.TempDir()
-	s, _ := LoadSessionStore(dir, false)
+	s, _ := LoadSessions(dir, false)
 	if _, ok := s.Outbox(1); ok {
 		t.Fatal("no outbox expected initially")
 	}
@@ -155,7 +155,7 @@ func TestSessionStoreOutbox(t *testing.T) {
 		t.Errorf("SetSession clobbered outbox: %q", p)
 	}
 	// Outbox + session persist across a reload.
-	s2, _ := LoadSessionStore(dir, false)
+	s2, _ := LoadSessions(dir, false)
 	if p, ok := s2.Outbox(1); !ok || p != "/run/out/outbox-A" {
 		t.Errorf("outbox not persisted: %q,%v", p, ok)
 	}
@@ -178,7 +178,7 @@ func TestSessionStoreOutbox(t *testing.T) {
 
 func TestEvictExpired(t *testing.T) {
 	dir := t.TempDir()
-	s, _ := LoadSessionStore(dir, false)
+	s, _ := LoadSessions(dir, false)
 	_ = s.SetOutbox(1, "/out/1") // LastUsed ~ now
 	_ = s.SetOutbox(2, "/out/2")
 	_ = s.SetOutbox(3, "/out/3")
@@ -214,7 +214,7 @@ func TestLegacyStringSessionsLoad(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "sessions.json"), []byte(legacy), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	s, err := LoadSessionStore(dir, false)
+	s, err := LoadSessions(dir, false)
 	if err != nil {
 		t.Fatalf("legacy store should load, not crash: %v", err)
 	}
@@ -231,11 +231,11 @@ func TestLegacyStringSessionsLoad(t *testing.T) {
 }
 
 func TestEphemeralFlag(t *testing.T) {
-	s, _ := LoadSessionStore(t.TempDir(), true)
+	s, _ := LoadSessions(t.TempDir(), true)
 	if !s.Ephemeral() {
 		t.Error("Ephemeral() should be true")
 	}
-	s2, _ := LoadSessionStore(t.TempDir(), false)
+	s2, _ := LoadSessions(t.TempDir(), false)
 	if s2.Ephemeral() {
 		t.Error("Ephemeral() should be false")
 	}

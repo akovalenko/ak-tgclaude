@@ -3,6 +3,8 @@ package main
 import (
 	"fmt"
 	"os"
+
+	"github.com/akovalenko/ak-tgclaude/internal/store"
 )
 
 // runClear implements `ak-tgclaude clear`: drop every persisted chat→session
@@ -16,16 +18,16 @@ func runClear(args []string) error {
 	if err != nil {
 		return usageError{err}
 	}
-	store, err := LoadSessionStore(cfg.SessionDir(), false)
+	sessions, err := store.LoadSessions(cfg.SessionDir(), false)
 	if err != nil {
 		return err
 	}
-	for _, p := range store.Outboxes() {
+	for _, p := range sessions.Outboxes() {
 		if err := os.RemoveAll(p); err != nil {
 			fmt.Fprintf(os.Stderr, "ak-tgclaude: clear: removing outbox %s: %v\n", p, err)
 		}
 	}
-	n, err := store.ClearAll()
+	n, err := sessions.ClearAll()
 	if err != nil {
 		return err
 	}

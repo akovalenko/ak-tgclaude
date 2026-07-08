@@ -1,4 +1,4 @@
-package main
+package store
 
 import (
 	"bytes"
@@ -9,7 +9,7 @@ import (
 )
 
 // ap appends a record with a default timestamp when none is set.
-func ap(t *testing.T, s *TranscriptStore, chat int64, rec TranscriptRecord, ident *ChatIdentity) {
+func ap(t *testing.T, s *Transcripts, chat int64, rec TranscriptRecord, ident *ChatIdentity) {
 	t.Helper()
 	if rec.TS.IsZero() {
 		rec.TS = fixedTS(2026, 7, 4, 9)
@@ -24,7 +24,7 @@ func ap(t *testing.T, s *TranscriptStore, chat int64, rec TranscriptRecord, iden
 func singleChatScope(t *testing.T) string {
 	t.Helper()
 	root := t.TempDir()
-	s := NewTranscriptStore(root)
+	s := NewTranscripts(root)
 	ap(t, s, 42, TranscriptRecord{MsgID: 100, Role: "user", Text: "how do I restart asmo?"}, nil)
 	ap(t, s, 42, TranscriptRecord{MsgID: 101, Role: "bot", ReplyTo: 100, Text: "Run deploy restart asmo."}, nil)
 	ap(t, s, 42, TranscriptRecord{MsgID: 102, Role: "user", Text: "thanks", Attach: []TranscriptAttach{{Kind: "document", Name: "log.txt"}}}, nil)
@@ -41,7 +41,7 @@ func TestRecallShapeDetection(t *testing.T) {
 	}
 
 	root := t.TempDir()
-	s := NewTranscriptStore(root)
+	s := NewTranscripts(root)
 	ap(t, s, 42, TranscriptRecord{MsgID: 1, Role: "user", Text: "a"}, &ChatIdentity{FirstName: "Anton", Username: "ak"})
 	ap(t, s, 77, TranscriptRecord{MsgID: 1, Role: "user", Text: "b"}, &ChatIdentity{FirstName: "Nick"})
 	shape, chats, err := detectShape(root)
@@ -60,7 +60,7 @@ func TestRecallShapeDetection(t *testing.T) {
 func TestRecallMsgPointLookup(t *testing.T) {
 	scope := singleChatScope(t)
 	var b bytes.Buffer
-	if err := runRecallTo(&b, recallReq{dir: scope, mode: modeMsg, msg: 101}); err != nil {
+	if err := Recall(&b, RecallReq{dir: scope, mode: modeMsg, msg: 101}); err != nil {
 		t.Fatal(err)
 	}
 	out := b.String()
@@ -79,7 +79,7 @@ func TestRecallMsgPointLookup(t *testing.T) {
 func TestRecallMsgPieceResolvesToAnchor(t *testing.T) {
 	scope := singleChatScope(t)
 	var b bytes.Buffer
-	if err := runRecallTo(&b, recallReq{dir: scope, mode: modeMsg, msg: 201}); err != nil {
+	if err := Recall(&b, RecallReq{dir: scope, mode: modeMsg, msg: 201}); err != nil {
 		t.Fatal(err)
 	}
 	out := b.String()
@@ -97,7 +97,7 @@ func TestRecallMsgPieceResolvesToAnchor(t *testing.T) {
 func TestRecallMsgNotFound(t *testing.T) {
 	scope := singleChatScope(t)
 	var b bytes.Buffer
-	if err := runRecallTo(&b, recallReq{dir: scope, mode: modeMsg, msg: 999}); err != nil {
+	if err := Recall(&b, RecallReq{dir: scope, mode: modeMsg, msg: 999}); err != nil {
 		t.Fatal(err)
 	}
 	if !strings.Contains(b.String(), "no message 999") {
@@ -107,10 +107,10 @@ func TestRecallMsgNotFound(t *testing.T) {
 
 func TestRecallMsgInRootErrors(t *testing.T) {
 	root := t.TempDir()
-	s := NewTranscriptStore(root)
+	s := NewTranscripts(root)
 	ap(t, s, 42, TranscriptRecord{MsgID: 1, Role: "user", Text: "a"}, nil)
 	ap(t, s, 77, TranscriptRecord{MsgID: 1, Role: "user", Text: "b"}, nil)
-	err := runRecallTo(&bytes.Buffer{}, recallReq{dir: root, mode: modeMsg, msg: 1})
+	err := Recall(&bytes.Buffer{}, RecallReq{dir: root, mode: modeMsg, msg: 1})
 	if err == nil || !strings.Contains(err.Error(), "single-chat scope") {
 		t.Fatalf("point lookup in root should error about scope, got %v", err)
 	}
@@ -120,7 +120,7 @@ func TestRecallContext(t *testing.T) {
 	scope := singleChatScope(t)
 	var b bytes.Buffer
 	// Context 1 around msg 101: one non-piece record before (100) and after (102).
-	if err := runRecallTo(&b, recallReq{dir: scope, mode: modeMsg, msg: 101, context: 1}); err != nil {
+	if err := Recall(&b, RecallReq{dir: scope, mode: modeMsg, msg: 101, context: 1}); err != nil {
 		t.Fatal(err)
 	}
 	out := b.String()
@@ -138,7 +138,7 @@ func TestRecallContext(t *testing.T) {
 func TestRecallRangeDaySkipsPiecesAndRendersAttach(t *testing.T) {
 	scope := singleChatScope(t)
 	var b bytes.Buffer
-	if err := runRecallTo(&b, recallReq{
+	if err := Recall(&b, RecallReq{
 		dir: scope, mode: modeRange,
 		since: mustDate(t, "2026-07-04"), until: mustDate(t, "2026-07-04"),
 	}); err != nil {
@@ -163,7 +163,7 @@ func TestRecallRangeDaySkipsPiecesAndRendersAttach(t *testing.T) {
 func TestRecallRangeRoleFilter(t *testing.T) {
 	scope := singleChatScope(t)
 	var b bytes.Buffer
-	if err := runRecallTo(&b, recallReq{
+	if err := Recall(&b, RecallReq{
 		dir: scope, mode: modeRange, role: "user",
 		since: mustDate(t, "2026-07-04"), until: mustDate(t, "2026-07-04"),
 	}); err != nil {
@@ -180,12 +180,12 @@ func TestRecallRangeRoleFilter(t *testing.T) {
 
 func TestRecallRangeSinceUntilWindow(t *testing.T) {
 	root := t.TempDir()
-	s := NewTranscriptStore(root)
+	s := NewTranscripts(root)
 	ap(t, s, 42, TranscriptRecord{MsgID: 1, TS: fixedTS(2026, 7, 3, 9), Role: "user", Text: "before"}, nil)
 	ap(t, s, 42, TranscriptRecord{MsgID: 2, TS: fixedTS(2026, 7, 4, 9), Role: "user", Text: "inside"}, nil)
 	ap(t, s, 42, TranscriptRecord{MsgID: 3, TS: fixedTS(2026, 7, 6, 9), Role: "user", Text: "after"}, nil)
 	var b bytes.Buffer
-	if err := runRecallTo(&b, recallReq{
+	if err := Recall(&b, RecallReq{
 		dir: filepath.Join(root, "42"), mode: modeRange,
 		since: mustDate(t, "2026-07-04"), until: mustDate(t, "2026-07-05"),
 	}); err != nil {
@@ -199,11 +199,11 @@ func TestRecallRangeSinceUntilWindow(t *testing.T) {
 
 func TestRecallRootRangeChatHeaders(t *testing.T) {
 	root := t.TempDir()
-	s := NewTranscriptStore(root)
+	s := NewTranscripts(root)
 	ap(t, s, 42, TranscriptRecord{MsgID: 1, Role: "user", Text: "from anton"}, &ChatIdentity{FirstName: "Anton", Username: "ak"})
 	ap(t, s, 77, TranscriptRecord{MsgID: 1, Role: "user", Text: "from nick"}, &ChatIdentity{FirstName: "Nick"})
 	var b bytes.Buffer
-	if err := runRecallTo(&b, recallReq{
+	if err := Recall(&b, RecallReq{
 		dir: root, mode: modeRange,
 		since: mustDate(t, "2026-07-04"), until: mustDate(t, "2026-07-04"),
 	}); err != nil {
@@ -224,7 +224,7 @@ func TestRecallRootRangeChatHeaders(t *testing.T) {
 func TestRecallEmptyRange(t *testing.T) {
 	scope := singleChatScope(t)
 	var b bytes.Buffer
-	if err := runRecallTo(&b, recallReq{
+	if err := Recall(&b, RecallReq{
 		dir: scope, mode: modeRange,
 		since: mustDate(t, "2020-01-01"), until: mustDate(t, "2020-01-02"),
 	}); err != nil {
@@ -288,18 +288,18 @@ func TestParseRecallArgsValidation(t *testing.T) {
 		{"--dir", "/x", "--msg", "-3"},                                    // negative id
 	}
 	for _, args := range bad {
-		if _, err := parseRecallArgs(args); err == nil {
-			t.Errorf("parseRecallArgs(%v) should have failed", args)
+		if _, err := ParseRecallArgs(args); err == nil {
+			t.Errorf("ParseRecallArgs(%v) should have failed", args)
 		}
 	}
 
 	// A valid --msg with context.
-	req, err := parseRecallArgs([]string{"--dir", "/x", "--msg", "5", "--context", "2"})
+	req, err := ParseRecallArgs([]string{"--dir", "/x", "--msg", "5", "--context", "2"})
 	if err != nil || req.mode != modeMsg || req.msg != 5 || req.context != 2 {
 		t.Fatalf("valid --msg parse wrong: %+v err=%v", req, err)
 	}
 	// A valid open-ended --since.
-	req, err = parseRecallArgs([]string{"--dir", "/x", "--since", "2026-07-01"})
+	req, err = ParseRecallArgs([]string{"--dir", "/x", "--since", "2026-07-01"})
 	if err != nil || req.mode != modeRange || !req.untilOpen {
 		t.Fatalf("valid --since parse wrong: %+v err=%v", req, err)
 	}

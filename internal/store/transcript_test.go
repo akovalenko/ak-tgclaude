@@ -1,4 +1,4 @@
-package main
+package store
 
 import (
 	"bufio"
@@ -37,7 +37,7 @@ func readLines(t *testing.T, path string) []string {
 
 func TestTranscriptAppendCreatesDayFileAndMeta(t *testing.T) {
 	root := t.TempDir()
-	s := NewTranscriptStore(root)
+	s := NewTranscripts(root)
 	rec := TranscriptRecord{MsgID: 10, TS: fixedTS(2026, 7, 4, 9), Role: "user", Text: "как перезапустить asmo?"}
 	if err := s.Append(42, rec, &ChatIdentity{Username: "anton", FirstName: "Anton"}); err != nil {
 		t.Fatal(err)
@@ -74,7 +74,7 @@ func TestTranscriptAppendCreatesDayFileAndMeta(t *testing.T) {
 
 func TestTranscriptGroupMetaNamesGroupNotSpeaker(t *testing.T) {
 	root := t.TempDir()
-	s := NewTranscriptStore(root)
+	s := NewTranscripts(root)
 	// A group turn: the record carries the speaker (User/Name/Username), but the
 	// chat's meta.json must name the GROUP itself, not whoever spoke.
 	rec := TranscriptRecord{
@@ -106,7 +106,7 @@ func TestTranscriptGroupMetaNamesGroupNotSpeaker(t *testing.T) {
 
 func TestTranscriptDayFileNaming(t *testing.T) {
 	root := t.TempDir()
-	s := NewTranscriptStore(root)
+	s := NewTranscripts(root)
 	if err := s.Append(1, TranscriptRecord{MsgID: 1, TS: fixedTS(2026, 7, 3, 23), Role: "user", Text: "a"}, nil); err != nil {
 		t.Fatal(err)
 	}
@@ -131,7 +131,7 @@ func TestTranscriptDayFileNaming(t *testing.T) {
 
 func TestTranscriptCompactJSONLGrepAnchor(t *testing.T) {
 	root := t.TempDir()
-	s := NewTranscriptStore(root)
+	s := NewTranscripts(root)
 	// Two ids where one is a numeric prefix of the other: 5123 vs 51234.
 	for _, id := range []int64{5123, 51234} {
 		if err := s.Append(7, TranscriptRecord{MsgID: id, TS: fixedTS(2026, 7, 4, 9), Role: "user", Text: "x"}, nil); err != nil {
@@ -177,7 +177,7 @@ func TestTranscriptCompactJSONLGrepAnchor(t *testing.T) {
 
 func TestTranscriptRoleCounts(t *testing.T) {
 	root := t.TempDir()
-	s := NewTranscriptStore(root)
+	s := NewTranscripts(root)
 	first := fixedTS(2026, 7, 4, 9)
 	last := fixedTS(2026, 7, 4, 10)
 	if err := s.Append(3, TranscriptRecord{MsgID: 1, TS: first, Role: "user", Text: "q"}, nil); err != nil {
@@ -201,7 +201,7 @@ func TestTranscriptRoleCounts(t *testing.T) {
 
 func TestTranscriptConcurrentAppends(t *testing.T) {
 	root := t.TempDir()
-	s := NewTranscriptStore(root)
+	s := NewTranscripts(root)
 	const n = 40
 	ts := fixedTS(2026, 7, 4, 9)
 	var wg sync.WaitGroup
@@ -229,7 +229,7 @@ func TestTranscriptConcurrentAppends(t *testing.T) {
 
 func TestTranscriptTimestampSecondsRFC3339(t *testing.T) {
 	root := t.TempDir()
-	s := NewTranscriptStore(root)
+	s := NewTranscripts(root)
 	// A sub-second timestamp must be truncated to whole seconds on write.
 	ts := fixedTS(2026, 7, 4, 9).Add(500*time.Millisecond + 123*time.Nanosecond)
 	if err := s.Append(1, TranscriptRecord{MsgID: 1, TS: ts, Role: "user", Text: "x"}, nil); err != nil {
@@ -252,7 +252,7 @@ func TestTranscriptTimestampSecondsRFC3339(t *testing.T) {
 
 func TestTranscriptAuthorFields(t *testing.T) {
 	root := t.TempDir()
-	s := NewTranscriptStore(root)
+	s := NewTranscripts(root)
 	// A group turn carries first_name in Name and the @handle in Username, kept apart.
 	if err := s.Append(8, TranscriptRecord{
 		MsgID: 1, TS: fixedTS(2026, 7, 4, 9), Role: "user", Text: "hi",
@@ -291,7 +291,7 @@ func TestTranscriptAuthorFields(t *testing.T) {
 
 func TestTranscriptReplyToOmittedWhenZero(t *testing.T) {
 	root := t.TempDir()
-	s := NewTranscriptStore(root)
+	s := NewTranscripts(root)
 	if err := s.Append(5, TranscriptRecord{MsgID: 1, TS: fixedTS(2026, 7, 4, 9), Role: "user", Text: "no reply"}, nil); err != nil {
 		t.Fatal(err)
 	}

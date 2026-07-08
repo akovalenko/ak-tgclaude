@@ -10,6 +10,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/akovalenko/ak-tgclaude/internal/store"
 )
 
 func newTestMCP(t *testing.T, sender Sender) *mcpServer {
@@ -83,13 +85,13 @@ func toolErrorText(resp map[string]any) string {
 
 // readTranscript parses every JSONL record under a chat's transcript dir, in file
 // (append) order.
-func readTranscript(t *testing.T, dir string) []TranscriptRecord {
+func readTranscript(t *testing.T, dir string) []store.TranscriptRecord {
 	t.Helper()
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		t.Fatalf("read transcript dir: %v", err)
 	}
-	var recs []TranscriptRecord
+	var recs []store.TranscriptRecord
 	for _, e := range entries {
 		if !strings.HasSuffix(e.Name(), ".jsonl") {
 			continue
@@ -99,7 +101,7 @@ func readTranscript(t *testing.T, dir string) []TranscriptRecord {
 			if ln == "" {
 				continue
 			}
-			var rec TranscriptRecord
+			var rec store.TranscriptRecord
 			if err := json.Unmarshal([]byte(ln), &rec); err != nil {
 				t.Fatalf("bad record %q: %v", ln, err)
 			}
@@ -132,7 +134,7 @@ func TestMCPRecordsBotTurn(t *testing.T) {
 	f := &fakeSender{}
 	m := newTestMCP(t, f)
 	root := t.TempDir()
-	m.transcripts = NewTranscriptStore(root)
+	m.transcripts = store.NewTranscripts(root)
 	tok, err := m.Register(Route{ChatID: 42, ReplyTo: 7}, t.TempDir())
 	if err != nil {
 		t.Fatal(err)
@@ -152,7 +154,7 @@ func TestMCPRecordsBotTurn(t *testing.T) {
 			line = strings.TrimSpace(string(b))
 		}
 	}
-	var rec TranscriptRecord
+	var rec store.TranscriptRecord
 	if err := json.Unmarshal([]byte(line), &rec); err != nil {
 		t.Fatalf("bad bot record %q: %v", line, err)
 	}
@@ -167,7 +169,7 @@ func TestMCPRecordsSplitTurn(t *testing.T) {
 	f := &fakeSender{}
 	m := newTestMCP(t, f)
 	root := t.TempDir()
-	m.transcripts = NewTranscriptStore(root)
+	m.transcripts = store.NewTranscripts(root)
 	tok, err := m.Register(Route{ChatID: 42, ReplyTo: 7}, t.TempDir())
 	if err != nil {
 		t.Fatal(err)

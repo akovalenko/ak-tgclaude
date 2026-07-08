@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -11,6 +12,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/akovalenko/ak-tgclaude/internal/store"
 )
 
 // typingProbe blocks in Respond until the sender has recorded a "typing" chat
@@ -66,7 +69,7 @@ func (f *fakeResponder) Respond(ctx context.Context, req RespondRequest) (Respon
 
 func newTestDispatcher(t *testing.T, resp Responder, sender Sender) *Dispatcher {
 	t.Helper()
-	store, err := LoadSessionStore(t.TempDir(), false)
+	sessions, err := store.LoadSessions(t.TempDir(), false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -78,7 +81,7 @@ func newTestDispatcher(t *testing.T, resp Responder, sender Sender) *Dispatcher 
 	return &Dispatcher{
 		sender:      sender,
 		mcp:         mcp,
-		store:       store,
+		sessions:    sessions,
 		resp:        resp,
 		authz:       openAccess{}, // tests that don't exercise access allow everyone
 		outboxRoot:  t.TempDir(),
@@ -91,6 +94,62 @@ func textUpdate(updateID, chatID, msgID int64, text string) Update {
 		UpdateID: updateID,
 		Message:  &Message{MessageID: msgID, Text: text, Chat: Chat{ID: chatID}},
 	}
+}
+
+func readLines(t *testing.T, path string) []string {
+	t.Helper()
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read %s: %v", path, err)
+	}
+	var lines []string
+	sc := bufio.NewScanner(bytes.NewReader(b))
+	for sc.Scan() {
+		if s := sc.Text(); s != "" {
+			lines = append(lines, s)
+		}
+	}
+	return lines
+}
+
+// usageRow mirrors the usage log's JSONL schema (the record type itself lives
+// unexported in internal/store): these tests assert the on-disk keys directly.
+type usageRow struct {
+	TS      time.Time `json:"ts"`
+	ChatID  int64     `json:"chat_id"`
+	UserID  int64     `json:"user_id"`
+	MsgID   int64     `json:"msg_id"`
+	Elapsed int64     `json:"elapsed"`
+	Cost    float64   `json:"cost"`
+}
+
+func readUsageRows(t *testing.T, path string) []usageRow {
+	t.Helper()
+	f, err := os.Open(path)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		t.Fatalf("open usage log %s: %v", path, err)
+	}
+	defer f.Close()
+	var rows []usageRow
+	sc := bufio.NewScanner(f)
+	for sc.Scan() {
+		line := strings.TrimSpace(sc.Text())
+		if line == "" {
+			continue
+		}
+		var r usageRow
+		if err := json.Unmarshal([]byte(line), &r); err != nil {
+			t.Fatalf("parse usage line %q: %v", line, err)
+		}
+		rows = append(rows, r)
+	}
+	if err := sc.Err(); err != nil {
+		t.Fatalf("scan usage log: %v", err)
+	}
+	return rows
 }
 
 func TestPersonaFor(t *testing.T) {
@@ -156,7 +215,7 @@ func TestHandleRecordsUserTurn(t *testing.T) {
 	sender := &fakeSender{}
 	d := newTestDispatcher(t, resp, sender)
 	root := t.TempDir()
-	d.transcripts = NewTranscriptStore(root)
+	d.transcripts = store.NewTranscripts(root)
 
 	sent := time.Date(2026, 7, 4, 12, 0, 0, 0, time.Local) // noon: no midnight-rollover flake
 	up := Update{UpdateID: 1, Message: &Message{
@@ -171,14 +230,20 @@ func TestHandleRecordsUserTurn(t *testing.T) {
 	if len(lines) != 1 {
 		t.Fatalf("want 1 user line, got %d", len(lines))
 	}
-	var rec TranscriptRecord
+	var rec store.TranscriptRecord
 	if err := json.Unmarshal([]byte(lines[0]), &rec); err != nil {
 		t.Fatal(err)
 	}
 	if rec.MsgID != 100 || rec.Role != "user" || rec.ReplyTo != 55 || rec.Text != "recall this" {
 		t.Errorf("user record wrong: %+v", rec)
 	}
-	var meta transcriptMeta
+	// Assert the on-disk JSON keys directly: meta.json's schema type now lives
+	// unexported in internal/store.
+	var meta struct {
+		Username  string `json:"username"`
+		FirstName string `json:"first_name"`
+		UserCount int64  `json:"user_count"`
+	}
 	b, _ := os.ReadFile(filepath.Join(root, "42", "meta.json"))
 	if err := json.Unmarshal(b, &meta); err != nil {
 		t.Fatal(err)
@@ -309,7 +374,7 @@ func TestHandleNewSessionBindsAndDelivers(t *testing.T) {
 	if calls[0].route.ChatID != 42 || calls[0].route.ReplyTo != 7 {
 		t.Errorf("route not pinned to incoming message: %+v", calls[0].route)
 	}
-	if sid, ok := d.store.SessionID(42); !ok || sid != "sess-1" {
+	if sid, ok := d.sessions.SessionID(42); !ok || sid != "sess-1" {
 		t.Errorf("chat->session not bound: %q ok=%v", sid, ok)
 	}
 }
@@ -317,7 +382,7 @@ func TestHandleNewSessionBindsAndDelivers(t *testing.T) {
 func TestHandleResumesExistingSession(t *testing.T) {
 	resp := &fakeResponder{sid: "sess-new"}
 	d := newTestDispatcher(t, resp, &fakeSender{})
-	if err := d.store.SetSession(42, "sess-old"); err != nil {
+	if err := d.sessions.SetSession(42, "sess-old"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -326,7 +391,7 @@ func TestHandleResumesExistingSession(t *testing.T) {
 	if resp.gotReq.SessionID != "sess-old" {
 		t.Errorf("expected resume of sess-old, got %q", resp.gotReq.SessionID)
 	}
-	if sid, _ := d.store.SessionID(42); sid != "sess-new" {
+	if sid, _ := d.sessions.SessionID(42); sid != "sess-new" {
 		t.Errorf("session not updated to sess-new: %q", sid)
 	}
 }
@@ -335,7 +400,7 @@ func TestHandleClearDropsSessionAndSkipsResponder(t *testing.T) {
 	resp := &fakeResponder{sid: "x"}
 	sender := &fakeSender{}
 	d := newTestDispatcher(t, resp, sender)
-	if err := d.store.SetSession(42, "sess-old"); err != nil {
+	if err := d.sessions.SetSession(42, "sess-old"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -344,7 +409,7 @@ func TestHandleClearDropsSessionAndSkipsResponder(t *testing.T) {
 	if resp.called {
 		t.Errorf("responder should not run on /clear")
 	}
-	if _, ok := d.store.SessionID(42); ok {
+	if _, ok := d.sessions.SessionID(42); ok {
 		t.Errorf("session not cleared")
 	}
 	calls := sender.snapshot()
@@ -575,7 +640,7 @@ func TestHandleUsageLogWritesRow(t *testing.T) {
 	d := newTestDispatcher(t, resp, sender)
 	path := filepath.Join(t.TempDir(), "usage.jsonl")
 	var err error
-	if d.usage, err = NewUsageLog(path); err != nil {
+	if d.usage, err = store.NewUsageLog(path); err != nil {
 		t.Fatal(err)
 	}
 
@@ -619,7 +684,7 @@ func TestHandleUsageLogSumsRepromptCost(t *testing.T) {
 	d.requireDelivery = true
 	path := filepath.Join(t.TempDir(), "usage.jsonl")
 	var err error
-	if d.usage, err = NewUsageLog(path); err != nil {
+	if d.usage, err = store.NewUsageLog(path); err != nil {
 		t.Fatal(err)
 	}
 
@@ -677,7 +742,7 @@ func TestHandleHelpAndStart(t *testing.T) {
 		if calls[0].route.ChatID != 42 || calls[0].route.ReplyTo != 7 {
 			t.Errorf("%s: help not routed to the incoming message: %+v", cmd, calls[0].route)
 		}
-		if _, ok := d.store.SessionID(42); ok {
+		if _, ok := d.sessions.SessionID(42); ok {
 			t.Errorf("%s: help must not bind a session", cmd)
 		}
 	}
@@ -844,7 +909,7 @@ func TestHandleGroupUnauthorizedRecordsButSilent(t *testing.T) {
 	d := newTestDispatcher(t, resp, sender)
 	d.authz = newAllowList(nil) // deny everyone
 	root := t.TempDir()
-	d.transcripts = NewTranscriptStore(root)
+	d.transcripts = store.NewTranscripts(root)
 	sent := time.Date(2026, 7, 4, 12, 0, 0, 0, time.Local)
 	up := Update{Message: &Message{
 		MessageID: 100, Text: "hello room", Date: sent.Unix(),
@@ -862,7 +927,7 @@ func TestHandleGroupUnauthorizedRecordsButSilent(t *testing.T) {
 	if len(lines) != 1 {
 		t.Fatalf("chatter should still be recorded, got %d lines", len(lines))
 	}
-	var rec TranscriptRecord
+	var rec store.TranscriptRecord
 	if err := json.Unmarshal([]byte(lines[0]), &rec); err != nil {
 		t.Fatal(err)
 	}
@@ -878,7 +943,7 @@ func TestHandleGroupAuthorizedNotAddressedRecordsNoSpawn(t *testing.T) {
 	d := newTestDispatcher(t, resp, sender) // openAccess authorizes everyone
 	d.botUsername = "mybot"
 	root := t.TempDir()
-	d.transcripts = NewTranscriptStore(root)
+	d.transcripts = store.NewTranscripts(root)
 	sent := time.Date(2026, 7, 4, 12, 0, 0, 0, time.Local)
 	up := Update{Message: &Message{
 		MessageID: 101, Text: "just chatting here", Date: sent.Unix(),
@@ -901,7 +966,7 @@ func TestHandleGroupAddressedSpawns(t *testing.T) {
 	resp := &fakeResponder{sid: "s1"}
 	d := newTestDispatcher(t, resp, &fakeSender{})
 	d.botUsername = "mybot"
-	d.transcripts = NewTranscriptStore(t.TempDir())
+	d.transcripts = store.NewTranscripts(t.TempDir())
 	up := Update{Message: &Message{
 		MessageID: 102, Text: "@mybot what is X",
 		Chat: Chat{ID: -100, Type: "supergroup"}, From: &User{ID: 5},
@@ -1033,7 +1098,7 @@ func TestHandleEmptyMessageIgnored(t *testing.T) {
 	sender := &fakeSender{}
 	d := newTestDispatcher(t, resp, sender)
 	root := t.TempDir()
-	d.transcripts = NewTranscriptStore(root)
+	d.transcripts = store.NewTranscripts(root)
 	// A Telegram service message: no text, no caption, no attachment (e.g. the bot
 	// was added to the group). Must be dropped: no spawn, no reply, no transcript line.
 	up := Update{Message: &Message{MessageID: 300, Chat: Chat{ID: -100, Type: "supergroup"}, From: &User{ID: 5}}}

@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/akovalenko/ak-tgclaude/internal/policy"
+	"github.com/akovalenko/ak-tgclaude/internal/store"
 )
 
 // defaultPollTimeout is the getUpdates long-poll timeout (seconds). The HTTP
@@ -52,7 +53,7 @@ type Dispatcher struct {
 	client           *Client    // getUpdates
 	sender           Sender     // sendMessage/sendDocument (= client in production)
 	mcp              *mcpServer // outbound transport: the responder's send_* tools deliver through here
-	store            *SessionStore
+	sessions         *store.Sessions
 	resp             Responder
 	authz            Authorizer    // gates which Telegram users may use the bot
 	outboxRoot       string        // writable root under which per-chat persistent outbox (doc/scratch) dirs live
@@ -83,14 +84,14 @@ type Dispatcher struct {
 	// transcripts records every turn (nil => feature off). transcriptRoot mirrors
 	// cfg.TranscriptRoot(); owner/ownerReadsAll drive the responder's read scope (the
 	// owner reads the whole root, others only their own chat) — used in Phase 4.
-	transcripts    *TranscriptStore
+	transcripts    *store.Transcripts
 	transcriptRoot string
 	owner          int64
 	ownerReadsAll  bool
 
 	// usage, when non-nil, appends one JSONL line per answered round (elapsed +
 	// round-summed cost). Enabled solely by configuring usage_log; nil => off.
-	usage *UsageLog
+	usage *store.UsageLog
 	// usageLogPath mirrors cfg.UsageLog ("" => off): the file the OWNER's responder is
 	// granted read of (sandbox allowRead + env + prompt hint), and every other
 	// responder is DENIED read of (per-invocation sandbox denyRead). Distinct from
@@ -103,7 +104,7 @@ type Dispatcher struct {
 // maxConcurrent); updates within one chat are serialized.
 func (d *Dispatcher) Run(ctx context.Context) error {
 	workers := newChatWorkers(ctx, d.handleUpdate, d.maxConcurrent, chatWorkerIdleTTL)
-	offset := d.store.Offset()
+	offset := d.sessions.Offset()
 	for ctx.Err() == nil {
 		updates, err := d.client.GetUpdates(ctx, offset, d.pollTimeout)
 		if err != nil {
@@ -119,7 +120,7 @@ func (d *Dispatcher) Run(ctx context.Context) error {
 		for _, u := range updates {
 			workers.dispatch(u)
 			offset = u.UpdateID + 1
-			if err := d.store.SetOffset(offset); err != nil {
+			if err := d.sessions.SetOffset(offset); err != nil {
 				log.Printf("ak-tgclaude: persisting offset: %v", err)
 			}
 		}
@@ -294,7 +295,7 @@ func replyToID(m *Message) int64 {
 // attachMeta renders an incoming attachment as transcript metadata (no bytes), or
 // nil when the message carried none. The kind mirrors incomingFile's two cases (a
 // document, or a photo).
-func attachMeta(m *Message, a *Attachment) []TranscriptAttach {
+func attachMeta(m *Message, a *Attachment) []store.TranscriptAttach {
 	if a == nil {
 		return nil
 	}
@@ -302,14 +303,14 @@ func attachMeta(m *Message, a *Attachment) []TranscriptAttach {
 	if m.Document == nil && len(m.Photo) > 0 {
 		kind = "photo"
 	}
-	return []TranscriptAttach{{Kind: kind, Name: a.Filename, Size: a.Size, Mime: a.MimeType}}
+	return []store.TranscriptAttach{{Kind: kind, Name: a.Filename, Size: a.Size, Mime: a.MimeType}}
 }
 
 // attachMetaDeclared renders a message's incoming attachment as transcript
 // metadata from its DECLARED fields (no download), or nil when it carries none.
 // Used for group chatter we record but do not fetch — the size/name are the
 // sender's declared values, not the fetched file's.
-func attachMetaDeclared(m *Message) []TranscriptAttach {
+func attachMetaDeclared(m *Message) []store.TranscriptAttach {
 	s := incomingFile(m)
 	if s == nil {
 		return nil
@@ -318,7 +319,7 @@ func attachMetaDeclared(m *Message) []TranscriptAttach {
 	if m.Document == nil && len(m.Photo) > 0 {
 		kind = "photo"
 	}
-	return []TranscriptAttach{{Kind: kind, Name: s.FileName, Size: s.FileSize, Mime: s.MimeType}}
+	return []store.TranscriptAttach{{Kind: kind, Name: s.FileName, Size: s.FileSize, Mime: s.MimeType}}
 }
 
 // recordUserTurn appends one incoming user turn to the transcript (a no-op when
@@ -326,26 +327,26 @@ func attachMetaDeclared(m *Message) []TranscriptAttach {
 // fetched Attachment on the spawn path, or declared for chatter we don't fetch).
 // User/Name attribute the turn — essential in a group, where one chat mixes many
 // speakers. The dispatcher is the only writer (it holds the trusted chat_id).
-func (d *Dispatcher) recordUserTurn(m *Message, meta []TranscriptAttach) {
+func (d *Dispatcher) recordUserTurn(m *Message, meta []store.TranscriptAttach) {
 	d.recordUserTurnAs(m, incomingText(m), meta)
 }
 
 // recordUserTurnAs records the turn with an explicit text — used by the /do path,
 // which records the resolved task text rather than the literal "/do …" command.
-func (d *Dispatcher) recordUserTurnAs(m *Message, text string, meta []TranscriptAttach) {
+func (d *Dispatcher) recordUserTurnAs(m *Message, text string, meta []store.TranscriptAttach) {
 	if d.transcripts == nil {
 		return
 	}
 	// meta.json identity describes the CHAT: a group is named by its own title/handle
 	// (per-speaker authorship already rides in the record's User/Name/Username fields),
 	// a private chat by its single partner.
-	var ident *ChatIdentity
+	var ident *store.ChatIdentity
 	if m.Chat.isGroup() {
-		ident = &ChatIdentity{Type: m.Chat.Type, Title: m.Chat.Title, Username: m.Chat.Username}
+		ident = &store.ChatIdentity{Type: m.Chat.Type, Title: m.Chat.Title, Username: m.Chat.Username}
 	} else if m.From != nil {
-		ident = &ChatIdentity{Type: m.Chat.Type, Username: m.From.Username, FirstName: m.From.FirstName}
+		ident = &store.ChatIdentity{Type: m.Chat.Type, Username: m.From.Username, FirstName: m.From.FirstName}
 	}
-	rec := TranscriptRecord{
+	rec := store.TranscriptRecord{
 		MsgID:    m.MessageID,
 		TS:       messageSentAt(m),
 		Role:     "user",
@@ -438,12 +439,12 @@ func (d *Dispatcher) handleUpdate(ctx context.Context, u Update) {
 	}
 
 	if isClearCommand(m.Text) {
-		if p, ok := d.store.Outbox(m.Chat.ID); ok {
+		if p, ok := d.sessions.Outbox(m.Chat.ID); ok {
 			if err := os.RemoveAll(p); err != nil {
 				log.Printf("ak-tgclaude: clear outbox %d: %v", m.Chat.ID, err)
 			}
 		}
-		if err := d.store.Clear(m.Chat.ID); err != nil {
+		if err := d.sessions.Clear(m.Chat.ID); err != nil {
 			log.Printf("ak-tgclaude: clear %d: %v", m.Chat.ID, err)
 		}
 		if _, err := d.sender.SendMessage(ctx, route, "Контекст очищен.", "", false); err != nil {
@@ -573,7 +574,7 @@ func (d *Dispatcher) handleUpdate(ctx context.Context, u Update) {
 	// the OWN attachment's metadata only — a replied-to file was already recorded under
 	// its original message, so it is not re-attached here. Covers a private turn and an
 	// addressed group turn alike; unaddressed group chatter was recorded at the gate.
-	var recMeta []TranscriptAttach
+	var recMeta []store.TranscriptAttach
 	if !fromReply {
 		recMeta = attachMeta(m, attach)
 	}
@@ -593,7 +594,7 @@ func (d *Dispatcher) handleUpdate(ctx context.Context, u Update) {
 	log.Printf("ak-tgclaude: launch responder chat=%d user=%s msg=%d", m.Chat.ID, ulabel, m.MessageID)
 
 	start := time.Now()
-	sid, _ := d.store.SessionID(m.Chat.ID)
+	sid, _ := d.sessions.SessionID(m.Chat.ID)
 	// On a FRESH spawn, compose+inject this user's persona (it freezes into the
 	// session); on resume it is already there, so omit it.
 	var appendPrompt string
@@ -677,13 +678,13 @@ func (d *Dispatcher) handleUpdate(ctx context.Context, u Update) {
 		// If a resumed session was replaced by a new one (the old one expired), the
 		// persistent outbox belongs to the old session's context — which the new
 		// session doesn't remember — so wipe it; a fresh one is minted next turn.
-		if prev, ok := d.store.SessionID(m.Chat.ID); ok && prev != "" && prev != res.SessionID {
-			if p, ok := d.store.Outbox(m.Chat.ID); ok {
+		if prev, ok := d.sessions.SessionID(m.Chat.ID); ok && prev != "" && prev != res.SessionID {
+			if p, ok := d.sessions.Outbox(m.Chat.ID); ok {
 				if err := os.RemoveAll(p); err != nil {
 					log.Printf("ak-tgclaude: reset outbox chat %d: %v", m.Chat.ID, err)
 				}
 			}
-			if err := d.store.SetOutbox(m.Chat.ID, ""); err != nil {
+			if err := d.sessions.SetOutbox(m.Chat.ID, ""); err != nil {
 				log.Printf("ak-tgclaude: reset outbox record chat %d: %v", m.Chat.ID, err)
 			}
 		}
@@ -765,7 +766,7 @@ func (d *Dispatcher) respondWithTyping(ctx context.Context, chatID int64, req Re
 // logged, not fatal — the reply already went out; worst case the next turn
 // starts a fresh session.
 func (d *Dispatcher) bindSession(chat int64, sessionID string) {
-	if err := d.store.SetSession(chat, sessionID); err != nil {
+	if err := d.sessions.SetSession(chat, sessionID); err != nil {
 		log.Printf("ak-tgclaude: binding chat %d: %v", chat, err)
 	}
 }
@@ -997,7 +998,7 @@ func runDispatch(args []string) error {
 	// start. The `audit` subcommand runs the same check on demand.
 	cfg.logSecretAudit()
 
-	store, err := LoadSessionStore(cfg.SessionDir(), cfg.EphemeralSessions)
+	sessions, err := store.LoadSessions(cfg.SessionDir(), cfg.EphemeralSessions)
 	if err != nil {
 		return err
 	}
@@ -1005,19 +1006,19 @@ func runDispatch(args []string) error {
 	// The transcript store (nil unless the feature is on). Created here so it can be
 	// wired into both the user-side write (handleUpdate) and the bot-side write (the
 	// MCP server, below).
-	var transcripts *TranscriptStore
+	var transcripts *store.Transcripts
 	if root := cfg.TranscriptRoot(); root != "" {
 		if err := os.MkdirAll(root, 0o700); err != nil {
 			return fmt.Errorf("transcript dir %s: %w", root, err)
 		}
-		transcripts = NewTranscriptStore(root)
+		transcripts = store.NewTranscripts(root)
 		log.Printf("ak-tgclaude: transcripts on, root %s (owner_reads_all=%v)", root, cfg.OwnerReadsAllTranscripts())
 	}
 
 	// The usage log (nil unless usage_log is set): one JSONL line per answered round.
-	var usage *UsageLog
+	var usage *store.UsageLog
 	if p := cfg.UsageLog; p != "" {
-		usage, err = NewUsageLog(p)
+		usage, err = store.NewUsageLog(p)
 		if err != nil {
 			return err
 		}
@@ -1161,7 +1162,7 @@ func runDispatch(args []string) error {
 		client:              client,
 		sender:              client,
 		mcp:                 mcp,
-		store:               store,
+		sessions:            sessions,
 		resp:                resp,
 		authz:               authz,
 		defaultPersona:      persona{text: string(defaultPersona), selectors: cfg.Policies},
@@ -1223,8 +1224,8 @@ func runDispatch(args []string) error {
 	// outboxes: wipe them on shutdown. (A disposable cwd, removed just below, would
 	// also take them — but a FIXED cwd with ephemeral sessions keeps the cwd, so the
 	// outboxes must be removed explicitly.)
-	if store.Ephemeral() {
-		for _, p := range store.Outboxes() {
+	if sessions.Ephemeral() {
+		for _, p := range sessions.Outboxes() {
 			if err := os.RemoveAll(p); err != nil {
 				log.Printf("ak-tgclaude: dispatch: removing ephemeral outbox %s: %v", p, err)
 			}
@@ -1331,7 +1332,7 @@ func ensureOutsideCwd(field, path, cwd string) error {
 // the next turn reattaches it). A recording failure is non-fatal — the dir works
 // this turn, it just won't be remembered across a dispatcher restart.
 func (d *Dispatcher) resolveOutbox(chat int64) (string, error) {
-	if p, ok := d.store.Outbox(chat); ok {
+	if p, ok := d.sessions.Outbox(chat); ok {
 		if fi, err := os.Stat(p); err == nil && fi.IsDir() {
 			return p, nil
 		}
@@ -1340,7 +1341,7 @@ func (d *Dispatcher) resolveOutbox(chat int64) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if err := d.store.SetOutbox(chat, p); err != nil {
+	if err := d.sessions.SetOutbox(chat, p); err != nil {
 		log.Printf("ak-tgclaude: recording outbox chat %d: %v", chat, err)
 	}
 	return p, nil
@@ -1350,7 +1351,7 @@ func (d *Dispatcher) resolveOutbox(chat int64) (string, error) {
 // (keeping `active`, served right now), removing each from disk. A no-op when the
 // TTL is disabled (outboxTTL <= 0).
 func (d *Dispatcher) evictExpiredOutboxes(active int64) {
-	paths, err := d.store.EvictExpired(time.Now(), d.outboxTTL, active)
+	paths, err := d.sessions.EvictExpired(time.Now(), d.outboxTTL, active)
 	if err != nil {
 		log.Printf("ak-tgclaude: outbox eviction sweep: %v", err)
 	}

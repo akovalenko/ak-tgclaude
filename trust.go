@@ -110,7 +110,7 @@ func setProjectTrust(configPath, key string) error {
 		return err
 	}
 
-	// Atomic write (temp + rename, 0600), mirroring SessionStore.persist.
+	// Atomic write (temp + rename, 0600), mirroring Sessions.persist in internal/store.
 	tmp := configPath + ".tmp"
 	if err := os.WriteFile(tmp, out.Bytes(), 0o600); err != nil {
 		return err

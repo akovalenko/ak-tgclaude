@@ -1,4 +1,11 @@
-package main
+// Package store is the dispatcher's durable, file-backed state: the
+// chat→session map and getUpdates offset (Sessions), the per-chat conversation
+// transcript with its groomed read-back (Transcripts, Recall), and the
+// append-only per-round usage log (UsageLog). The package knows nothing of the
+// Telegram API or the responder — callers hand in plain ids, records, and
+// paths — and writes are defensive (atomic temp+rename, 0600 files) because
+// the state must survive dispatcher restarts.
+package store
 
 import (
 	"encoding/json"
@@ -9,7 +16,7 @@ import (
 	"time"
 )
 
-// SessionStore is the dispatcher's durable state: the getUpdates offset and the
+// Sessions is the dispatcher's durable state: the getUpdates offset and the
 // chat→session map (which Claude Code session answers a given chat, plus that
 // chat's persistent working dir and last-used time). It must survive restarts, so
 // it is persisted to a JSON file under the state dir.
@@ -19,7 +26,7 @@ import (
 // oversized reply is delivered as several messages but recorded once at the anchor
 // (transcript PartOf), so a reply that quotes a piece has to follow PartOf to reach
 // the binding. (Recall already follows PartOf — see the tg-recall skill.)
-type SessionStore struct {
+type Sessions struct {
 	path string
 
 	// ephemeral keeps the chat→session map in memory only: persist writes just the
@@ -63,15 +70,15 @@ func (r *sessionRec) UnmarshalJSON(b []byte) error {
 	return nil
 }
 
-// LoadSessionStore opens (or initializes) the store under dir. When ephemeral,
+// LoadSessions opens (or initializes) the store under dir. When ephemeral,
 // any persisted chat→session bindings are ignored (each start is fresh) and
 // scrubbed from disk at load time, and future writes never carry the map to
 // disk; the offset is still loaded/kept.
-func LoadSessionStore(dir string, ephemeral bool) (*SessionStore, error) {
+func LoadSessions(dir string, ephemeral bool) (*Sessions, error) {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return nil, fmt.Errorf("creating state dir %s: %w", dir, err)
 	}
-	s := &SessionStore{
+	s := &Sessions{
 		path:      filepath.Join(dir, "sessions.json"),
 		ephemeral: ephemeral,
 		data:      storeData{Sessions: map[int64]sessionRec{}},
@@ -102,7 +109,7 @@ func LoadSessionStore(dir string, ephemeral bool) (*SessionStore, error) {
 }
 
 // SessionID returns the session bound to chat, if any.
-func (s *SessionStore) SessionID(chat int64) (string, bool) {
+func (s *Sessions) SessionID(chat int64) (string, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	rec, ok := s.data.Sessions[chat]
@@ -111,7 +118,7 @@ func (s *SessionStore) SessionID(chat int64) (string, bool) {
 
 // SetSession binds chat to session (preserving the recorded outbox), bumps
 // LastUsed, and persists.
-func (s *SessionStore) SetSession(chat int64, session string) error {
+func (s *Sessions) SetSession(chat int64, session string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	rec := s.data.Sessions[chat]
@@ -122,7 +129,7 @@ func (s *SessionStore) SetSession(chat int64, session string) error {
 }
 
 // Outbox returns the persistent working dir recorded for chat, if one is set.
-func (s *SessionStore) Outbox(chat int64) (string, bool) {
+func (s *Sessions) Outbox(chat int64) (string, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	rec, ok := s.data.Sessions[chat]
@@ -134,7 +141,7 @@ func (s *SessionStore) Outbox(chat int64) (string, bool) {
 
 // SetOutbox records the persistent working dir for chat (creating the record if
 // needed), bumps LastUsed, and persists. An empty path clears the recorded outbox.
-func (s *SessionStore) SetOutbox(chat int64, path string) error {
+func (s *Sessions) SetOutbox(chat int64, path string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	rec := s.data.Sessions[chat]
@@ -146,7 +153,7 @@ func (s *SessionStore) SetOutbox(chat int64, path string) error {
 
 // Outboxes returns a snapshot of every recorded (non-empty) outbox path — used to
 // wipe them on clear-all or on shutdown under ephemeral sessions.
-func (s *SessionStore) Outboxes() []string {
+func (s *Sessions) Outboxes() []string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	var out []string
@@ -164,7 +171,7 @@ func (s *SessionStore) Outboxes() []string {
 // eviction. Records with no LastUsed yet (e.g. legacy-migrated) are left alone. The
 // WHOLE record goes (session binding included): a chat idle past the TTL is treated
 // as a session you would not resume anyway.
-func (s *SessionStore) EvictExpired(now time.Time, ttl time.Duration, keep int64) ([]string, error) {
+func (s *Sessions) EvictExpired(now time.Time, ttl time.Duration, keep int64) ([]string, error) {
 	if ttl <= 0 {
 		return nil, nil
 	}
@@ -189,11 +196,11 @@ func (s *SessionStore) EvictExpired(now time.Time, ttl time.Duration, keep int64
 
 // Ephemeral reports whether chat→session bindings live in memory only (so their
 // outboxes should be wiped on shutdown rather than left for a restart to resume).
-func (s *SessionStore) Ephemeral() bool { return s.ephemeral }
+func (s *Sessions) Ephemeral() bool { return s.ephemeral }
 
 // Clear drops the session bound to chat (the /clear path) and persists. The
 // caller removes the outbox dir from disk (fetch it via Outbox first).
-func (s *SessionStore) Clear(chat int64) error {
+func (s *Sessions) Clear(chat int64) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	delete(s.data.Sessions, chat)
@@ -204,7 +211,7 @@ func (s *SessionStore) Clear(chat int64) error {
 // getUpdates offset so the dispatcher does not reprocess the backlog on the next
 // start. It returns how many bindings were removed. The caller removes the outbox
 // dirs from disk (snapshot them via Outboxes first).
-func (s *SessionStore) ClearAll() (int, error) {
+func (s *Sessions) ClearAll() (int, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	n := len(s.data.Sessions)
@@ -216,14 +223,14 @@ func (s *SessionStore) ClearAll() (int, error) {
 }
 
 // Offset returns the next getUpdates offset.
-func (s *SessionStore) Offset() int64 {
+func (s *Sessions) Offset() int64 {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.data.Offset
 }
 
 // SetOffset records the next getUpdates offset and persists.
-func (s *SessionStore) SetOffset(offset int64) error {
+func (s *Sessions) SetOffset(offset int64) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.data.Offset = offset
@@ -233,7 +240,7 @@ func (s *SessionStore) SetOffset(offset int64) error {
 // persist writes the store atomically (temp + rename). Caller holds s.mu. In
 // ephemeral mode the chat→session map is omitted, so only the offset reaches
 // disk (the in-memory map is left intact for the process lifetime).
-func (s *SessionStore) persist() error {
+func (s *Sessions) persist() error {
 	data := s.data
 	if s.ephemeral {
 		data.Sessions = nil
