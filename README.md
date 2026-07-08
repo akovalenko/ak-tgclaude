@@ -500,6 +500,17 @@ cost of host `ps` visibility). Reserve inline `bot_token` for quick local runs, 
 run [`ak-tgclaude audit`](#deployment-a-shared-host-with-live-secrets) to be warned
 whenever a config still carries one.
 
+> **Exception — an inline token inside a `deny_reads` directory is fine.** Put
+> `bot.toml` in a directory you `deny_reads` (e.g. `bot.toml` in `~/secrets/` with
+> `deny_reads = ["~/secrets"]`) and the whole-directory mask covers it robustly —
+> reads blocked at both layers, and immune to the rename bypass a bare-file deny
+> suffers ([window 2](#sandbox-masking-is-a-start-of-command-snapshot--two-leak-windows)).
+> Against the responder that is no weaker than any secret behind a denied directory,
+> so `audit` raises no finding for it (and prefers it to an env var whose value merely
+> lives in some other on-disk `EnvironmentFile`). The exception is a **directory**
+> deny: listing the token *file* itself in `deny_reads` is a bare-file deny (window 2)
+> and still draws the steer.
+
 ### Why the CLI token is safe from the sandbox
 
 A `--bot-token` on the dispatcher's command line lives in the dispatcher's
@@ -662,7 +673,10 @@ a `secret.txt` that the host created and then renamed inside it.) Concretely:
 configured deny-secret by its on-disk shape and reports the window it is exposed to:
 a path that **does not exist** (window 1), a **bare file** a rename can unmask
 (window 2), or a **clean bill** when every secret is an existing directory. It also
-flags a token stored literally in the config file, steering to `bot_token_env`. It
+flags a token stored literally in the config file, steering to `bot_token_env` —
+**unless** that file lives inside a `deny_reads` directory, whose whole-directory mask
+already covers it (an inline token there draws no finding; see [Token
+isolation](#token-isolation)). It
 reads config exactly as the dispatcher does — the same TOML file **and** CLI flags,
 overlaid (`flags > file`) — so `audit --config bot.toml [flags…]` reflects precisely
 what that `dispatch` would mask, but it **never starts the bot**, so it is safe to

@@ -157,6 +157,17 @@ func auditSecrets(paths []string, tokenFile string) []secretIssue {
 // which subsumes the generic window-2 note. When the file is masked defensively
 // though the token came from --bot-token, it is audited like any other bare-file
 // secret (window 2) — no env recommendation, since there is no inline token to move.
+//
+// The token file is NOT flagged at all when it lives strictly inside an operator
+// deny_reads directory: that whole-directory deny already masks it robustly (survives
+// rename — window 2 closed — and hides it from the responder just like any other
+// secret dir), so an inline token there is no weaker than one behind a dedicated
+// secret directory, and the bot_token_env steer would be noise. The covering
+// directory is itself in c.DenyRead → paths, so its own robustness is still audited;
+// dropping the file just avoids double-flagging what the directory already covers. A
+// bare-file deny of the token file *itself* (deny_reads listing the file, not its
+// parent) is NOT coverage — that is exactly the bypassable window-2 case — so the
+// file-vs-directory distinction pathUnderDir draws is what makes this sound.
 func (c *Config) auditSecretInputs() (paths []string, tokenFile string) {
 	paths = append(paths, hostSecretHookDeny()...)
 	paths = append(paths, c.DenyRead...)
@@ -164,12 +175,42 @@ func (c *Config) auditSecretInputs() (paths []string, tokenFile string) {
 	// scaffold's masked-token-file decision, the single source of truth.
 	masked := c.scaffoldParams("", "").TokenFile
 	switch {
-	case masked != "" && c.tokenInFile:
+	case masked == "" || c.tokenFileUnderDenyDir(masked):
+		// No on-disk token, or it is covered by a whole-directory deny — no finding.
+	case c.tokenInFile:
 		tokenFile = masked
-	case masked != "":
+	default:
 		paths = append(paths, masked)
 	}
 	return paths, tokenFile
+}
+
+// tokenFileUnderDenyDir reports whether the token config file lives strictly inside
+// one of the operator's deny_reads paths — i.e. a whole-directory deny already covers
+// it (see auditSecretInputs). Both the token file and every deny_reads entry are
+// absolute+clean by parseConfig, so the lexical containment pathUnderDir tests matches
+// how the sandbox deny layers resolve the mask.
+func (c *Config) tokenFileUnderDenyDir(tokenFile string) bool {
+	for _, d := range c.DenyRead {
+		if pathUnderDir(tokenFile, d) {
+			return true
+		}
+	}
+	return false
+}
+
+// pathUnderDir reports whether file lies strictly inside dir — dir is an ancestor
+// directory of file — comparing cleaned paths lexically (the way the sandbox deny
+// layers match names). Equal paths are NOT "under": a deny of the path itself is a
+// bare-file mask (window 2), not directory coverage, and that file-vs-directory line
+// is exactly the distinction the token-file audit turns on. Clean both inputs so a
+// caller passing a raw path is handled, though the audit's paths arrive absolute.
+func pathUnderDir(file, dir string) bool {
+	rel, err := filepath.Rel(filepath.Clean(dir), filepath.Clean(file))
+	if err != nil {
+		return false
+	}
+	return rel != "." && rel != ".." && !strings.HasPrefix(rel, ".."+string(os.PathSeparator))
 }
 
 // logSecretAudit runs the audit for a resolved config and logs each finding as a

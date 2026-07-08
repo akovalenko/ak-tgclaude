@@ -169,6 +169,80 @@ func TestAuditSecretInputsTokenSource(t *testing.T) {
 	}
 }
 
+// A token config file that lives strictly inside a deny_reads DIRECTORY is covered by
+// that whole-directory mask, so the audit drops it entirely — no bot_token_env
+// finding (inline) and no generic bare-file finding (defensively masked). The
+// covering directory is still audited. A deny_reads entry naming the token FILE
+// itself is a bare-file deny (window 2), not coverage, so it does not suppress.
+func TestAuditSecretInputsTokenCoveredByDenyDir(t *testing.T) {
+	contains := func(ss []string, want string) bool {
+		for _, s := range ss {
+			if s == want {
+				return true
+			}
+		}
+		return false
+	}
+
+	// Inline bot_token inside a denied directory: no token-file finding, and the file
+	// is not double-listed in paths; the covering directory stays audited.
+	c := &Config{ConfigPath: "/secrets/bot.toml", tokenInFile: true, DenyRead: []string{"/secrets"}}
+	if paths, tf := c.auditSecretInputs(); tf != "" || contains(paths, "/secrets/bot.toml") {
+		t.Errorf("inline token under deny dir: want it dropped, got tokenFile=%q paths=%v", tf, paths)
+	} else if !contains(paths, "/secrets") {
+		t.Errorf("covering deny dir should still be audited, got paths=%v", paths)
+	}
+
+	// Deeper nesting is still covered — a whole-directory deny masks the subtree.
+	c = &Config{ConfigPath: "/secrets/sub/bot.toml", tokenInFile: true, DenyRead: []string{"/secrets"}}
+	if _, tf := c.auditSecretInputs(); tf != "" {
+		t.Errorf("inline token nested under deny dir: want it dropped, got tokenFile=%q", tf)
+	}
+
+	// Defensively-masked (from --bot-token) under a denied directory: also dropped.
+	c = &Config{ConfigPath: "/secrets/bot.toml", tokenInFile: false, DenyRead: []string{"/secrets"}}
+	if paths, tf := c.auditSecretInputs(); tf != "" || contains(paths, "/secrets/bot.toml") {
+		t.Errorf("defensively-masked token under deny dir: want it dropped, got tokenFile=%q paths=%v", tf, paths)
+	}
+
+	// deny_reads naming the token FILE itself is a bare-file deny, not coverage: the
+	// inline token still earns its bot_token_env finding.
+	c = &Config{ConfigPath: "/secrets/bot.toml", tokenInFile: true, DenyRead: []string{"/secrets/bot.toml"}}
+	if _, tf := c.auditSecretInputs(); tf != "/secrets/bot.toml" {
+		t.Errorf("deny of the token file itself is not coverage: want it surfaced, got tokenFile=%q", tf)
+	}
+
+	// An unrelated deny_reads directory does not cover the token file.
+	c = &Config{ConfigPath: "/etc/bot.toml", tokenInFile: true, DenyRead: []string{"/secrets"}}
+	if _, tf := c.auditSecretInputs(); tf != "/etc/bot.toml" {
+		t.Errorf("token file outside every deny dir: want it surfaced, got tokenFile=%q", tf)
+	}
+}
+
+// pathUnderDir is a lexical strict-containment test: a real descendant is under; the
+// path itself, a sibling, a parent, and a shared-prefix-but-not-a-component
+// (/sec vs /secrets) are not.
+func TestPathUnderDir(t *testing.T) {
+	cases := []struct {
+		file, dir string
+		want      bool
+	}{
+		{"/secrets/bot.toml", "/secrets", true},
+		{"/secrets/sub/bot.toml", "/secrets", true},
+		{"/secrets/bot.toml", "/secrets/", true}, // unclean dir still handled
+		{"/secrets", "/secrets", false},          // equal is not "under"
+		{"/secrets/bot.toml", "/secrets/bot.toml", false},
+		{"/secrets/bot.toml", "/other", false},
+		{"/secrets", "/secrets/bot.toml", false},  // parent is not under child
+		{"/secretsX/bot.toml", "/secrets", false}, // shared prefix, not a path component
+	}
+	for _, tc := range cases {
+		if got := pathUnderDir(tc.file, tc.dir); got != tc.want {
+			t.Errorf("pathUnderDir(%q, %q) = %v, want %v", tc.file, tc.dir, got, tc.want)
+		}
+	}
+}
+
 // Loading a config that defines bot_token literally sets tokenInFile, so the audit
 // later recommends bot_token_env; a bot_token_env config does not.
 func TestParseConfigTokenInFileFlag(t *testing.T) {
