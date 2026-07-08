@@ -11,6 +11,8 @@ import (
 	"time"
 
 	"github.com/BurntSushi/toml"
+
+	"github.com/akovalenko/ak-tgclaude/internal/policy"
 )
 
 // int64List is a repeatable integer flag (e.g. --allow-user 1 --allow-user 2).
@@ -572,7 +574,7 @@ func decodeConfig(args []string) (*Config, error) {
 	// (`ak-tgclaude scaffold --policy help`) without a token/project/config file.
 	for _, p := range policyFlags {
 		if p == "help" {
-			if err := printPolicyCatalog(os.Stdout); err != nil {
+			if err := policy.PrintCatalog(os.Stdout); err != nil {
 				fmt.Fprintln(os.Stderr, err)
 				os.Exit(1)
 			}
@@ -774,7 +776,7 @@ func (c *Config) resolvePaths() {
 	}
 	for _, pl := range pls {
 		for i := range pl {
-			if policyIsPath(pl[i]) {
+			if policy.IsPath(pl[i]) {
 				pl[i] = resolvePath(pl[i])
 			}
 		}
@@ -821,15 +823,15 @@ func (c *Config) validatePaths() error {
 // it is either a built-in name or a readable custom fragment file — fail at
 // startup on an unknown name or a missing file, not mid-run.
 func validatePolicyEntry(field, p string) error {
-	if policyIsPath(p) {
+	if policy.IsPath(p) {
 		if err := validatePath(field, p); err != nil {
 			return err
 		}
 		if _, err := os.Stat(p); err != nil {
 			return fmt.Errorf("policy fragment %s: %w", p, err)
 		}
-	} else if !builtinPolicies[p] {
-		return fmt.Errorf("unknown policy %q (built-in: %s; or a path to a .md fragment)", p, strings.Join(builtinPolicyOrder, ", "))
+	} else if !policy.IsBuiltin(p) {
+		return fmt.Errorf("unknown policy %q (built-in: %s; or a path to a .md fragment)", p, strings.Join(policy.BuiltinOrder, ", "))
 	}
 	return nil
 }
@@ -843,14 +845,14 @@ func (c *Config) resolvePolicies() error {
 			return err
 		}
 	}
-	if err := checkAxisConflicts(c.Policies); err != nil {
+	if err := policy.CheckAxisConflicts(c.Policies); err != nil {
 		return fmt.Errorf("default policies: %w", err)
 	}
 	// Floor the default persona on the refusal axis: an axis-less-only list (a lone
 	// custom fragment, or outbox-rw) would leave it with no base FAQ stance, so prepend
 	// normal unless a refusal-axis fragment is already present. Done here, before the
 	// override resolution below, so every per-user override layers on a based persona too.
-	floored, err := withDefaultStance(c.Policies)
+	floored, err := policy.WithDefaultStance(c.Policies)
 	if err != nil {
 		return fmt.Errorf("default policies: %w", err)
 	}
@@ -865,10 +867,10 @@ func (c *Config) resolvePolicies() error {
 			return err
 		}
 	}
-	if err := checkAxisConflicts(c.GroupPolicies); err != nil {
+	if err := policy.CheckAxisConflicts(c.GroupPolicies); err != nil {
 		return fmt.Errorf("group policies: %w", err)
 	}
-	groupBase, err := resolveEffectivePolicies(c.Policies, c.GroupPolicies)
+	groupBase, err := policy.ResolveEffective(c.Policies, c.GroupPolicies)
 	if err != nil {
 		return fmt.Errorf("group policies: %w", err)
 	}
@@ -891,14 +893,14 @@ func (c *Config) resolvePolicies() error {
 				return err
 			}
 		}
-		if err := checkAxisConflicts(ov); err != nil {
+		if err := policy.CheckAxisConflicts(ov); err != nil {
 			return fmt.Errorf("policy_overrides[%s]: %w", key, err)
 		}
 		base := c.Policies
 		if uid < 0 {
 			base = c.groupDefault // negative key = a specific group, layered on the group base
 		}
-		eff, err := resolveEffectivePolicies(base, ov)
+		eff, err := policy.ResolveEffective(base, ov)
 		if err != nil {
 			return fmt.Errorf("policy_overrides[%s]: %w", key, err)
 		}
@@ -996,7 +998,7 @@ func (c *Config) applyDefaults() {
 		c.Agent = defaultAgent
 	}
 	if len(c.Policies) == 0 {
-		c.Policies = policyList{defaultPolicy}
+		c.Policies = policyList{policy.Default}
 	}
 	// Owner sugar: auto-whitelist the id and, unless it has an explicit override,
 	// grant it the relaxed owner persona. Applied here (before path resolution and

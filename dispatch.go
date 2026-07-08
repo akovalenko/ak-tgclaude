@@ -13,6 +13,8 @@ import (
 	"sync"
 	"syscall"
 	"time"
+
+	"github.com/akovalenko/ak-tgclaude/internal/policy"
 )
 
 // defaultPollTimeout is the getUpdates long-poll timeout (seconds). The HTTP
@@ -1133,7 +1135,7 @@ func runDispatch(args []string) error {
 	// the composed default, plus each per-user override's composed persona. The
 	// fragments were already validated (and read for their axes) at config load, so
 	// a failure here is unexpected — fail fast rather than mid-run.
-	defaultPersona, err := loadPolicies(cfg.Policies)
+	defaultPersona, err := policy.Load(cfg.Policies)
 	if err != nil {
 		return fmt.Errorf("composing default persona: %w", err)
 	}
@@ -1143,14 +1145,14 @@ func runDispatch(args []string) error {
 	personaByUser := make(map[int64]persona, len(cfg.overrides))
 	for uid := range cfg.overrides {
 		sel := cfg.PersonaSelectors(uid)
-		p, perr := loadPolicies(sel)
+		p, perr := policy.Load(sel)
 		if perr != nil {
 			return fmt.Errorf("composing persona for id %d: %w", uid, perr)
 		}
 		personaByUser[uid] = persona{text: string(p), selectors: sel}
 	}
 	// The default persona injected in a group with no per-group override.
-	groupDefaultText, err := loadPolicies(cfg.groupDefault)
+	groupDefaultText, err := policy.Load(cfg.groupDefault)
 	if err != nil {
 		return fmt.Errorf("composing group persona: %w", err)
 	}
