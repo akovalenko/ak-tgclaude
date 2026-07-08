@@ -3,6 +3,8 @@ package main
 import (
 	"strings"
 	"testing"
+
+	"github.com/akovalenko/ak-tgclaude/internal/tghtml"
 )
 
 func TestRenderText(t *testing.T) {
@@ -54,7 +56,7 @@ func TestFitsAndSpill(t *testing.T) {
 	astral := strings.Repeat("😀", telegramTextLimit/2+1)
 	if fits(astral) {
 		t.Errorf("emoji string over the UTF-16 limit should not fit (runes=%d, utf16=%d)",
-			len([]rune(astral)), utf16Len(astral))
+			len([]rune(astral)), tghtml.UTF16Len(astral))
 	}
 	// Exactly at the limit fits.
 	if !fits(strings.Repeat("x", telegramTextLimit)) {

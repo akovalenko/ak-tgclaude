@@ -3,6 +3,8 @@ package main
 import (
 	"html"
 	"strings"
+
+	"github.com/akovalenko/ak-tgclaude/internal/tghtml"
 )
 
 // telegramTextLimit is Telegram's per-message text cap, in UTF-16 code units. A
@@ -59,21 +61,7 @@ func renderMessage(d *Descriptor) (text, parseMode string) {
 // the cap to the text after entity parsing, and markup only adds units, so if
 // the raw string fits, the parsed message fits too.
 func fits(s string) bool {
-	return utf16Len(s) <= telegramTextLimit
-}
-
-// utf16Len returns the number of UTF-16 code units in s — how Telegram counts a
-// message's length. Runes above the BMP encode as a surrogate pair (two units).
-func utf16Len(s string) int {
-	n := 0
-	for _, r := range s {
-		if r > 0xFFFF {
-			n += 2
-		} else {
-			n++
-		}
-	}
-	return n
+	return tghtml.UTF16Len(s) <= telegramTextLimit
 }
 
 // spillName is the document filename for an oversized text/code message. Both
@@ -121,7 +109,7 @@ func spillPayload(d *Descriptor) string {
 		return spillCodePayload(d.Language, d.Code)
 	}
 	if d.Format == FormatHTML {
-		return htmlToMarkdown(d.Text)
+		return tghtml.ToMarkdown(d.Text)
 	}
 	return d.Text
 }
@@ -139,12 +127,12 @@ func spillPayload(d *Descriptor) string {
 // the blocks' bodies reproduces the code verbatim.
 func spillCodePayload(lang, code string) string {
 	if len(code) <= previewChunkBytes {
-		return fencedCodeBlock(lang, code)
+		return tghtml.FencedCodeBlock(lang, code)
 	}
 	chunks := splitCodeForPreview(code, previewChunkBytes)
 	blocks := make([]string, len(chunks))
 	for i, c := range chunks {
-		blocks[i] = fencedCodeBlock("", c) // no language: uniform plain across blocks
+		blocks[i] = tghtml.FencedCodeBlock("", c) // no language: uniform plain across blocks
 	}
 	return strings.Join(blocks, "\n\n")
 }

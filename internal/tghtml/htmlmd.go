@@ -1,4 +1,11 @@
-package main
+// Package tghtml is the Telegram-HTML plumbing shared by the delivery path: the
+// tag whitelist Telegram's parse_mode=HTML accepts (BadTags, AllowedTags), the
+// depth-0 message splitter that keeps every chunk independently valid HTML
+// (Split), the UTF-16 length Telegram measures messages in (UTF16Len), and the
+// Telegram-HTML → Markdown converter used when an oversized answer spills to an
+// .md document (ToMarkdown). It is deliberately free of bot concerns — no
+// Descriptor, no Sender, no config — so it can be read (or reused) on its own.
+package tghtml
 
 import (
 	"html"
@@ -6,7 +13,7 @@ import (
 	"strings"
 )
 
-// htmlToMarkdown converts a Telegram-HTML fragment (the whitelist subset that
+// ToMarkdown converts a Telegram-HTML fragment (the whitelist subset that
 // htmlcheck.go enforces) into Markdown for a spilled .md document. The target is
 // NOT CommonMark in the abstract but Telegram's own rendering of an attached .md
 // file — a CommonMark/GFM-flavoured renderer. Its behaviour was verified against
@@ -22,7 +29,7 @@ import (
 // that happens to start with '#'/'-'/'>' would otherwise become syntax. The
 // mdWriter below does that escaping while tracking whether it sits at the start
 // of an output line (leading-char constructs only fire there).
-func htmlToMarkdown(s string) string {
+func ToMarkdown(s string) string {
 	w := newMdWriter()
 	w.renderChildren(parseHTML(s))
 	return strings.TrimRight(w.sb.String(), "\n")
@@ -386,15 +393,15 @@ func (w *mdWriter) renderInlineCode(n *htmlNode) {
 // child (if any) supplying the info string.
 func (w *mdWriter) renderPre(n *htmlNode) {
 	w.ensureBlankLine()
-	w.put(fencedCodeBlock(preLanguage(n), textContent(n)))
+	w.put(FencedCodeBlock(preLanguage(n), textContent(n)))
 	w.ensureBlankLine()
 }
 
-// fencedCodeBlock renders body as a Markdown fenced code block with the given
+// FencedCodeBlock renders body as a Markdown fenced code block with the given
 // language info string. The fence is ≥3 backticks and LONGER than any backtick run
 // inside, so the verbatim body cannot close it early — the reason code is always
 // safe to spill as Markdown (inside a fence, only the closing fence is significant).
-func fencedCodeBlock(lang, body string) string {
+func FencedCodeBlock(lang, body string) string {
 	fence := strings.Repeat("`", max(3, longestBacktickRun(body)+1))
 	var b strings.Builder
 	b.WriteString(fence)

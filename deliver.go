@@ -7,7 +7,14 @@ import (
 	"io"
 	"os"
 	"strings"
+
+	"github.com/akovalenko/ak-tgclaude/internal/tghtml"
 )
+
+// maxSplitParts caps how many messages an oversized text may split into before it
+// spills to a document instead. The design targets a small handful (~3–4): more
+// than that reads as a flood, and the spill path gives a cleaner UX.
+const maxSplitParts = 4
 
 // sendDescriptor renders one descriptor and delivers it to Telegram on route r,
 // spilling an oversized text/code message to a document. It is the shared
@@ -41,11 +48,11 @@ func sendDescriptor(ctx context.Context, d *Descriptor, r Route, s Sender, up *u
 	// tags at once (Telegram's own 400 names only the first). Only meaningful in HTML
 	// mode; a plain-text message has no tags to check.
 	if mode == "HTML" {
-		if bad := badTelegramTags(text); len(bad) > 0 {
+		if bad := tghtml.BadTags(text); len(bad) > 0 {
 			return nil, &htmlError{fmt.Sprintf(
 				"invalid Telegram HTML — unsupported tag(s): %s. Telegram HTML allows only: %s. "+
 					"Use plain newlines and • bullets (not <br>/<p>/<ul>/<li>/<hN>), and <code>/<pre> for code.",
-				strings.Join(bad, ", "), strings.Join(telegramTagList, ", "))}
+				strings.Join(bad, ", "), strings.Join(tghtml.AllowedTags, ", "))}
 		}
 	}
 	if fits(text) {
@@ -57,7 +64,7 @@ func sendDescriptor(ctx context.Context, d *Descriptor, r Route, s Sender, up *u
 	// the model shortens it. Code never splits (its rendered <pre> has no depth-0
 	// break) and always spills — the knob does not apply to it.
 	if d.Kind == KindText {
-		if parts, ok := splitHTML(text, telegramTextLimit, maxSplitParts); ok {
+		if parts, ok := tghtml.Split(text, telegramTextLimit, maxSplitParts); ok {
 			return sendParts(ctx, r, parts, mode, d.Silent, s)
 		}
 		if overflow == overflowError {
@@ -78,6 +85,14 @@ const spillCaption = "The full answer was too long to send as a message — it i
 type oversizeError struct{ msg string }
 
 func (e *oversizeError) Error() string { return e.msg }
+
+// htmlError is a pre-send guard failure: the model supplied Telegram HTML with
+// unsupported tags (see tghtml.BadTags). callTool surfaces its message to the model
+// verbatim (not under the "Telegram rejected" framing), so the model can fix all
+// the tags at once.
+type htmlError struct{ msg string }
+
+func (e *htmlError) Error() string { return e.msg }
 
 // spillDocument writes the descriptor's Markdown spill payload to a temp file and
 // delivers it as a document, captioned with the descriptor's own caption or the

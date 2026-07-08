@@ -39,7 +39,7 @@ type TranscriptRecord struct {
 	Role    string    `json:"role"` // "user" | "bot"
 	ReplyTo int64     `json:"reply_to,omitempty"`
 	// PartOf links a split-message piece to its anchor. An oversized reply is
-	// delivered as several messages (see splitHTML), but only the FIRST — the anchor
+	// delivered as several messages (see tghtml.Split), but only the FIRST — the anchor
 	// — carries the full Text; each later piece is a light stub {msg_id, part_of:
 	// anchor} with empty Text, so the answer is stored once. A reader that lands on a
 	// piece (recall, or a reply that threads to it) follows PartOf to the anchor for

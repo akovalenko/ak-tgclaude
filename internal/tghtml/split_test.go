@@ -1,4 +1,4 @@
-package main
+package tghtml
 
 import (
 	"strings"
@@ -46,19 +46,19 @@ func TestSplitHTML(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			parts, ok := splitHTML(c.text, c.limit, c.maxParts)
+			parts, ok := Split(c.text, c.limit, c.maxParts)
 			if ok != c.wantOK {
-				t.Fatalf("splitHTML ok = %v, want %v (parts=%q)", ok, c.wantOK, parts)
+				t.Fatalf("Split ok = %v, want %v (parts=%q)", ok, c.wantOK, parts)
 			}
 			if !ok {
 				return
 			}
 			if strings.Join(parts, "|") != strings.Join(c.wantParts, "|") {
-				t.Errorf("splitHTML(%q) parts = %q, want %q", c.text, parts, c.wantParts)
+				t.Errorf("Split(%q) parts = %q, want %q", c.text, parts, c.wantParts)
 			}
 			for i, p := range parts {
-				if !fits(p) {
-					t.Errorf("part %d does not fit: %q", i, p)
+				if UTF16Len(p) > c.limit {
+					t.Errorf("part %d does not fit the limit: %q", i, p)
 				}
 			}
 			// Reconstruction invariant: rejoining chunks with the boundary newline

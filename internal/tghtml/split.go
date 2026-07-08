@@ -1,11 +1,6 @@
-package main
+package tghtml
 
-// maxSplitParts caps how many messages an oversized text may split into before it
-// spills to a document instead. The design targets a small handful (~3–4): more
-// than that reads as a flood, and the spill path gives a cleaner UX.
-const maxSplitParts = 4
-
-// splitHTML breaks an oversized Telegram-HTML (or plain-text) message into chunks,
+// Split breaks an oversized Telegram-HTML (or plain-text) message into chunks,
 // each within limit UTF-16 units, and reports whether it fit in ≤maxParts of them.
 //
 // The only break points are newlines at tag depth 0 — where no element is open.
@@ -17,7 +12,7 @@ const maxSplitParts = 4
 // ok is false — the caller then spills or errors per the overflow policy — when a
 // single indivisible atom exceeds limit (e.g. a <pre> block, or one long line with
 // no depth-0 newline), or when packing needs more than maxParts chunks.
-func splitHTML(text string, limit, maxParts int) (parts []string, ok bool) {
+func Split(text string, limit, maxParts int) (parts []string, ok bool) {
 	var cur string
 	have := false
 	for _, atom := range splitAtDepthZero(text) {
@@ -25,7 +20,7 @@ func splitHTML(text string, limit, maxParts int) (parts []string, ok bool) {
 		if have {
 			cand = cur + "\n" + atom
 		}
-		if utf16Len(cand) <= limit {
+		if UTF16Len(cand) <= limit {
 			cur, have = cand, true
 			continue
 		}
@@ -33,7 +28,7 @@ func splitHTML(text string, limit, maxParts int) (parts []string, ok bool) {
 		if have {
 			parts = append(parts, cur)
 		}
-		if utf16Len(atom) > limit {
+		if UTF16Len(atom) > limit {
 			return nil, false // atom is indivisible and itself over the limit
 		}
 		cur, have = atom, true
@@ -48,11 +43,11 @@ func splitHTML(text string, limit, maxParts int) (parts []string, ok bool) {
 }
 
 // splitAtDepthZero cuts text into the atoms between newlines that sit at tag depth
-// 0. Depth is tracked with the same htmlTagRe the HTML guard uses (+1 per start
+// 0. Depth is tracked with the same tagNameRe the HTML guard uses (+1 per start
 // tag, −1 per end tag); the whitelist has no void tags, so every tag is paired.
 // Newlines inside an open element are kept (depth > 0), so its atom stays whole.
 func splitAtDepthZero(text string) []string {
-	locs := htmlTagRe.FindAllStringIndex(text, -1)
+	locs := tagNameRe.FindAllStringIndex(text, -1)
 	var atoms []string
 	depth, start, ti := 0, 0, 0
 	for i := 0; i < len(text); {
@@ -75,4 +70,18 @@ func splitAtDepthZero(text string) []string {
 		i++
 	}
 	return append(atoms, text[start:])
+}
+
+// UTF16Len returns the number of UTF-16 code units in s — how Telegram counts a
+// message's length. Runes above the BMP encode as a surrogate pair (two units).
+func UTF16Len(s string) int {
+	n := 0
+	for _, r := range s {
+		if r > 0xFFFF {
+			n += 2
+		} else {
+			n++
+		}
+	}
+	return n
 }

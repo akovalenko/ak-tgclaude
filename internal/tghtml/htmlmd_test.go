@@ -1,4 +1,4 @@
-package main
+package tghtml
 
 import (
 	"strings"
@@ -19,7 +19,7 @@ func TestParseHTMLDeepNestingDoesNotOverflow(t *testing.T) {
 	for i := 0; i < n; i++ {
 		b.WriteString("</b>")
 	}
-	md := htmlToMarkdown(b.String()) // must not overflow the stack / crash
+	md := ToMarkdown(b.String()) // must not overflow the stack / crash
 	if !strings.Contains(md, "deep") {
 		t.Errorf("innermost content lost after depth cap")
 	}
@@ -97,8 +97,8 @@ func TestHTMLToMarkdown(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			if got := htmlToMarkdown(c.in); got != c.want {
-				t.Errorf("htmlToMarkdown(%q)\n got  %q\n want %q", c.in, got, c.want)
+			if got := ToMarkdown(c.in); got != c.want {
+				t.Errorf("ToMarkdown(%q)\n got  %q\n want %q", c.in, got, c.want)
 			}
 		})
 	}
