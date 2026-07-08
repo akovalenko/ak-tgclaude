@@ -483,3 +483,18 @@ func TestParseOutcome(t *testing.T) {
 		t.Errorf("fallback scan => %q, want answered", got)
 	}
 }
+
+func TestStdoutTail(t *testing.T) {
+	if got := stdoutTail(nil); got != "(no stdout)" {
+		t.Errorf("empty => %q, want (no stdout)", got)
+	}
+	if got := stdoutTail([]byte("  boom\n")); got != "boom" {
+		t.Errorf("trim => %q, want boom", got)
+	}
+	// Long output keeps the LAST bytes (where the error text lands).
+	long := strings.Repeat("x", 5000) + "END"
+	got := stdoutTail([]byte(long))
+	if !strings.HasPrefix(got, "…") || !strings.HasSuffix(got, "END") {
+		t.Errorf("tail => %q, want …-prefixed suffix ending END", got[:20])
+	}
+}

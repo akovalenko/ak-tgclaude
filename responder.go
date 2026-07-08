@@ -162,10 +162,29 @@ func (c *claudeResponder) Respond(ctx context.Context, req RespondRequest) (Resp
 	cmd.Stdout = &out
 	cmd.Stderr = os.Stderr
 	if err := cmd.Run(); err != nil {
-		return RespondResult{}, fmt.Errorf("claude -p: %w", err)
+		// claude -p reports many failures on stdout (often as the json result),
+		// not stderr — stderr is already wired through to the journal above, but
+		// the captured stdout would be discarded here. Surface a bounded tail of
+		// it so the dispatcher's FAILED line carries the actual reason, not just
+		// the exit status.
+		return RespondResult{}, fmt.Errorf("claude -p: %w; stdout: %s", err, stdoutTail(out.Bytes()))
 	}
 	sid, outcome, final, cost := parseResult(out.Bytes())
 	return RespondResult{SessionID: sid, Outcome: outcome, FinalText: final, CostUSD: cost}, nil
+}
+
+// stdoutTail bounds a failed run's captured stdout for embedding in the error:
+// the LAST bytes, where claude -p leaves its result/error text.
+func stdoutTail(b []byte) string {
+	const max = 2048
+	s := strings.TrimSpace(string(b))
+	if s == "" {
+		return "(no stdout)"
+	}
+	if len(s) > max {
+		s = "…" + s[len(s)-max:]
+	}
+	return s
 }
 
 // writeMCPConfigFile writes the responder's --mcp-config JSON to a private 0600 file
