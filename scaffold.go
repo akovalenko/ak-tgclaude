@@ -358,9 +358,13 @@ func buildSettings(p scaffoldParams) *claudeSettings {
 	// first — so a bot always builds Go out of the box and extra egress rides on top.
 	p.NetworkDomains = dedupStrings(append(append([]string{}, defaultNetworkDomains...), p.NetworkDomains...))
 
-	// The built-in secrets are ALWAYS scrubbed; operator DenyEnvVars are ADDITIVE
-	// (a naive replace would drop the ANTHROPIC keys). De-duplicated, order kept.
-	denyEnv := dedupStrings(append(append([]string{}, defaultDenyEnvVars...), p.DenyEnvVars...))
+	// The built-in secrets are ALWAYS scrubbed: the ambient auth secrets
+	// (defaultDenyEnvVars) plus this bot's MCP route token (mcpTokenEnv) — the parent
+	// expands AK_TGCLAUDE_MCP_TOKEN into the inline --mcp-config Authorization header,
+	// so the model's own Bash must never read it. Operator DenyEnvVars are ADDITIVE
+	// (a naive replace would drop these). De-duplicated, order kept.
+	alwaysScrub := append(append([]string{}, defaultDenyEnvVars...), mcpTokenEnv)
+	denyEnv := dedupStrings(append(alwaysScrub, p.DenyEnvVars...))
 	envVars := make([]credEnv, 0, len(denyEnv))
 	for _, name := range denyEnv {
 		envVars = append(envVars, credEnv{Name: name, Mode: "deny"})
@@ -960,14 +964,8 @@ func appendAgentSkills(data []byte, add []string) []byte {
 //
 // The Write TOOL to the outbox is granted by the PreToolUse hook (path-scoped),
 // not here. All inputs empty => "".
-func buildInvocationSettings(writeRoots []string, transcriptScope, usageLog string, usageLogOwner bool, denyReads ...string) string {
-	hasDeny := false
-	for _, d := range denyReads {
-		if d != "" {
-			hasDeny = true
-		}
-	}
-	if len(writeRoots) == 0 && transcriptScope == "" && usageLog == "" && !hasDeny {
+func buildInvocationSettings(writeRoots []string, transcriptScope, usageLog string, usageLogOwner bool) string {
+	if len(writeRoots) == 0 && transcriptScope == "" && usageLog == "" {
 		return ""
 	}
 	var s struct {
@@ -998,13 +996,6 @@ func buildInvocationSettings(writeRoots []string, transcriptScope, usageLog stri
 			s.Sandbox.Filesystem.AllowRead = append(s.Sandbox.Filesystem.AllowRead, usageLog)
 		} else {
 			s.Sandbox.Filesystem.DenyRead = append(s.Sandbox.Filesystem.DenyRead, usageLog)
-		}
-	}
-	// Extra denyRead paths (e.g. the per-invocation --mcp-config file holding the
-	// capability token): masked from sandboxed Bash, mirroring the hook's Deny.
-	for _, d := range denyReads {
-		if d != "" {
-			s.Sandbox.Filesystem.DenyRead = append(s.Sandbox.Filesystem.DenyRead, d)
 		}
 	}
 	b, _ := json.Marshal(&s)

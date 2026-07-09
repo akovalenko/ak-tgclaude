@@ -26,13 +26,8 @@ type RespondRequest struct {
 	AttachmentFromReply bool
 	SessionID           string // resume this session; empty => start a fresh one
 	DocDir              string // AK_TGCLAUDE_OUTBOX: writable dir for attachments/scratch
-	MCPURL              string // dispatcher's MCP endpoint (--mcp-config file for claude; direct call for the stub)
+	MCPURL              string // dispatcher's MCP endpoint (into the inline --mcp-config for claude; direct call for the stub)
 	MCPToken            string // this invocation's capability token (the server pins the route to it)
-	// MCPConfigPath is the 0600 --mcp-config file claudeResponder.Respond writes for
-	// this invocation (token in its Authorization header). It replaces inline argv JSON
-	// so the token stays out of /proc/<pid>/cmdline; the file is added to Deny (hook)
-	// and the sandbox denyRead, and removed after the run.
-	MCPConfigPath string
 	// AppendSystemPrompt is the composed persona injected via --append-system-prompt.
 	// Set only on a FRESH spawn (SessionID==""); it freezes into the session, so a
 	// resume neither needs nor re-sends it.
@@ -96,6 +91,16 @@ const projectEnv = "AK_TGCLAUDE_PROJECT"
 // attach via the send_document tool.
 const outboxEnv = "AK_TGCLAUDE_OUTBOX"
 
+// mcpTokenEnv names the env var carrying THIS invocation's MCP route capability
+// token. The dispatcher sets its value in the (unsandboxed) claude parent's env;
+// the inline --mcp-config references it as Bearer ${AK_TGCLAUDE_MCP_TOKEN}, which
+// claude expands at MCP-init time. So the literal token never enters argv
+// (/proc/<pid>/cmdline) nor a config file — only the env-var name does. The value is
+// scrubbed from the model's own sandboxed Bash by the scaffold's credentials.envVars
+// deny (mcpTokenEnv is in the always-scrubbed set — see scaffold materialize), the
+// same mechanism that hides the ANTHROPIC keys and bot_token_env.
+const mcpTokenEnv = "AK_TGCLAUDE_MCP_TOKEN"
+
 // transcriptEnv names the responder's transcript READ scope (a chat's own subdir,
 // or the whole root for the owner). The PreToolUse hook folds it into readRoots so
 // the Read tool can reach it; the per-invocation sandbox allowRead grant opens it
@@ -139,21 +144,10 @@ type claudeResponder struct {
 // (route-pinned by MCPToken). It returns the session id parsed from the JSON
 // result.
 func (c *claudeResponder) Respond(ctx context.Context, req RespondRequest) (RespondResult, error) {
-	if req.MCPURL != "" && req.MCPToken != "" {
-		// Write the MCP config (the capability token rides its Authorization header) to a
-		// 0600 file and pass --mcp-config <path>, instead of inline JSON in argv: the
-		// inline form put the token in /proc/<pid>/cmdline, readable by any other local
-		// UID on a shared host for the invocation's lifetime. The file is 0600 (other
-		// UIDs cannot read it), added to Deny + the sandbox denyRead below (the model's
-		// Read tool and sandboxed Bash cannot read it), and removed after the run; the
-		// unsandboxed claude parent reads it at startup.
-		path, err := writeMCPConfigFile(req.MCPURL, req.MCPToken)
-		if err != nil {
-			return RespondResult{}, err
-		}
-		defer os.Remove(path)
-		req.MCPConfigPath = path
-	}
+	// The MCP transport is wired entirely by buildArgs (inline --mcp-config whose
+	// Authorization header references the token by env var) and env (the token VALUE
+	// in the parent's process env). There is no per-invocation config file to write,
+	// deny, or clean up — the env-ref keeps the token out of both argv and the disk.
 	cmd := exec.CommandContext(ctx, "claude", c.buildArgs(req)...)
 	cmd.Dir = c.cwd
 	cmd.Env = c.env(req)
@@ -185,33 +179,6 @@ func stdoutTail(b []byte) string {
 		s = "…" + s[len(s)-max:]
 	}
 	return s
-}
-
-// writeMCPConfigFile writes the responder's --mcp-config JSON to a private 0600 file
-// and returns its path, keeping the capability token out of the claude process's
-// argv (/proc/<pid>/cmdline, readable by other local UIDs on a shared host). The
-// caller adds the path to Deny + the sandbox denyRead and removes it after the run.
-func writeMCPConfigFile(url, token string) (string, error) {
-	f, err := os.CreateTemp("", "ak-tgclaude-mcp-*.json")
-	if err != nil {
-		return "", fmt.Errorf("mcp config temp: %w", err)
-	}
-	// CreateTemp already opens it 0600; be explicit — this file holds the token.
-	if err := f.Chmod(0o600); err != nil {
-		f.Close()
-		os.Remove(f.Name())
-		return "", err
-	}
-	if _, err := f.WriteString(buildMCPConfig(url, token)); err != nil {
-		f.Close()
-		os.Remove(f.Name())
-		return "", err
-	}
-	if err := f.Close(); err != nil {
-		os.Remove(f.Name())
-		return "", err
-	}
-	return f.Name(), nil
 }
 
 // filePolicy is this invocation's file-tool access policy — the single definition
@@ -249,14 +216,10 @@ func (c *claudeResponder) filePolicy(req RespondRequest) hookFilePolicy {
 	} else if req.UsageLogPath != "" {
 		readDeny = append(readDeny, req.UsageLogPath)
 	}
-	// The per-invocation --mcp-config file holds the capability token, so the model
-	// must never read it: add it to the absolute Deny (the hook denies the Read tool;
-	// the sandbox denyRead is set alongside in buildArgs).
-	deny := c.denyPaths
-	if req.MCPConfigPath != "" {
-		deny = append(append([]string(nil), c.denyPaths...), req.MCPConfigPath)
-	}
-	return hookFilePolicy{WriteRoots: writeRoots, ReadAllow: readAllow, ReadDeny: readDeny, Deny: deny}
+	// The MCP capability token rides an env var (mcpTokenEnv), not a per-invocation
+	// file, so there is nothing invocation-specific to deny here — Deny is just the
+	// absolute set (host secrets + bot token + operator deny_reads).
+	return hookFilePolicy{WriteRoots: writeRoots, ReadAllow: readAllow, ReadDeny: readDeny, Deny: c.denyPaths}
 }
 
 // env assembles the responder process environment: the inherited env, the
@@ -291,6 +254,16 @@ func (c *claudeResponder) env(req RespondRequest) []string {
 		// dispatcher's RemoveAll cleans it (instead of accumulating in /tmp/claude-<uid>).
 		"TMPDIR="+req.DocDir,
 	)
+	if req.MCPToken != "" {
+		// This invocation's MCP route capability token, in the parent's env only. claude
+		// expands it into the inline --mcp-config Authorization header (Bearer
+		// ${AK_TGCLAUDE_MCP_TOKEN}) at MCP-init time; the scaffold's credentials.envVars
+		// deny scrubs it from the model's own sandboxed Bash (see mcpTokenEnv). So the
+		// token binds the route without ever entering argv, a config file, or the model's
+		// shell — and a parallel responder cannot read it (its Bash is in a separate
+		// pid-ns and cannot reach this claude's /proc/<pid>/environ).
+		out = append(out, mcpTokenEnv+"="+req.MCPToken)
+	}
 	// The hook's file-tool policy as JSON — the single source the hook decodes (and
 	// the sandbox mirrors via allowWrite). A marshal failure (never for a []string
 	// struct) simply omits it, and the hook then fail-safe-denies the file tools.
@@ -435,8 +408,9 @@ func buildPrompt(project string, req RespondRequest) string {
 // generated scaffold governs sandbox/permissions/hooks, runs headless
 // deny-by-default (--permission-mode dontAsk) so an unmatched tool is denied
 // rather than hung on, wires the dispatcher's MCP server as the ONLY MCP source
-// (--mcp-config with the inline config JSON — the token rides in its
-// Authorization header, out of the model's context — plus --strict-mcp-config)
+// (--mcp-config with inline config JSON whose Authorization header references the
+// token by env var — the unsandboxed parent expands it, out of the model's context
+// and out of argv — plus --strict-mcp-config)
 // and permits its send tools (--allowedTools; their availability comes from the
 // agent's tools: frontmatter), and overlays a per-invocation --settings that
 // grants write to just this invocation's outbox (merged on top of the static
@@ -458,7 +432,7 @@ func (c *claudeResponder) buildArgs(req RespondRequest) []string {
 	if c.debug {
 		args = append(args, "--debug")
 	}
-	if req.MCPConfigPath != "" {
+	if req.MCPURL != "" && req.MCPToken != "" {
 		// --allowedTools carries the tg send tools, the Skill tool, and any operator
 		// extras verbatim — a scoped WebFetch(domain:X) keeps its scope here (permission
 		// gate). The agent's tools: frontmatter is built from the SAME combineTools list
@@ -469,20 +443,22 @@ func (c *claudeResponder) buildArgs(req RespondRequest) []string {
 		// lets the project settings drop the allow list entirely (an allow list also
 		// trips Claude Code's untrusted-workspace warning). Grep/Glob are NOT granted —
 		// they were removed as built-in tools in a Claude Code regression (bash rg/find
-		// instead), so listing them was a no-op. --mcp-config is a FILE (not inline JSON)
-		// so the token stays out of argv; see writeMCPConfigFile.
+		// instead), so listing them was a no-op. --mcp-config is inline JSON whose
+		// Authorization header carries only the env-var reference (Bearer
+		// ${AK_TGCLAUDE_MCP_TOKEN}, see buildMCPConfig); the parent expands it from its
+		// env, so the literal token never enters argv (/proc/<pid>/cmdline).
 		base := append(append([]string{}, mcpTools...), "Skill")
 		args = append(args,
-			"--mcp-config", req.MCPConfigPath,
+			"--mcp-config", buildMCPConfig(req.MCPURL, mcpTokenEnv),
 			"--strict-mcp-config",
 			"--allowedTools", strings.Join(combineTools(base, c.extraTools), ","),
 		)
 	}
 	// The sandbox's writable roots ARE the hook's writeRoots — one source, so a
-	// future writable location flows to Bash and the file tools together. The
-	// per-invocation --mcp-config file is denyRead here too, so sandboxed Bash cannot
-	// read the token (the hook's Deny already blocks the Read tool).
-	if s := buildInvocationSettings(c.filePolicy(req).WriteRoots, req.TranscriptScope, req.UsageLogPath, req.UsageLogOwner, req.MCPConfigPath); s != "" {
+	// future writable location flows to Bash and the file tools together. (The MCP
+	// token is an env var now, scrubbed via the scaffold's credentials.envVars deny —
+	// there is no per-invocation config file to denyRead here.)
+	if s := buildInvocationSettings(c.filePolicy(req).WriteRoots, req.TranscriptScope, req.UsageLogPath, req.UsageLogOwner); s != "" {
 		args = append(args, "--settings", s)
 	}
 	if c.agent != "" {

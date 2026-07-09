@@ -508,7 +508,7 @@ func TestMCPWrongPath404(t *testing.T) {
 }
 
 func TestBuildMCPConfig(t *testing.T) {
-	cfg := buildMCPConfig("http://127.0.0.1:1234/mcp", "tok123")
+	cfg := buildMCPConfig("http://127.0.0.1:1234/mcp", mcpTokenEnv)
 	var parsed struct {
 		MCPServers map[string]struct {
 			Type    string            `json:"type"`
@@ -523,8 +523,11 @@ func TestBuildMCPConfig(t *testing.T) {
 	if !ok || s.Type != "http" || s.URL != "http://127.0.0.1:1234/mcp" {
 		t.Fatalf("config wrong: %s", cfg)
 	}
-	if s.Headers["Authorization"] != "Bearer tok123" {
-		t.Errorf("auth header wrong: %v", s.Headers)
+	// The header references the token by ENV VAR (expanded by the claude parent at
+	// MCP-init time); the literal token is never passed to buildMCPConfig, so it can
+	// never appear in the inline config that lands in argv.
+	if s.Headers["Authorization"] != "Bearer ${"+mcpTokenEnv+"}" {
+		t.Errorf("auth header should be the env-ref, got: %v", s.Headers)
 	}
 }
 

@@ -672,15 +672,21 @@ func toolError(text string) map[string]any {
 }
 
 // buildMCPConfig returns the inline --mcp-config JSON wiring the responder to the
-// dispatcher's MCP server with this invocation's capability token in the
-// Authorization header. Claude Code attaches the header to every MCP request.
-func buildMCPConfig(url, token string) string {
+// dispatcher's MCP server. The Authorization header references the capability token
+// by ENV VAR (Bearer ${tokenEnvVar}), which the unsandboxed claude parent expands
+// from its process env at MCP-init time (fixed in Claude Code #51581; verified on
+// 2.1.205) — so the literal token never enters argv (/proc/<pid>/cmdline) nor a
+// config file; only the env-var NAME does. The value is set in the parent's env
+// (responder.env, mcpTokenEnv) and scrubbed from the model's own Bash by the
+// scaffold's credentials.envVars deny. Claude Code attaches the (expanded) header to
+// every MCP request.
+func buildMCPConfig(url, tokenEnvVar string) string {
 	cfg := map[string]any{
 		"mcpServers": map[string]any{
 			mcpServerName: map[string]any{
 				"type":    "http",
 				"url":     url,
-				"headers": map[string]any{"Authorization": "Bearer " + token},
+				"headers": map[string]any{"Authorization": "Bearer ${" + tokenEnvVar + "}"},
 			},
 		},
 	}

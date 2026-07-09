@@ -54,7 +54,8 @@ func TestBuildSettingsShape(t *testing.T) {
 			t.Errorf("credentials.files entry not deny: %+v", f)
 		}
 	}
-	if len(s.Sandbox.Credentials.EnvVars) != 3 || s.Sandbox.Credentials.EnvVars[0].Mode != "deny" {
+	// Always-scrubbed: the 3 ambient auth secrets + this bot's MCP route token.
+	if len(s.Sandbox.Credentials.EnvVars) != 4 || s.Sandbox.Credentials.EnvVars[0].Mode != "deny" {
 		t.Errorf("credentials.envVars = %+v", s.Sandbox.Credentials.EnvVars)
 	}
 
@@ -330,9 +331,9 @@ func TestBuildSettingsDenyEnvsAdditive(t *testing.T) {
 		}
 		names = append(names, e.Name)
 	}
-	// defaults first (3), then the new MY_SECRET; the duplicate ANTHROPIC_API_KEY
-	// is dropped.
-	want := []string{"ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN", "MY_SECRET"}
+	// defaults first (3), then the always-on MCP route token, then the new MY_SECRET;
+	// the duplicate ANTHROPIC_API_KEY is dropped.
+	want := []string{"ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN", mcpTokenEnv, "MY_SECRET"}
 	if len(names) != len(want) {
 		t.Fatalf("deny env names = %v, want %v", names, want)
 	}

@@ -3,36 +3,51 @@ package main
 import (
 	"context"
 	"encoding/json"
-	"os"
 	"strings"
 	"testing"
 	"time"
 )
 
-// TestWriteMCPConfigFileAndDeny is the M3 regression: the capability token is written
-// to a 0600 file (not argv), and that file is added to the responder's Deny so the
-// model's Read tool cannot read it (the sandbox denyRead is asserted in TestBuildArgs).
-func TestWriteMCPConfigFileAndDeny(t *testing.T) {
-	path, err := writeMCPConfigFile("http://127.0.0.1:9/mcp", "seekrit")
-	if err != nil {
-		t.Fatal(err)
+// TestMCPTokenRidesEnvNotFile is the file→env migration invariant: the capability
+// token is carried in the parent's env (mcpTokenEnv), NOT written to a config file;
+// the inline --mcp-config references it by env var, so the literal token never
+// enters argv or the disk. This replaces the old 0600-file transport (M3), whose
+// file sat in the shared /tmp under one UID and only denied its OWN reader — a
+// parallel responder could read a sibling's token file and hijack its route. The
+// env-ref removes that whole file-hole class; cross-instance reads of the value are
+// blocked by the sandbox pid-ns (a sibling's Bash cannot reach this claude's
+// /proc/<pid>/environ) plus the credentials.envVars scrub asserted in TestMaterialize.
+func TestMCPTokenRidesEnvNotFile(t *testing.T) {
+	c := &claudeResponder{project: "/proj", denyPaths: []string{"/cfg/bot.toml"}}
+	req := RespondRequest{DocDir: "/o/x", MCPURL: "http://127.0.0.1:9/mcp", MCPToken: "seekrit"}
+
+	// The token VALUE is in the parent's env, under mcpTokenEnv (the parent expands it
+	// into the Authorization header; the model's sandboxed Bash has it scrubbed).
+	var tokenEnv string
+	for _, kv := range c.env(req) {
+		if strings.HasPrefix(kv, mcpTokenEnv+"=") {
+			tokenEnv = strings.TrimPrefix(kv, mcpTokenEnv+"=")
+		}
 	}
-	defer os.Remove(path)
-	fi, err := os.Stat(path)
-	if err != nil {
-		t.Fatal(err)
+	if tokenEnv != "seekrit" {
+		t.Errorf("%s = %q, want the token value in the parent env", mcpTokenEnv, tokenEnv)
 	}
-	if fi.Mode().Perm() != 0o600 {
-		t.Errorf("mcp config file mode = %o, want 600", fi.Mode().Perm())
+
+	// The inline config references the token by env var — never embeds the literal.
+	cfg := buildMCPConfig(req.MCPURL, mcpTokenEnv)
+	if !strings.Contains(cfg, "${"+mcpTokenEnv+"}") {
+		t.Errorf("config should reference the token by env var, got: %s", cfg)
 	}
-	b, _ := os.ReadFile(path)
-	if !strings.Contains(string(b), "seekrit") || !strings.Contains(string(b), "127.0.0.1:9") {
-		t.Errorf("mcp config file content wrong: %s", b)
+	if strings.Contains(cfg, "seekrit") {
+		t.Errorf("config must not embed the literal token: %s", cfg)
 	}
-	c := &claudeResponder{denyPaths: []string{"/cfg/bot.toml"}}
-	pol := c.filePolicy(RespondRequest{DocDir: "/o/x", MCPConfigPath: path})
-	if !strings.Contains(strings.Join(pol.Deny, ","), path) {
-		t.Errorf("mcp config path not in Deny: %v", pol.Deny)
+	if !strings.Contains(cfg, "127.0.0.1:9") {
+		t.Errorf("config should carry the MCP url: %s", cfg)
+	}
+
+	// Deny is just the absolute set — there is no per-invocation config file to deny.
+	if strings.Join(c.filePolicy(req).Deny, ",") != "/cfg/bot.toml" {
+		t.Errorf("Deny should be only the absolute set, got: %v", c.filePolicy(req).Deny)
 	}
 }
 
@@ -107,30 +122,33 @@ func TestBuildArgs(t *testing.T) {
 
 	got := (&claudeResponder{agent: "eputs-telegram-guide"}).buildArgs(RespondRequest{
 		SessionID: "sess-7", DocDir: "/run/out/outbox-A1",
-		MCPURL: "http://127.0.0.1:9/mcp", MCPToken: "tok9", MCPConfigPath: "/tmp/mcp9.json",
+		MCPURL: "http://127.0.0.1:9/mcp", MCPToken: "tok9",
 	})
 	joined := strings.Join(got, " ")
-	// MCP wiring: --mcp-config points at the 0600 FILE (the token stays out of argv),
-	// strict-only, and the send tools permitted under dontAsk.
-	if !strings.Contains(joined, "--mcp-config /tmp/mcp9.json") || !strings.Contains(joined, "--strict-mcp-config") {
-		t.Errorf("expected MCP config file arg: %q", joined)
+	// MCP wiring: --mcp-config is inline JSON referencing the token by env var
+	// (Bearer ${AK_TGCLAUDE_MCP_TOKEN}), strict-only, send tools permitted under dontAsk.
+	if !strings.Contains(joined, "--mcp-config ") || !strings.Contains(joined, "--strict-mcp-config") {
+		t.Errorf("expected inline --mcp-config: %q", joined)
 	}
-	// The capability token / its header must NOT appear in argv (that was the
-	// /proc/<pid>/cmdline leak M3 closes).
-	if strings.Contains(joined, "tok9") || strings.Contains(joined, "Bearer") {
-		t.Errorf("token must not be in argv: %q", joined)
+	if !strings.Contains(joined, "${"+mcpTokenEnv+"}") || !strings.Contains(joined, "127.0.0.1:9/mcp") {
+		t.Errorf("inline config should carry the env-ref and the url: %q", joined)
+	}
+	// The LITERAL token must NOT appear in argv (that was the /proc/<pid>/cmdline leak —
+	// the header now carries only the env-var NAME, expanded by the parent at runtime).
+	if strings.Contains(joined, "tok9") {
+		t.Errorf("literal token must not be in argv: %q", joined)
 	}
 	if !strings.Contains(joined, "--allowedTools mcp__tg__send_message,mcp__tg__send_code,mcp__tg__send_document") {
 		t.Errorf("expected --allowedTools with the send tools: %q", joined)
 	}
-	// A --settings overlay scopes sandbox access to that outbox, before --agent/--resume,
-	// and denyReads the mcp-config file so sandboxed Bash cannot read the token either.
+	// A --settings overlay scopes sandbox access to that outbox, before --agent/--resume.
+	// There is no per-invocation config file now, so the overlay carries no denyRead.
 	if !strings.Contains(joined, `"allowWrite":["/run/out/outbox-A1"]`) ||
 		!strings.Contains(joined, `"allowRead":["/run/out/outbox-A1"]`) {
 		t.Errorf("overlay missing per-invocation sandbox grants: %q", joined)
 	}
-	if !strings.Contains(joined, `"denyRead":["/tmp/mcp9.json"]`) {
-		t.Errorf("overlay should denyRead the mcp-config file: %q", joined)
+	if strings.Contains(joined, `"denyRead"`) {
+		t.Errorf("overlay should carry no denyRead (the mcp-config file is gone): %q", joined)
 	}
 	if !strings.HasSuffix(joined, "--agent eputs-telegram-guide --resume sess-7") {
 		t.Errorf("agent/resume should come last: %q", joined)
@@ -161,7 +179,7 @@ func TestBuildArgsExtraTools(t *testing.T) {
 	// Operator extra tools join --allowedTools after the send tools, deduped; a
 	// duplicate of a send tool is not repeated.
 	got := strings.Join((&claudeResponder{extraTools: []string{"Agent", "WebFetch", "mcp__tg__send_message"}}).
-		buildArgs(RespondRequest{MCPURL: "http://127.0.0.1:9/mcp", MCPToken: "tok", MCPConfigPath: "/tmp/m.json"}), " ")
+		buildArgs(RespondRequest{MCPURL: "http://127.0.0.1:9/mcp", MCPToken: "tok"}), " ")
 	want := "--allowedTools mcp__tg__send_message,mcp__tg__send_code,mcp__tg__send_document,Skill,Agent,WebFetch"
 	if !strings.Contains(got, want) {
 		t.Errorf("extra tools not merged into --allowedTools\nwant substring: %q\ngot: %q", want, got)
@@ -174,7 +192,7 @@ func TestBuildArgsScopedToolKeepsScope(t *testing.T) {
 	// of the same verb are BOTH kept as distinct permission rules — the opposite of
 	// the frontmatter, which collapses them to one bare name.
 	got := strings.Join((&claudeResponder{extraTools: []string{"WebFetch(domain:github.com)", "WebFetch(domain:*.github.com)"}}).
-		buildArgs(RespondRequest{MCPURL: "http://127.0.0.1:9/mcp", MCPToken: "tok", MCPConfigPath: "/tmp/m.json"}), " ")
+		buildArgs(RespondRequest{MCPURL: "http://127.0.0.1:9/mcp", MCPToken: "tok"}), " ")
 	want := "--allowedTools mcp__tg__send_message,mcp__tg__send_code,mcp__tg__send_document,Skill,WebFetch(domain:github.com),WebFetch(domain:*.github.com)"
 	if !strings.Contains(got, want) {
 		t.Errorf("scoped tools not kept verbatim in --allowedTools\nwant substring: %q\ngot: %q", want, got)
